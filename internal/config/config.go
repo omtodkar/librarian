@@ -25,8 +25,7 @@ type ChunkingConfig struct {
 
 func Load() *Config {
 	cfg := &Config{
-		DocsDir:   "docs",
-		HelixHost: "http://localhost:6969",
+		DocsDir: "docs",
 		Embedding: EmbeddingConfig{
 			Provider: "helix",
 		},
@@ -43,6 +42,11 @@ func Load() *Config {
 
 	if host := viper.GetString("helix_host"); host != "" {
 		cfg.HelixHost = host
+	}
+
+	// Fall back to default if no helix_host was set via config, env, or flag
+	if cfg.HelixHost == "" {
+		cfg.HelixHost = "http://localhost:6969"
 	}
 
 	return cfg

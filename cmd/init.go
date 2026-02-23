@@ -2,13 +2,20 @@ package cmd
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"librarian/db"
+)
+
+var (
+	initPort int
+	initName string
 )
 
 var initCmd = &cobra.Command{
@@ -18,26 +25,44 @@ var initCmd = &cobra.Command{
 }
 
 func init() {
+	initCmd.Flags().IntVar(&initPort, "port", 0, "HelixDB port (default: derived from project directory)")
+	initCmd.Flags().StringVar(&initName, "name", "", "Project name (default: directory basename)")
 	rootCmd.AddCommand(initCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
 	libDir := ".librarian"
 
+	absDir, err := filepath.Abs(".")
+	if err != nil {
+		return fmt.Errorf("resolving working directory: %w", err)
+	}
+
+	projectName := initName
+	if projectName == "" {
+		projectName = filepath.Base(absDir)
+	}
+
+	port := initPort
+	if port == 0 {
+		port = derivePort(absDir)
+	}
+
 	// Create .librarian directory structure
 	if err := os.MkdirAll(filepath.Join(libDir, "db"), 0755); err != nil {
 		return fmt.Errorf("creating .librarian directory: %w", err)
 	}
 
-	// Write helix.toml
-	helixToml := `[project]
-name = "librarian"
+	// Write helix.toml with derived project name and port
+	helixToml := fmt.Sprintf(`[project]
+name = "%s"
 queries = "./db/"
 
 [local.dev]
-port = 6969
+port = %d
 build_mode = "dev"
-`
+`, projectName, port)
+
 	if err := os.WriteFile(filepath.Join(libDir, "helix.toml"), []byte(helixToml), 0644); err != nil {
 		return fmt.Errorf("writing helix.toml: %w", err)
 	}
@@ -60,7 +85,13 @@ build_mode = "dev"
 		return fmt.Errorf("writing queries.hx: %w", err)
 	}
 
-	fmt.Println("Created .librarian/ directory with HelixDB configuration")
+	// Write helix_host to .librarian.yaml so all commands use the correct port
+	helixHost := fmt.Sprintf("http://localhost:%d", port)
+	if err := writeHelixHostToConfig(helixHost); err != nil {
+		return fmt.Errorf("writing .librarian.yaml: %w", err)
+	}
+
+	fmt.Printf("Created .librarian/ directory (project: %s, port: %d)\n", projectName, port)
 
 	// Deploy to HelixDB
 	fmt.Println("Deploying schema to HelixDB...")
@@ -77,4 +108,32 @@ build_mode = "dev"
 
 	fmt.Println("Schema deployed successfully!")
 	return nil
+}
+
+// derivePort produces a deterministic port from a directory path,
+// mapped to the range 6970–7969.
+func derivePort(dir string) int {
+	h := fnv.New32a()
+	h.Write([]byte(dir))
+	return 6970 + int(h.Sum32()%1000)
+}
+
+// writeHelixHostToConfig creates or updates .librarian.yaml, setting
+// only the helix_host field while preserving any other existing fields.
+func writeHelixHostToConfig(helixHost string) error {
+	configPath := ".librarian.yaml"
+
+	existing := make(map[string]interface{})
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		yaml.Unmarshal(data, &existing)
+	}
+
+	existing["helix_host"] = helixHost
+
+	out, err := yaml.Marshal(existing)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, out, 0644)
 }
