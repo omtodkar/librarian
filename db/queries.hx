@@ -23,14 +23,14 @@ QUERY delete_document(doc_id: ID) =>
 
 // DocChunk operations
 
-QUERY add_chunk(content: String, file_path: String, section_heading: String, section_hierarchy: String, chunk_index: U32, token_count: U32, doc_id: ID) =>
-    chunk <- AddV<DocChunk>(Embed(content), {file_path: file_path, section_heading: section_heading, section_hierarchy: section_hierarchy, chunk_index: chunk_index, content: content, token_count: token_count})
+QUERY add_chunk(vector: [F64], content: String, file_path: String, section_heading: String, section_hierarchy: String, chunk_index: U32, token_count: U32, doc_id: ID) =>
+    chunk <- AddV<DocChunk>(vector, {file_path: file_path, section_heading: section_heading, section_hierarchy: section_hierarchy, chunk_index: chunk_index, content: content, token_count: token_count})
     doc <- N<Document>(doc_id)
     AddE<HasChunk>::From(doc)::To(chunk)
     RETURN chunk
 
-QUERY search_chunks(query: String, limit: I64) =>
-    chunks <- SearchV<DocChunk>(Embed(query), limit)
+QUERY search_chunks(vector: [F64], limit: I64) =>
+    chunks <- SearchV<DocChunk>(vector, limit)
     RETURN chunks
 
 QUERY get_chunks_for_document(doc_id: ID) =>
@@ -56,8 +56,8 @@ QUERY get_referenced_code_files(doc_id: ID) =>
 QUERY add_reference(doc_id: ID, code_file_id: ID, context: String) =>
     doc <- N<Document>(doc_id)
     code_file <- N<CodeFile>(code_file_id)
-    ref <- AddE<References>({context: context})::From(doc)::To(code_file)
-    RETURN ref
+    reference <- AddE<References>({context: context})::From(doc)::To(code_file)
+    RETURN reference
 
 // Related document edges
 

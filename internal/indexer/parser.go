@@ -142,10 +142,12 @@ func extractText(node ast.Node, source []byte) string {
 }
 
 func extractInlineText(node ast.Node, source []byte, buf *bytes.Buffer) {
-	// Check lines on this node
-	for i := 0; i < node.Lines().Len(); i++ {
-		line := node.Lines().At(i)
-		buf.Write(line.Value(source))
+	// Only block-level nodes support Lines(); inline nodes panic
+	if node.Type() == ast.TypeBlock {
+		for i := 0; i < node.Lines().Len(); i++ {
+			line := node.Lines().At(i)
+			buf.Write(line.Value(source))
+		}
 	}
 
 	// Recurse into children
@@ -164,10 +166,12 @@ func extractInlineText(node ast.Node, source []byte, buf *bytes.Buffer) {
 func extractBlockText(node ast.Node, source []byte) string {
 	var buf bytes.Buffer
 
-	// For nodes with lines (code blocks, etc.)
-	for i := 0; i < node.Lines().Len(); i++ {
-		line := node.Lines().At(i)
-		buf.Write(line.Value(source))
+	// Only block-level nodes support Lines(); inline nodes panic
+	if node.Type() == ast.TypeBlock {
+		for i := 0; i < node.Lines().Len(); i++ {
+			line := node.Lines().At(i)
+			buf.Write(line.Value(source))
+		}
 	}
 
 	if buf.Len() > 0 {

@@ -5,12 +5,14 @@ import (
 	"fmt"
 
 	"librarian/internal/config"
+	"librarian/internal/embedding"
 	helixclient "librarian/internal/helix"
 )
 
 type Indexer struct {
-	client *helixclient.Client
-	cfg    *config.Config
+	client   *helixclient.Client
+	cfg      *config.Config
+	embedder embedding.Embedder
 }
 
 type IndexResult struct {
@@ -21,10 +23,11 @@ type IndexResult struct {
 	Errors           []string
 }
 
-func New(client *helixclient.Client, cfg *config.Config) *Indexer {
+func New(client *helixclient.Client, cfg *config.Config, embedder embedding.Embedder) *Indexer {
 	return &Indexer{
-		client: client,
-		cfg:    cfg,
+		client:   client,
+		cfg:      cfg,
+		embedder: embedder,
 	}
 }
 
@@ -121,7 +124,13 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	}
 
 	for _, chunk := range chunks {
-		_, err := idx.client.AddChunk(helixclient.AddChunkInput{
+		vector, err := idx.embedder.Embed(chunk.EmbeddingText)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("chunk %d embed: %s", chunk.ChunkIndex, err))
+			continue
+		}
+		_, err = idx.client.AddChunk(helixclient.AddChunkInput{
+			Vector:           vector,
 			Content:          chunk.EmbeddingText,
 			FilePath:         file.FilePath,
 			SectionHeading:   chunk.SectionHeading,

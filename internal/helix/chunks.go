@@ -7,13 +7,14 @@ import (
 )
 
 type AddChunkInput struct {
-	Content          string `json:"content"`
-	FilePath         string `json:"file_path"`
-	SectionHeading   string `json:"section_heading"`
-	SectionHierarchy string `json:"section_hierarchy"`
-	ChunkIndex       uint32 `json:"chunk_index"`
-	TokenCount       uint32 `json:"token_count"`
-	DocID            string `json:"doc_id"`
+	Vector           []float64 `json:"vector"`
+	Content          string    `json:"content"`
+	FilePath         string    `json:"file_path"`
+	SectionHeading   string    `json:"section_heading"`
+	SectionHierarchy string    `json:"section_hierarchy"`
+	ChunkIndex       uint32    `json:"chunk_index"`
+	TokenCount       uint32    `json:"token_count"`
+	DocID            string    `json:"doc_id"`
 }
 
 func (c *Client) AddChunk(input AddChunkInput) (*DocChunk, error) {
@@ -29,10 +30,10 @@ func (c *Client) AddChunk(input AddChunkInput) (*DocChunk, error) {
 	return &chunk, nil
 }
 
-func (c *Client) SearchChunks(query string, limit int) ([]DocChunk, error) {
+func (c *Client) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
 	res, err := c.hx.Query("search_chunks", helixdb.WithData(map[string]any{
-		"query": query,
-		"limit": int64(limit),
+		"vector": vector,
+		"limit":  int64(limit),
 	}))
 	if err != nil {
 		return nil, fmt.Errorf("search_chunks: %w", err)

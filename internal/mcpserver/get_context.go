@@ -7,10 +7,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"librarian/internal/embedding"
 	helixclient "librarian/internal/helix"
 )
 
-func registerGetContext(s *server.MCPServer, client *helixclient.Client) {
+func registerGetContext(s *server.MCPServer, client *helixclient.Client, embedder embedding.Embedder) {
 	tool := mcp.NewTool("get_context",
 		mcp.WithDescription("Comprehensive briefing: semantic search combined with graph traversal for related docs and code references. Use this for understanding a topic in depth."),
 		mcp.WithString("query",
@@ -33,8 +34,13 @@ func registerGetContext(s *server.MCPServer, client *helixclient.Client) {
 		}
 		limit := req.GetInt("limit", 5)
 
-		// Step 1: Semantic search for relevant chunks
-		chunks, err := client.SearchChunks(query, limit)
+		// Step 1: Embed query and run semantic search
+		vector, err := embedder.Embed(query)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("embedding query: %v", err)), nil
+		}
+
+		chunks, err := client.SearchChunks(vector, limit)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}

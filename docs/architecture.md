@@ -47,6 +47,9 @@ internal/
   config/
     config.go      Configuration struct, defaults, Viper binding
 
+  embedding/
+    gemini.go      Gemini text-embedding-004 client (Embedder interface)
+
   indexer/
     walker.go      Filesystem walk, file filtering, exclude patterns
     parser.go      Goldmark-based markdown parsing, frontmatter, AST walk
@@ -119,7 +122,7 @@ The HelixDB schema defines three node/vector types and three edge types, forming
 | `References` | `Document` | `CodeFile` | `context` (the source line containing the reference) |
 | `RelatedDoc` | `Document` | `Document` | `relation_type` (e.g. `"shared_code_references"`) |
 
-`DocChunk` is declared as a **vector node** (`V`), which means HelixDB automatically generates embeddings for its content field via `Embed()` and enables vector similarity search.
+`DocChunk` is declared as a **vector node** (`V`), which enables vector similarity search. Embeddings are generated client-side using the Gemini API and passed as raw vectors to HelixDB's `AddV` and `SearchV` operations.
 
 ## Data Flow
 
@@ -139,6 +142,7 @@ When `librarian index` runs, a markdown file moves through four pipeline stages:
       │           overlap between chunks, context header prepended for embedding
       ▼
  4. Store ─────── SHA-256 content hash check (skip if unchanged),
+                  generate Gemini embeddings client-side for each chunk,
                   create Document node + DocChunk vectors + HasChunk edges,
                   extract code references → CodeFile nodes + References edges,
                   build RelatedDoc edges between docs sharing code references
@@ -156,9 +160,9 @@ Fixed-window chunking (e.g., every 512 tokens) splits text without regard for se
 
 Documentation frequently references source files (e.g., `internal/helix/client.go`). Rather than treating these as plain text, Librarian extracts them as structured `CodeFile` nodes connected by `References` edges. This enables the `get_context` tool to traverse the graph: search for chunks, find their source documents, follow `References` edges to discover relevant code files, and follow `RelatedDoc` edges to surface related documentation.
 
-### `Embed()` for zero-config embeddings
+### Client-side Gemini embeddings
 
-HelixDB's vector nodes (`V::DocChunk`) handle embedding generation automatically. When content is stored, HelixDB's `Embed()` function generates the vector embedding without requiring Librarian to call an external embedding API or manage embedding models. This reduces configuration and external dependencies.
+Embedding generation happens client-side using the Gemini `gemini-embedding-001` API (3072 dimensions). The `internal/embedding` package provides an `Embedder` interface with a `GeminiEmbedder` implementation. During indexing, each chunk is embedded before being stored as a raw vector via `AddV`. During search, the query is embedded before being passed to `SearchV`. This avoids requiring an `OPENAI_API_KEY` in the HelixDB Docker container and gives direct control over the embedding model. A `GEMINI_API_KEY` environment variable (or `embedding.api_key` in config) is required.
 
 ### Content hashing for incremental indexing
 

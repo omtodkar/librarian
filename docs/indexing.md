@@ -19,10 +19,10 @@ The indexing pipeline transforms markdown files into searchable vector chunks an
       ▼
  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────────────┐
  │  Walk    │───>│  Parse  │───>│  Chunk  │───>│  Store          │
- │          │    │         │    │         │    │  + Code Refs     │
- │ Find .md │    │ AST +   │    │ Section │    │  + Related Docs  │
- │ files    │    │ front-  │    │ aware   │    │  + Hash Check    │
- │          │    │ matter  │    │ split   │    │                  │
+ │          │    │         │    │         │    │  + Gemini Embed   │
+ │ Find .md │    │ AST +   │    │ Section │    │  + Code Refs     │
+ │ files    │    │ front-  │    │ aware   │    │  + Related Docs  │
+ │          │    │ matter  │    │ split   │    │  + Hash Check    │
  └─────────┘    └─────────┘    └─────────┘    └─────────────────┘
 ```
 

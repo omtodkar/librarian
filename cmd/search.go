@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"librarian/internal/embedding"
 	helixclient "librarian/internal/helix"
 )
 
@@ -31,9 +32,19 @@ func init() {
 func runSearch(cmd *cobra.Command, args []string) error {
 	query := strings.Join(args, " ")
 
+	embedder, err := embedding.NewGeminiEmbedder(cfg.Embedding.APIKey)
+	if err != nil {
+		return fmt.Errorf("creating embedder: %w", err)
+	}
+
+	vector, err := embedder.Embed(query)
+	if err != nil {
+		return fmt.Errorf("embedding query: %w", err)
+	}
+
 	client := helixclient.NewClient(cfg.HelixHost)
 
-	chunks, err := client.SearchChunks(query, searchLimit)
+	chunks, err := client.SearchChunks(vector, searchLimit)
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)
 	}

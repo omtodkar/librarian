@@ -7,10 +7,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"librarian/internal/embedding"
 	helixclient "librarian/internal/helix"
 )
 
-func registerSearchDocs(s *server.MCPServer, client *helixclient.Client) {
+func registerSearchDocs(s *server.MCPServer, client *helixclient.Client, embedder embedding.Embedder) {
 	tool := mcp.NewTool("search_docs",
 		mcp.WithDescription("Semantic search across all indexed documentation. Returns relevant chunks with file paths and section context."),
 		mcp.WithString("query",
@@ -33,7 +34,12 @@ func registerSearchDocs(s *server.MCPServer, client *helixclient.Client) {
 		}
 		limit := req.GetInt("limit", 5)
 
-		chunks, err := client.SearchChunks(query, limit)
+		vector, err := embedder.Embed(query)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("embedding query: %v", err)), nil
+		}
+
+		chunks, err := client.SearchChunks(vector, limit)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}

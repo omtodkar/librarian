@@ -27,7 +27,7 @@ func Load() *Config {
 	cfg := &Config{
 		DocsDir: "docs",
 		Embedding: EmbeddingConfig{
-			Provider: "helix",
+			Provider: "gemini",
 		},
 		Chunking: ChunkingConfig{
 			MaxTokens:    512,

@@ -26,9 +26,9 @@ helix_host: http://localhost:6969
 
 # Embedding configuration
 embedding:
-  provider: helix        # Embedding provider (helix uses built-in Embed())
+  provider: gemini       # Embedding provider (gemini uses text-embedding-004)
   model: ""              # Model name (provider-specific)
-  api_key: ""            # API key (provider-specific)
+  api_key: ""            # API key (or set GEMINI_API_KEY env var)
 
 # Chunking strategy
 chunking:
@@ -58,9 +58,9 @@ exclude_patterns:
 |-------|------|---------|-------------|
 | `docs_dir` | `string` | `"docs"` | Path to the documentation directory (relative to project root) |
 | `helix_host` | `string` | `"http://localhost:6969"` | URL of the HelixDB instance |
-| `embedding.provider` | `string` | `"helix"` | Embedding provider. `"helix"` uses HelixDB's built-in `Embed()` |
+| `embedding.provider` | `string` | `"gemini"` | Embedding provider. `"gemini"` uses Google's text-embedding-004 API |
 | `embedding.model` | `string` | `""` | Model identifier (depends on provider) |
-| `embedding.api_key` | `string` | `""` | API key for external embedding providers |
+| `embedding.api_key` | `string` | `""` | API key for the embedding provider. Falls back to `GEMINI_API_KEY` env var |
 | `chunking.max_tokens` | `int` | `512` | Maximum token count per chunk. Sections exceeding this are split at paragraph boundaries |
 | `chunking.min_tokens` | `int` | `50` | Minimum token count. Chunks below this threshold are discarded |
 | `chunking.overlap_lines` | `int` | `3` | Number of lines from the end of the previous chunk prepended to the next chunk for context continuity |
@@ -75,9 +75,10 @@ All configuration fields can be set via environment variables with the `LIBRARIA
 |----------|-------------|---------|
 | `LIBRARIAN_DOCS_DIR` | `docs_dir` | `LIBRARIAN_DOCS_DIR=documentation` |
 | `LIBRARIAN_HELIX_HOST` | `helix_host` | `LIBRARIAN_HELIX_HOST=http://localhost:8080` |
-| `LIBRARIAN_EMBEDDING_PROVIDER` | `embedding.provider` | `LIBRARIAN_EMBEDDING_PROVIDER=helix` |
+| `LIBRARIAN_EMBEDDING_PROVIDER` | `embedding.provider` | `LIBRARIAN_EMBEDDING_PROVIDER=gemini` |
 | `LIBRARIAN_EMBEDDING_MODEL` | `embedding.model` | `LIBRARIAN_EMBEDDING_MODEL=text-embedding-3-small` |
 | `LIBRARIAN_EMBEDDING_API_KEY` | `embedding.api_key` | `LIBRARIAN_EMBEDDING_API_KEY=sk-...` |
+| `GEMINI_API_KEY` | `embedding.api_key` (fallback) | `GEMINI_API_KEY=AIza...` |
 | `LIBRARIAN_CHUNKING_MAX_TOKENS` | `chunking.max_tokens` | `LIBRARIAN_CHUNKING_MAX_TOKENS=1024` |
 | `LIBRARIAN_CHUNKING_MIN_TOKENS` | `chunking.min_tokens` | `LIBRARIAN_CHUNKING_MIN_TOKENS=100` |
 | `LIBRARIAN_CHUNKING_OVERLAP_LINES` | `chunking.overlap_lines` | `LIBRARIAN_CHUNKING_OVERLAP_LINES=5` |
