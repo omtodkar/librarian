@@ -1,0 +1,16 @@
+# Binary
+librarian
+
+# Runtime
+.librarian/
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
