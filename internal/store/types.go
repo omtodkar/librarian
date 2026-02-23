@@ -1,4 +1,4 @@
-package helix
+package store
 
 import "time"
 
@@ -30,4 +30,26 @@ type CodeFile struct {
 	FilePath         string    `json:"file_path"`
 	Language         string    `json:"language"`
 	LastReferencedAt time.Time `json:"last_referenced_at"`
+}
+
+type AddDocumentInput struct {
+	FilePath    string `json:"file_path"`
+	Title       string `json:"title"`
+	DocType     string `json:"doc_type"`
+	Summary     string `json:"summary"`
+	Headings    string `json:"headings"`
+	Frontmatter string `json:"frontmatter"`
+	ContentHash string `json:"content_hash"`
+	ChunkCount  uint32 `json:"chunk_count"`
+}
+
+type AddChunkInput struct {
+	Vector           []float64 `json:"vector"`
+	Content          string    `json:"content"`
+	FilePath         string    `json:"file_path"`
+	SectionHeading   string    `json:"section_heading"`
+	SectionHierarchy string    `json:"section_hierarchy"`
+	ChunkIndex       uint32    `json:"chunk_index"`
+	TokenCount       uint32    `json:"token_count"`
+	DocID            string    `json:"doc_id"`
 }

@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"librarian/internal/embedding"
-	helixclient "librarian/internal/helix"
+	"librarian/internal/store"
 )
 
 var (
@@ -42,9 +42,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("embedding query: %w", err)
 	}
 
-	client := helixclient.NewClient(cfg.HelixHost)
+	s, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer s.Close()
 
-	chunks, err := client.SearchChunks(vector, searchLimit)
+	chunks, err := s.SearchChunks(vector, searchLimit)
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)
 	}

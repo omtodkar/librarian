@@ -6,17 +6,17 @@ description: System architecture overview covering the data model, data flow, pr
 
 # Architecture
 
-Librarian is a Go CLI that indexes project documentation into [HelixDB](https://helix-db.com) (a graph + vector database) and exposes it to AI coding tools via the [Model Context Protocol](https://modelcontextprotocol.io) (MCP).
+Librarian is a Go CLI that indexes project documentation into an embedded SQLite database with [sqlite-vec](https://github.com/asg017/sqlite-vec) for vector search, and exposes it to AI coding tools via the [Model Context Protocol](https://modelcontextprotocol.io) (MCP).
 
 ## System Overview
 
 ```
- Markdown files          Librarian CLI           HelixDB
+ Markdown files          Librarian CLI           SQLite + sqlite-vec
 ┌──────────────┐    ┌────────────────────┐    ┌──────────────┐
-│ docs/*.md    │───>│  walker / parser   │───>│  Document    │
-│              │    │  chunker / refs    │    │  DocChunk    │
-└──────────────┘    └────────────────────┘    │  CodeFile    │
-                            │                 │  (edges)     │
+│ docs/*.md    │───>│  walker / parser   │───>│  documents   │
+│              │    │  chunker / refs    │    │  doc_chunks  │
+└──────────────┘    └────────────────────┘    │  code_files  │
+                            │                 │  (relations) │
                             │                 └──────┬───────┘
                     ┌───────┴────────┐               │
                     │  MCP Server    │<──────────────-┘
@@ -29,15 +29,15 @@ Librarian is a Go CLI that indexes project documentation into [HelixDB](https://
 
 The CLI has two modes of operation:
 
-1. **`librarian index`** - Walks a docs directory, parses markdown, chunks content, extracts code references, and stores everything in HelixDB.
-2. **`librarian serve`** - Starts an MCP server over stdio that exposes search, retrieval, and update tools backed by HelixDB.
+1. **`librarian index`** - Walks a docs directory, parses markdown, chunks content, extracts code references, and stores everything in SQLite.
+2. **`librarian serve`** - Starts an MCP server over stdio that exposes search, retrieval, and update tools backed by SQLite.
 
 ## Project Structure
 
 ```
 cmd/
   root.go          CLI entrypoint, global flags, Viper config init
-  init.go          `librarian init` - deploy HelixDB schema
+  init.go          `librarian init` - create SQLite database
   index.go         `librarian index` - run the indexing pipeline
   search.go        `librarian search` - CLI vector search
   status.go        `librarian status` - show index statistics
@@ -48,7 +48,7 @@ internal/
     config.go      Configuration struct, defaults, Viper binding
 
   embedding/
-    gemini.go      Gemini text-embedding-004 client (Embedder interface)
+    gemini.go      Gemini embedding client (Embedder interface)
 
   indexer/
     walker.go      Filesystem walk, file filtering, exclude patterns
@@ -57,12 +57,12 @@ internal/
     references.go  Regex-based code file reference extraction
     indexer.go      Orchestrator: hash check, store, build edges
 
-  helix/
-    client.go      HelixDB client (helix-go SDK wrapper)
-    types.go       Go types for Document, DocChunk, CodeFile
+  store/
+    store.go       SQLite database open/close, schema init
+    types.go       Go types for Document, DocChunk, CodeFile, input structs
     documents.go   Document CRUD operations
-    chunks.go      Chunk add/search/list operations
-    codefiles.go   CodeFile + References + RelatedDoc operations
+    chunks.go      Chunk add/search/list operations + vec0 vector storage
+    codefiles.go   CodeFile + refs + related_docs operations
 
   mcpserver/
     server.go          MCP server setup (mcp-go SDK)
@@ -73,56 +73,58 @@ internal/
     update_docs.go     update_docs tool
 
 db/
-  schema.hx        HelixDB schema (embedded at build time)
-  queries.hx       HelixDB query definitions (embedded at build time)
+  migrations.sql   SQLite schema (embedded at build time)
 ```
 
 ## Data Model
 
-The HelixDB schema defines three node/vector types and three edge types, forming a graph that connects documents, their vector chunks, and the code files they reference.
+The SQLite schema uses six tables: three primary entity tables and three relationship tables, using standard relational joins to model the connections between documents, chunks, and code files.
 
 ```
                     ┌──────────────┐
-               ┌───>│   DocChunk   │  (vector node - searchable)
-  HasChunk     │    │              │
+               ┌───>│  doc_chunks  │  (content, linked by doc_id FK)
+  doc_id FK    │    │              │
                │    │ file_path    │
-┌──────────┐───┘    │ section_*    │
-│ Document │        │ content      │
-│          │        │ token_count  │
-│ file_path│        └──────────────┘
-│ title    │
+┌──────────┐───┘    │ section_*    │     ┌──────────────────┐
+│documents │        │ content      │────>│doc_chunk_vectors │
+│          │        │ token_count  │     │ (vec0 virtual)   │
+│ file_path│        └──────────────┘     │ embedding[3072]  │
+│ title    │                             └──────────────────┘
 │ doc_type │───┐    ┌──────────────┐
-│ summary  │   │    │   CodeFile   │
+│ summary  │   │    │  code_files  │
 │ headings │   └───>│              │
-│ content_ │  Refs  │ file_path    │
+│ content_ │  refs  │ file_path    │
 │   hash   │        │ language     │
 │ chunk_   │        └──────────────┘
 │   count  │
 │ indexed_ │
 │   at     │───┐
 └──────────┘   │    ┌──────────────┐
-               └───>│  Document    │
-          RelatedDoc│  (another)   │
+               └───>│  documents   │
+        related_docs│  (another)   │
                     └──────────────┘
 ```
 
-### Node Types
+### Tables
 
-| Type | Kind | Fields |
-|------|------|--------|
-| `Document` | Node (`N`) | `file_path` (indexed), `title`, `doc_type`, `summary`, `headings`, `frontmatter`, `content_hash`, `chunk_count`, `indexed_at` |
-| `DocChunk` | Vector (`V`) | `file_path`, `section_heading`, `section_hierarchy`, `chunk_index`, `content`, `token_count` |
-| `CodeFile` | Node (`N`) | `file_path` (indexed), `language`, `last_referenced_at` |
+| Table | Purpose |
+|-------|---------|
+| `documents` | Document metadata: file path, title, type, content hash, chunk count |
+| `doc_chunks` | Chunk content linked to documents via `doc_id` foreign key |
+| `doc_chunk_vectors` | vec0 virtual table storing float32[3072] embeddings for similarity search |
+| `code_files` | Source files referenced in documentation |
+| `refs` | Junction table connecting documents to code files (with context) |
+| `related_docs` | Junction table connecting documents that share code references |
 
-### Edge Types
+### Key Relationships
 
-| Edge | From | To | Properties |
-|------|------|----|------------|
-| `HasChunk` | `Document` | `DocChunk` | _(none)_ |
-| `References` | `Document` | `CodeFile` | `context` (the source line containing the reference) |
-| `RelatedDoc` | `Document` | `Document` | `relation_type` (e.g. `"shared_code_references"`) |
+| Relationship | Mechanism |
+|-------------|-----------|
+| Document → Chunks | `doc_chunks.doc_id` FK with `ON DELETE CASCADE` |
+| Document → CodeFiles | `refs` junction table |
+| Document → Document | `related_docs` junction table |
 
-`DocChunk` is declared as a **vector node** (`V`), which enables vector similarity search. Embeddings are generated client-side using the Gemini API and passed as raw vectors to HelixDB's `AddV` and `SearchV` operations.
+`doc_chunk_vectors` is a **vec0 virtual table** that enables vector similarity search. Embeddings are generated client-side using the Gemini API and stored as float32 arrays. The `MATCH` operator performs KNN search.
 
 ## Data Flow
 
@@ -143,26 +145,30 @@ When `librarian index` runs, a markdown file moves through four pipeline stages:
       ▼
  4. Store ─────── SHA-256 content hash check (skip if unchanged),
                   generate Gemini embeddings client-side for each chunk,
-                  create Document node + DocChunk vectors + HasChunk edges,
-                  extract code references → CodeFile nodes + References edges,
-                  build RelatedDoc edges between docs sharing code references
+                  INSERT into documents + doc_chunks + doc_chunk_vectors,
+                  extract code references → INSERT into code_files + refs,
+                  build related_docs entries for docs sharing code references
 ```
 
 See [Indexing Pipeline](indexing.md) for full details on each stage.
 
 ## Key Design Decisions
 
+### Embedded SQLite + sqlite-vec
+
+SQLite with the sqlite-vec extension provides an embedded single-file database with vector search, eliminating external dependencies like Docker or separate database servers. The database file lives at `.librarian/librarian.db` and is created automatically by `librarian init`.
+
 ### Section-aware chunking over fixed-window
 
 Fixed-window chunking (e.g., every 512 tokens) splits text without regard for semantic boundaries, producing chunks that start mid-paragraph or mid-section. Librarian instead splits at H2 heading boundaries, keeping each section as a coherent unit. When a section exceeds `max_tokens`, it falls back to splitting at paragraph boundaries (`\n\n`). This produces chunks that align with how authors organize information.
 
-### Graph edges for code references
+### Relational tables for graph-like edges
 
-Documentation frequently references source files (e.g., `internal/helix/client.go`). Rather than treating these as plain text, Librarian extracts them as structured `CodeFile` nodes connected by `References` edges. This enables the `get_context` tool to traverse the graph: search for chunks, find their source documents, follow `References` edges to discover relevant code files, and follow `RelatedDoc` edges to surface related documentation.
+Documentation frequently references source files (e.g., `internal/store/store.go`). Rather than treating these as plain text, Librarian extracts them as structured `code_files` rows connected via `refs`. This enables the `get_context` tool to join across tables: search for chunks, find their source documents, join to `refs` to discover relevant code files, and join to `related_docs` to surface related documentation.
 
 ### Client-side Gemini embeddings
 
-Embedding generation happens client-side using the Gemini `gemini-embedding-001` API (3072 dimensions). The `internal/embedding` package provides an `Embedder` interface with a `GeminiEmbedder` implementation. During indexing, each chunk is embedded before being stored as a raw vector via `AddV`. During search, the query is embedded before being passed to `SearchV`. This avoids requiring an `OPENAI_API_KEY` in the HelixDB Docker container and gives direct control over the embedding model. A `GEMINI_API_KEY` environment variable (or `embedding.api_key` in config) is required.
+Embedding generation happens client-side using the Gemini `gemini-embedding-001` API (3072 dimensions). The `internal/embedding` package provides an `Embedder` interface with a `GeminiEmbedder` implementation. During indexing, each chunk is embedded and the resulting float64 vector is converted to float32 before being stored in the vec0 virtual table. During search, the query is embedded and matched against stored vectors using sqlite-vec's KNN search.
 
 ### Content hashing for incremental indexing
 

@@ -4,7 +4,7 @@ import "github.com/spf13/viper"
 
 type Config struct {
 	DocsDir          string          `mapstructure:"docs_dir"`
-	HelixHost        string          `mapstructure:"helix_host"`
+	DBPath           string          `mapstructure:"db_path"`
 	Embedding        EmbeddingConfig `mapstructure:"embedding"`
 	Chunking         ChunkingConfig  `mapstructure:"chunking"`
 	CodeFilePatterns []string        `mapstructure:"code_file_patterns"`
@@ -26,6 +26,7 @@ type ChunkingConfig struct {
 func Load() *Config {
 	cfg := &Config{
 		DocsDir: "docs",
+		DBPath:  ".librarian/librarian.db",
 		Embedding: EmbeddingConfig{
 			Provider: "gemini",
 		},
@@ -40,13 +41,13 @@ func Load() *Config {
 
 	viper.Unmarshal(cfg)
 
-	if host := viper.GetString("helix_host"); host != "" {
-		cfg.HelixHost = host
+	if dbPath := viper.GetString("db_path"); dbPath != "" {
+		cfg.DBPath = dbPath
 	}
 
-	// Fall back to default if no helix_host was set via config, env, or flag
-	if cfg.HelixHost == "" {
-		cfg.HelixHost = "http://localhost:6969"
+	// Fall back to default if no db_path was set via config, env, or flag
+	if cfg.DBPath == "" {
+		cfg.DBPath = ".librarian/librarian.db"
 	}
 
 	return cfg

@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	helixclient "librarian/internal/helix"
+	"librarian/internal/store"
 )
 
 var statusJSON bool
@@ -23,9 +23,13 @@ func init() {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	client := helixclient.NewClient(cfg.HelixHost)
+	s, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer s.Close()
 
-	docs, err := client.ListDocuments()
+	docs, err := s.ListDocuments()
 	if err != nil {
 		return fmt.Errorf("listing documents: %w", err)
 	}
@@ -37,7 +41,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	if statusJSON {
 		out, _ := json.MarshalIndent(map[string]any{
-			"helix_host":     cfg.HelixHost,
+			"db_path":        cfg.DBPath,
 			"document_count": len(docs),
 			"chunk_count":    totalChunks,
 			"documents":      docs,
@@ -47,9 +51,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Librarian Index Status\n")
+	fmt.Printf("  Database:  %s\n", cfg.DBPath)
 	fmt.Printf("  Documents: %d\n", len(docs))
 	fmt.Printf("  Chunks:    %d\n", totalChunks)
-	fmt.Printf("  HelixDB:   %s\n", cfg.HelixHost)
 
 	if len(docs) > 0 {
 		fmt.Printf("\nDocuments:\n")

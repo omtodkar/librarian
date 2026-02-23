@@ -6,8 +6,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"librarian/internal/embedding"
-	helixclient "librarian/internal/helix"
 	"librarian/internal/mcpserver"
+	"librarian/internal/store"
 )
 
 var serveCmd = &cobra.Command{
@@ -26,6 +26,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating embedder: %w", err)
 	}
 
-	client := helixclient.NewClient(cfg.HelixHost)
-	return mcpserver.Serve(client, cfg, embedder)
+	s, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer s.Close()
+
+	return mcpserver.Serve(s, cfg, embedder)
 }

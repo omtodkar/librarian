@@ -8,8 +8,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"librarian/internal/embedding"
-	helixclient "librarian/internal/helix"
 	"librarian/internal/indexer"
+	"librarian/internal/store"
 )
 
 var (
@@ -52,8 +52,13 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating embedder: %w", err)
 	}
 
-	client := helixclient.NewClient(cfg.HelixHost)
-	idx := indexer.New(client, cfg, embedder)
+	s, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer s.Close()
+
+	idx := indexer.New(s, cfg, embedder)
 
 	if !indexJSON {
 		fmt.Printf("Indexing documents from %s...\n", absDir)

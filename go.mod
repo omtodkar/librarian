@@ -3,8 +3,10 @@ module librarian
 go 1.25.0
 
 require (
-	github.com/HelixDB/helix-go v0.0.0-20251213144938-f8d7f5af55b0
+	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.44.0
+	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/yuin/goldmark v1.7.16
@@ -16,7 +18,6 @@ require (
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect

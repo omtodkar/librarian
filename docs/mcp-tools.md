@@ -61,7 +61,7 @@ Semantic vector search across all indexed documentation chunks. Returns the most
 | `query` | `string` | yes | - | Natural language search query |
 | `limit` | `number` | no | `5` | Maximum results to return (1-20) |
 
-**Behavior:** Calls `SearchChunks` which performs a vector similarity search against `DocChunk` embeddings in HelixDB. Results are ranked by semantic similarity.
+**Behavior:** Calls `SearchChunks` which performs a vector similarity search against chunk embeddings in the `doc_chunk_vectors` table via sqlite-vec. Results are ranked by semantic similarity.
 
 **Annotations:** Read-only.
 
@@ -93,7 +93,7 @@ Access tokens expire after 1 hour. Refresh tokens are rotated on each use...
 
 ### `get_document`
 
-Reads the full content of a document from disk and enriches it with metadata from HelixDB (title, type, chunk count).
+Reads the full content of a document from disk and enriches it with metadata from the database (title, type, chunk count).
 
 **Parameters:**
 
@@ -101,7 +101,7 @@ Reads the full content of a document from disk and enriches it with metadata fro
 |------|------|----------|---------|-------------|
 | `file_path` | `string` | yes | - | File path of the document (e.g., `docs/auth.md`) |
 
-**Behavior:** Resolves the file path to an absolute path, reads the file from disk, and looks up the document in HelixDB for metadata. If the document is not indexed, the raw file content is still returned.
+**Behavior:** Resolves the file path to an absolute path, reads the file from disk, and looks up the document in the database for metadata. If the document is not indexed, the raw file content is still returned.
 
 **Annotations:** Read-only.
 
@@ -126,7 +126,7 @@ The login flow uses OAuth 2.0 with PKCE...
 
 ### `get_context`
 
-Comprehensive intelligence briefing that combines semantic search with graph traversal. This is the most powerful tool - use it when you need to deeply understand a topic.
+Comprehensive intelligence briefing that combines semantic search with relational joins. This is the most powerful tool - use it when you need to deeply understand a topic.
 
 **Parameters:**
 
@@ -140,8 +140,8 @@ Comprehensive intelligence briefing that combines semantic search with graph tra
 1. **Semantic search** - Vector search for relevant chunks matching the query
 2. **Primary sources** - Display the matched chunks with file path and section context
 3. **Source documents** - Collect the unique parent documents of matched chunks, showing their type and title
-4. **Referenced code files** - Traverse `References` edges from source documents to find code files they mention, with language annotations
-5. **Related documentation** - Traverse `RelatedDoc` edges to surface other documents that share code references with the source documents
+4. **Referenced code files** - Join through the `refs` table from source documents to find code files they mention, with language annotations
+5. **Related documentation** - Join through the `related_docs` table to surface other documents that share code references with the source documents
 
 **Annotations:** Read-only.
 
@@ -185,7 +185,7 @@ Lists all indexed documents with metadata in a tabular format. Optionally filter
 |------|------|----------|---------|-------------|
 | `doc_type` | `string` | no | - | Filter by document type (e.g., `guide`, `reference`, `architecture`) |
 
-**Behavior:** Queries HelixDB for all `Document` nodes. If `doc_type` is provided, filters results client-side to only include documents of that type.
+**Behavior:** Queries the `documents` table for all rows. If `doc_type` is provided, filters results to only include documents of that type.
 
 **Annotations:** Read-only.
 

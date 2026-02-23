@@ -1,21 +1,13 @@
 # Librarian
 
-Semantic documentation search for your project, powered by [HelixDB](https://helix-db.com) and exposed to AI coding tools via [MCP](https://modelcontextprotocol.io).
+Semantic documentation search for your project, powered by SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) and exposed to AI coding tools via [MCP](https://modelcontextprotocol.io).
 
-Librarian indexes markdown files into a searchable vector + graph database. AI tools like Claude Code and Cursor can then search, retrieve, and update your documentation through MCP tools.
+Librarian indexes markdown files into a searchable vector database. AI tools like Claude Code and Cursor can then search, retrieve, and update your documentation through MCP tools.
 
 ## Prerequisites
 
 - **Go 1.25+**
-- **[Helix CLI](https://helix-db.com)** (deploys HelixDB locally via Docker)
-- **Docker** (required by Helix CLI)
 - **Gemini API key** for embedding generation
-
-Install the Helix CLI:
-
-```sh
-curl -sSL "https://install.helix-db.com" | bash
-```
 
 ## Quick Start
 
@@ -52,7 +44,7 @@ cd your-project
 librarian init
 ```
 
-This creates a `.librarian/` directory with the HelixDB schema, deploys it locally, and writes a `.librarian.yaml` config file with the HelixDB host.
+This creates a `.librarian/` directory containing the SQLite database with the schema applied.
 
 ### 4. Index your documentation
 
@@ -60,7 +52,7 @@ This creates a `.librarian/` directory with the HelixDB schema, deploys it local
 librarian index
 ```
 
-This walks `docs/` (configurable), parses markdown files, generates Gemini embeddings, and stores everything in HelixDB.
+This walks `docs/` (configurable), parses markdown files, generates Gemini embeddings, and stores everything in SQLite.
 
 ### 5. Search
 
@@ -102,7 +94,7 @@ Start the MCP server and configure your tool to use it.
 
 | Command | Description |
 |---------|-------------|
-| `librarian init` | Initialize HelixDB schema and deploy locally |
+| `librarian init` | Initialize the SQLite database |
 | `librarian index [docs-dir]` | Parse and index documentation |
 | `librarian search <query>` | Search indexed documentation from the CLI |
 | `librarian status` | Show index statistics (document count, chunk count) |
@@ -110,17 +102,16 @@ Start the MCP server and configure your tool to use it.
 
 ### `librarian init`
 
-Creates the `.librarian/` directory, writes the HelixDB schema and queries, and deploys to a local HelixDB instance. The port is deterministically derived from your project directory path.
+Creates the `.librarian/` directory and initializes the SQLite database with the schema.
 
 ```sh
 librarian init
-librarian init --port 7000        # override the auto-derived port
-librarian init --name my-project  # override the project name
+librarian init --db-path path/to/librarian.db  # override the default database path
 ```
 
 ### `librarian index`
 
-Indexes markdown files into HelixDB. Unchanged files are skipped automatically via content hashing.
+Indexes markdown files into SQLite. Unchanged files are skipped automatically via content hashing.
 
 ```sh
 librarian index                  # index from configured docs_dir (default: docs/)
@@ -165,11 +156,11 @@ When connected via MCP, AI tools have access to 5 tools:
 |------|-------------|
 | `search_docs` | Semantic search across indexed documentation |
 | `get_document` | Read the full content of a specific document |
-| `get_context` | Deep briefing: search + graph traversal for related docs and code references |
+| `get_context` | Deep briefing: search + related docs and code references |
 | `list_documents` | List all indexed documents with metadata |
 | `update_docs` | Write/update a markdown file and re-index it |
 
-`get_context` is the most powerful tool -- it combines vector search with graph traversal to find relevant chunks, their source documents, referenced code files, and related documentation.
+`get_context` is the most powerful tool -- it combines vector search with relational joins to find relevant chunks, their source documents, referenced code files, and related documentation.
 
 ## Configuration
 
@@ -188,8 +179,8 @@ Place this in your project root. All fields are optional.
 # Directory containing documentation to index
 docs_dir: docs
 
-# HelixDB connection (set automatically by `librarian init`)
-helix_host: http://localhost:6969
+# Path to the SQLite database file
+db_path: .librarian/librarian.db
 
 # Embedding configuration
 embedding:
@@ -223,7 +214,7 @@ exclude_patterns:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `docs_dir` | `string` | `"docs"` | Path to documentation directory |
-| `helix_host` | `string` | `"http://localhost:6969"` | HelixDB instance URL |
+| `db_path` | `string` | `".librarian/librarian.db"` | Path to the SQLite database file |
 | `embedding.provider` | `string` | `"gemini"` | Embedding provider |
 | `embedding.api_key` | `string` | `""` | API key (falls back to `GEMINI_API_KEY` env var) |
 | `chunking.max_tokens` | `int` | `512` | Max tokens per chunk |
@@ -238,7 +229,7 @@ exclude_patterns:
 |----------|-------------|
 | `GEMINI_API_KEY` | Gemini API key for embeddings |
 | `LIBRARIAN_DOCS_DIR` | Documentation directory |
-| `LIBRARIAN_HELIX_HOST` | HelixDB host URL |
+| `LIBRARIAN_DB_PATH` | Path to SQLite database file |
 | `LIBRARIAN_EMBEDDING_API_KEY` | Embedding API key (alternative to `GEMINI_API_KEY`) |
 | `LIBRARIAN_CHUNKING_MAX_TOKENS` | Max tokens per chunk |
 | `LIBRARIAN_CHUNKING_MIN_TOKENS` | Min tokens per chunk |
@@ -249,7 +240,7 @@ exclude_patterns:
 | Flag | Description |
 |------|-------------|
 | `--config <path>` | Path to config file (default: `.librarian.yaml`) |
-| `--helix-host <url>` | HelixDB host URL |
+| `--db-path <path>` | Path to SQLite database file |
 
 ## How It Works
 
@@ -258,18 +249,18 @@ Librarian uses a 4-stage indexing pipeline:
 1. **Walk** -- Find all `.md`/`.markdown` files, apply exclude patterns
 2. **Parse** -- Goldmark AST walk: extract frontmatter, build section hierarchy
 3. **Chunk** -- Section-aware splitting at H2 boundaries with paragraph fallback
-4. **Store** -- Generate Gemini embeddings, store document nodes + vector chunks + graph edges in HelixDB
+4. **Store** -- Generate Gemini embeddings, store documents + vector chunks + relationships in SQLite
 
-Documents are connected in a graph:
+Data is stored across several tables:
 
-- **Document** nodes store metadata (title, type, content hash)
-- **DocChunk** vector nodes store content with embeddings for similarity search
-- **CodeFile** nodes represent source files referenced in documentation
-- **HasChunk** edges connect documents to their chunks
-- **References** edges connect documents to code files they mention
-- **RelatedDoc** edges connect documents that reference the same code files
+- **documents** stores metadata (title, type, content hash)
+- **doc_chunks** stores chunk content linked to documents via foreign key
+- **doc_chunk_vectors** (vec0 virtual table) stores embeddings for similarity search
+- **code_files** represents source files referenced in documentation
+- **refs** connects documents to code files they mention
+- **related_docs** connects documents that reference the same code files
 
-The `get_context` MCP tool traverses this graph to provide comprehensive briefings that include relevant chunks, source documents, referenced code, and related documentation.
+The `get_context` MCP tool joins across these tables to provide comprehensive briefings that include relevant chunks, source documents, referenced code, and related documentation.
 
 ### Incremental Indexing
 
@@ -308,10 +299,9 @@ internal/
   config/          Configuration struct and defaults
   embedding/       Gemini embedding client (Embedder interface)
   indexer/         Walk, parse, chunk, store pipeline
-  helix/           HelixDB client wrapper
+  store/           SQLite + sqlite-vec storage layer
   mcpserver/       MCP tool implementations
 
 db/
-  schema.hx        HelixDB schema (embedded at build time)
-  queries.hx       HelixDB queries (embedded at build time)
+  migrations.sql   SQLite schema (embedded at build time)
 ```

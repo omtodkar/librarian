@@ -21,12 +21,12 @@ Place this file in your project root. All fields are optional; defaults are show
 # Directory containing documentation to index
 docs_dir: docs
 
-# HelixDB connection
-helix_host: http://localhost:6969
+# Path to the SQLite database file
+db_path: .librarian/librarian.db
 
 # Embedding configuration
 embedding:
-  provider: gemini       # Embedding provider (gemini uses text-embedding-004)
+  provider: gemini       # Embedding provider (gemini uses gemini-embedding-001)
   model: ""              # Model name (provider-specific)
   api_key: ""            # API key (or set GEMINI_API_KEY env var)
 
@@ -57,8 +57,8 @@ exclude_patterns:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `docs_dir` | `string` | `"docs"` | Path to the documentation directory (relative to project root) |
-| `helix_host` | `string` | `"http://localhost:6969"` | URL of the HelixDB instance |
-| `embedding.provider` | `string` | `"gemini"` | Embedding provider. `"gemini"` uses Google's text-embedding-004 API |
+| `db_path` | `string` | `".librarian/librarian.db"` | Path to the SQLite database file |
+| `embedding.provider` | `string` | `"gemini"` | Embedding provider. `"gemini"` uses Google's gemini-embedding-001 API |
 | `embedding.model` | `string` | `""` | Model identifier (depends on provider) |
 | `embedding.api_key` | `string` | `""` | API key for the embedding provider. Falls back to `GEMINI_API_KEY` env var |
 | `chunking.max_tokens` | `int` | `512` | Maximum token count per chunk. Sections exceeding this are split at paragraph boundaries |
@@ -74,7 +74,7 @@ All configuration fields can be set via environment variables with the `LIBRARIA
 | Variable | Config Field | Example |
 |----------|-------------|---------|
 | `LIBRARIAN_DOCS_DIR` | `docs_dir` | `LIBRARIAN_DOCS_DIR=documentation` |
-| `LIBRARIAN_HELIX_HOST` | `helix_host` | `LIBRARIAN_HELIX_HOST=http://localhost:8080` |
+| `LIBRARIAN_DB_PATH` | `db_path` | `LIBRARIAN_DB_PATH=.librarian/librarian.db` |
 | `LIBRARIAN_EMBEDDING_PROVIDER` | `embedding.provider` | `LIBRARIAN_EMBEDDING_PROVIDER=gemini` |
 | `LIBRARIAN_EMBEDDING_MODEL` | `embedding.model` | `LIBRARIAN_EMBEDDING_MODEL=text-embedding-3-small` |
 | `LIBRARIAN_EMBEDDING_API_KEY` | `embedding.api_key` | `LIBRARIAN_EMBEDDING_API_KEY=sk-...` |
@@ -97,13 +97,13 @@ These flags are available on all commands:
 | Flag | Description |
 |------|-------------|
 | `--config <path>` | Path to config file (default: `.librarian.yaml` in current directory) |
-| `--helix-host <url>` | HelixDB host URL (overrides config file and env var) |
+| `--db-path <path>` | Path to SQLite database file (overrides config file and env var) |
 
 ## Example Configurations
 
 ### Minimal (all defaults)
 
-No config file needed. Librarian will look for markdown files in `./docs` and connect to HelixDB at `http://localhost:6969`.
+No config file needed. Librarian will look for markdown files in `./docs` and use `.librarian/librarian.db` as the database.
 
 ### Custom docs directory
 

@@ -14,7 +14,7 @@ var cfg *config.Config
 var rootCmd = &cobra.Command{
 	Use:   "librarian",
 	Short: "Semantic documentation search via MCP",
-	Long:  "Librarian indexes project documentation into a searchable vector + graph database and exposes it via MCP.",
+	Long:  "Librarian indexes project documentation into a searchable vector database and exposes it via MCP.",
 }
 
 func Execute() {
@@ -26,8 +26,8 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().String("config", "", "config file (default is .librarian.yaml)")
-	rootCmd.PersistentFlags().String("helix-host", "", "HelixDB host URL")
-	viper.BindPFlag("helix_host", rootCmd.PersistentFlags().Lookup("helix-host"))
+	rootCmd.PersistentFlags().String("db-path", "", "path to SQLite database file")
+	viper.BindPFlag("db_path", rootCmd.PersistentFlags().Lookup("db-path"))
 }
 
 func initConfig() {

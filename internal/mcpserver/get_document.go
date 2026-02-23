@@ -10,10 +10,10 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"librarian/internal/config"
-	helixclient "librarian/internal/helix"
+	"librarian/internal/store"
 )
 
-func registerGetDocument(s *server.MCPServer, client *helixclient.Client, cfg *config.Config) {
+func registerGetDocument(s *server.MCPServer, st *store.Store, cfg *config.Config) {
 	tool := mcp.NewTool("get_document",
 		mcp.WithDescription("Get the full content of a document by its file path."),
 		mcp.WithString("file_path",
@@ -39,8 +39,8 @@ func registerGetDocument(s *server.MCPServer, client *helixclient.Client, cfg *c
 			return mcp.NewToolResultError(fmt.Sprintf("failed to read file: %v", err)), nil
 		}
 
-		// Get metadata from HelixDB
-		doc, err := client.GetDocumentByPath(filePath)
+		// Get metadata from store
+		doc, err := st.GetDocumentByPath(filePath)
 		if err != nil {
 			return mcp.NewToolResultText(fmt.Sprintf("# %s\n\n%s", filePath, string(content))), nil
 		}

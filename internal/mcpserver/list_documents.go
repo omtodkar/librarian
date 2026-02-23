@@ -7,10 +7,10 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	helixclient "librarian/internal/helix"
+	"librarian/internal/store"
 )
 
-func registerListDocuments(s *server.MCPServer, client *helixclient.Client) {
+func registerListDocuments(s *server.MCPServer, st *store.Store) {
 	tool := mcp.NewTool("list_documents",
 		mcp.WithDescription("List all indexed documents with metadata. Optionally filter by document type."),
 		mcp.WithString("doc_type",
@@ -22,14 +22,14 @@ func registerListDocuments(s *server.MCPServer, client *helixclient.Client) {
 	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		docType := req.GetString("doc_type", "")
 
-		docs, err := client.ListDocuments()
+		docs, err := st.ListDocuments()
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to list documents: %v", err)), nil
 		}
 
 		// Filter by type if specified
 		if docType != "" {
-			var filtered []helixclient.Document
+			var filtered []store.Document
 			for _, doc := range docs {
 				if doc.DocType == docType {
 					filtered = append(filtered, doc)

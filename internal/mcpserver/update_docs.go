@@ -12,11 +12,11 @@ import (
 
 	"librarian/internal/config"
 	"librarian/internal/embedding"
-	helixclient "librarian/internal/helix"
 	"librarian/internal/indexer"
+	"librarian/internal/store"
 )
 
-func registerUpdateDocs(s *server.MCPServer, client *helixclient.Client, cfg *config.Config, embedder embedding.Embedder) {
+func registerUpdateDocs(s *server.MCPServer, st *store.Store, cfg *config.Config, embedder embedding.Embedder) {
 	tool := mcp.NewTool("update_docs",
 		mcp.WithDescription("Write or update a documentation file and re-index it. Only allows writes within the configured docs directory."),
 		mcp.WithString("file_path",
@@ -71,7 +71,7 @@ func registerUpdateDocs(s *server.MCPServer, client *helixclient.Client, cfg *co
 		}
 
 		// Re-index
-		idx := indexer.New(client, cfg, embedder)
+		idx := indexer.New(st, cfg, embedder)
 		var result *indexer.IndexResult
 
 		if reindexScope == "full" {

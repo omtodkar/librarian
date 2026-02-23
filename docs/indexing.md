@@ -6,7 +6,7 @@ description: How the indexing pipeline works, from file walking through parsing,
 
 # Indexing Pipeline
 
-The indexing pipeline transforms markdown files into searchable vector chunks and a connected graph in HelixDB. It runs when you execute `librarian index` or when the `update_docs` MCP tool triggers a re-index.
+The indexing pipeline transforms markdown files into searchable vector chunks stored in SQLite with sqlite-vec. It runs when you execute `librarian index` or when the `update_docs` MCP tool triggers a re-index.
 
 ## Pipeline Overview
 
@@ -58,7 +58,7 @@ YAML frontmatter is extracted and mapped to document properties:
 | `type` | `DocType` | Document type (e.g., `guide`, `reference`, `architecture`). Defaults to `"guide"` if not set |
 | `description` | `Summary` | Document summary. Falls back to the first paragraph if not set in frontmatter |
 
-All frontmatter fields are also stored as a JSON string in the `frontmatter` field of the Document node.
+All frontmatter fields are also stored as a JSON string in the `frontmatter` column of the `documents` table.
 
 ### AST Walk
 
@@ -124,14 +124,14 @@ Matched paths are filtered against the `code_file_patterns` config. Only files w
 
 ### Language Detection
 
-The file extension is mapped to a language name (e.g., `.go` -> `"go"`, `.ts`/`.tsx` -> `"typescript"`, `.py` -> `"python"`). This is stored on the `CodeFile` node.
+The file extension is mapped to a language name (e.g., `.go` -> `"go"`, `.ts`/`.tsx` -> `"typescript"`, `.py` -> `"python"`). This is stored on the `code_files` row.
 
 ### Storage
 
 For each extracted reference:
 
-1. Look up or create a `CodeFile` node in HelixDB
-2. Create a `References` edge from the `Document` to the `CodeFile`, with the source line as the `context` property
+1. Look up or create a `code_files` row in SQLite
+2. Insert a `refs` row linking the document to the code file, with the source line as the `context` column
 
 ## Incremental Indexing
 
@@ -142,7 +142,7 @@ h := sha256.Sum256([]byte(content))
 hash := fmt.Sprintf("%x", h)
 ```
 
-On each index run, the hash is compared against the `content_hash` stored on the existing `Document` node in HelixDB:
+On each index run, the hash is compared against the `content_hash` stored in the existing `documents` row:
 
 - **Hash matches:** The document is skipped (counted as `Skipped` in the result)
 - **Hash differs:** The existing document and all its chunks/edges are deleted, then the document is re-indexed from scratch
@@ -150,17 +150,17 @@ On each index run, the hash is compared against the `content_hash` stored on the
 
 The `--force` flag on `librarian index` bypasses the hash check and re-indexes all documents unconditionally.
 
-## RelatedDoc Edge Building
+## Related Document Building
 
 After all files in a directory are indexed, `buildRelatedDocEdges` runs a second pass:
 
-1. For each indexed document, query HelixDB for its referenced code files
+1. For each indexed document, query the `refs` table for its referenced code files
 2. Build a reverse map: `code_file_path -> [document_paths...]`
-3. For each code file referenced by 2+ documents, create `RelatedDoc` edges between all pairs of those documents with `relation_type: "shared_code_references"`
+3. For each code file referenced by 2+ documents, insert `related_docs` rows between all pairs of those documents with `relation_type: "shared_code_references"`
 
-This means if `docs/auth.md` and `docs/api.md` both reference `internal/auth/oauth.go`, they will be linked by a `RelatedDoc` edge. The `get_context` MCP tool traverses these edges to surface related documentation.
+This means if `docs/auth.md` and `docs/api.md` both reference `internal/auth/oauth.go`, they will be linked by a `related_docs` row. The `get_context` MCP tool joins on this table to surface related documentation.
 
-Duplicate edges are prevented by tracking linked pairs in a set keyed by `docPathA|docPathB`.
+Duplicate entries are prevented by tracking linked pairs in a set keyed by `docPathA|docPathB`.
 
 ## Frontmatter Conventions
 
@@ -177,7 +177,7 @@ description: How authentication works in the application.
 | Field | Effect |
 |-------|--------|
 | `title` | Used as the document title in search results and the context header prepended to chunk embeddings. Falls back to the first H1 heading |
-| `type` | Stored as `doc_type` on the Document node. Used for filtering with `list_documents`. Defaults to `"guide"` |
-| `description` | Stored as `summary` on the Document node. Falls back to the first paragraph of the document |
+| `type` | Stored as `doc_type` in the `documents` table. Used for filtering with `list_documents`. Defaults to `"guide"` |
+| `description` | Stored as `summary` in the `documents` table. Falls back to the first paragraph of the document |
 
 Additional frontmatter fields are preserved in the `frontmatter` JSON field but do not have special handling.

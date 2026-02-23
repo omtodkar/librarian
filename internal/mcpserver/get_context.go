@@ -8,10 +8,10 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"librarian/internal/embedding"
-	helixclient "librarian/internal/helix"
+	"librarian/internal/store"
 )
 
-func registerGetContext(s *server.MCPServer, client *helixclient.Client, embedder embedding.Embedder) {
+func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding.Embedder) {
 	tool := mcp.NewTool("get_context",
 		mcp.WithDescription("Comprehensive briefing: semantic search combined with graph traversal for related docs and code references. Use this for understanding a topic in depth."),
 		mcp.WithString("query",
@@ -40,7 +40,7 @@ func registerGetContext(s *server.MCPServer, client *helixclient.Client, embedde
 			return mcp.NewToolResultError(fmt.Sprintf("embedding query: %v", err)), nil
 		}
 
-		chunks, err := client.SearchChunks(vector, limit)
+		chunks, err := st.SearchChunks(vector, limit)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
@@ -68,7 +68,7 @@ func registerGetContext(s *server.MCPServer, client *helixclient.Client, embedde
 				continue
 			}
 			seenDocs[chunk.FilePath] = true
-			doc, err := client.GetDocumentByPath(chunk.FilePath)
+			doc, err := st.GetDocumentByPath(chunk.FilePath)
 			if err != nil {
 				continue
 			}
@@ -81,7 +81,7 @@ func registerGetContext(s *server.MCPServer, client *helixclient.Client, embedde
 		output += "## Referenced Code Files:\n"
 		seenCodeFiles := make(map[string]bool)
 		for _, docID := range docIDs {
-			codeFiles, err := client.GetReferencedCodeFiles(docID)
+			codeFiles, err := st.GetReferencedCodeFiles(docID)
 			if err != nil {
 				continue
 			}
@@ -102,7 +102,7 @@ func registerGetContext(s *server.MCPServer, client *helixclient.Client, embedde
 		output += "## Related Documentation:\n"
 		seenRelated := make(map[string]bool)
 		for _, docID := range docIDs {
-			related, err := client.GetRelatedDocuments(docID)
+			related, err := st.GetRelatedDocuments(docID)
 			if err != nil {
 				continue
 			}

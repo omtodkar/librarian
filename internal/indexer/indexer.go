@@ -6,11 +6,11 @@ import (
 
 	"librarian/internal/config"
 	"librarian/internal/embedding"
-	helixclient "librarian/internal/helix"
+	"librarian/internal/store"
 )
 
 type Indexer struct {
-	client   *helixclient.Client
+	store    *store.Store
 	cfg      *config.Config
 	embedder embedding.Embedder
 }
@@ -23,9 +23,9 @@ type IndexResult struct {
 	Errors           []string
 }
 
-func New(client *helixclient.Client, cfg *config.Config, embedder embedding.Embedder) *Indexer {
+func New(s *store.Store, cfg *config.Config, embedder embedding.Embedder) *Indexer {
 	return &Indexer{
-		client:   client,
+		store:    s,
 		cfg:      cfg,
 		embedder: embedder,
 	}
@@ -87,18 +87,18 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 
 	// Check if document already exists and hasn't changed
 	if !force {
-		existing, err := idx.client.GetDocumentByPath(file.FilePath)
+		existing, err := idx.store.GetDocumentByPath(file.FilePath)
 		if err == nil && existing != nil && existing.ContentHash == contentHash {
 			result.Skipped++
 			return nil
 		}
 		if err == nil && existing != nil {
-			idx.client.DeleteDocument(existing.ID)
+			idx.store.DeleteDocument(existing.ID)
 		}
 	} else {
-		existing, err := idx.client.GetDocumentByPath(file.FilePath)
+		existing, err := idx.store.GetDocumentByPath(file.FilePath)
 		if err == nil && existing != nil {
-			idx.client.DeleteDocument(existing.ID)
+			idx.store.DeleteDocument(existing.ID)
 		}
 	}
 
@@ -109,7 +109,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	}
 	chunks := ChunkDocument(parsed, chunkCfg)
 
-	doc, err := idx.client.AddDocument(helixclient.AddDocumentInput{
+	doc, err := idx.store.AddDocument(store.AddDocumentInput{
 		FilePath:    file.FilePath,
 		Title:       parsed.Title,
 		DocType:     parsed.DocType,
@@ -129,7 +129,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 			result.Errors = append(result.Errors, fmt.Sprintf("chunk %d embed: %s", chunk.ChunkIndex, err))
 			continue
 		}
-		_, err = idx.client.AddChunk(helixclient.AddChunkInput{
+		_, err = idx.store.AddChunk(store.AddChunkInput{
 			Vector:           vector,
 			Content:          chunk.EmbeddingText,
 			FilePath:         file.FilePath,
@@ -148,16 +148,16 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 
 	codeRefs := ExtractCodeReferences(parsed.RawContent, idx.cfg.CodeFilePatterns)
 	for _, ref := range codeRefs {
-		cf, err := idx.client.GetCodeFileByPath(ref.FilePath)
+		cf, err := idx.store.GetCodeFileByPath(ref.FilePath)
 		if err != nil {
-			cf, err = idx.client.AddCodeFile(ref.FilePath, ref.Language)
+			cf, err = idx.store.AddCodeFile(ref.FilePath, ref.Language)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("code file %s: %s", ref.FilePath, err))
 				continue
 			}
 		}
 
-		err = idx.client.AddReference(doc.ID, cf.ID, ref.Context)
+		err = idx.store.AddReference(doc.ID, cf.ID, ref.Context)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("reference %s: %s", ref.FilePath, err))
 			continue
@@ -174,11 +174,11 @@ func (idx *Indexer) buildRelatedDocEdges(files []WalkResult) {
 	codeFileToDocPaths := make(map[string][]string)
 
 	for _, file := range files {
-		doc, err := idx.client.GetDocumentByPath(file.FilePath)
+		doc, err := idx.store.GetDocumentByPath(file.FilePath)
 		if err != nil {
 			continue
 		}
-		codeFiles, err := idx.client.GetReferencedCodeFiles(doc.ID)
+		codeFiles, err := idx.store.GetReferencedCodeFiles(doc.ID)
 		if err != nil {
 			continue
 		}
@@ -201,15 +201,15 @@ func (idx *Indexer) buildRelatedDocEdges(files []WalkResult) {
 				}
 				linked[key] = true
 
-				fromDoc, err := idx.client.GetDocumentByPath(docPaths[i])
+				fromDoc, err := idx.store.GetDocumentByPath(docPaths[i])
 				if err != nil {
 					continue
 				}
-				toDoc, err := idx.client.GetDocumentByPath(docPaths[j])
+				toDoc, err := idx.store.GetDocumentByPath(docPaths[j])
 				if err != nil {
 					continue
 				}
-				idx.client.AddRelatedDoc(fromDoc.ID, toDoc.ID, "shared_code_references")
+				idx.store.AddRelatedDoc(fromDoc.ID, toDoc.ID, "shared_code_references")
 			}
 		}
 	}
