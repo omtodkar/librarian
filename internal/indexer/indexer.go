@@ -150,7 +150,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	for _, ref := range codeRefs {
 		cf, err := idx.store.GetCodeFileByPath(ref.FilePath)
 		if err != nil {
-			cf, err = idx.store.AddCodeFile(ref.FilePath, ref.Language)
+			cf, err = idx.store.AddCodeFile(ref.FilePath, ref.Language, ref.RefType)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("code file %s: %s", ref.FilePath, err))
 				continue

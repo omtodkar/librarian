@@ -6,12 +6,12 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *Store) AddCodeFile(filePath, language string) (*CodeFile, error) {
+func (s *Store) AddCodeFile(filePath, language, refType string) (*CodeFile, error) {
 	id := uuid.New().String()
 
 	_, err := s.db.Exec(`
-		INSERT INTO code_files (id, file_path, language) VALUES (?, ?, ?)`,
-		id, filePath, language,
+		INSERT INTO code_files (id, file_path, language, ref_type) VALUES (?, ?, ?, ?)`,
+		id, filePath, language, refType,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("add_code_file: %w", err)
@@ -19,9 +19,9 @@ func (s *Store) AddCodeFile(filePath, language string) (*CodeFile, error) {
 
 	var cf CodeFile
 	err = s.db.QueryRow(`
-		SELECT id, file_path, language, last_referenced_at
+		SELECT id, file_path, language, ref_type, last_referenced_at
 		FROM code_files WHERE id = ?`, id,
-	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.LastReferencedAt)
+	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.LastReferencedAt)
 	if err != nil {
 		return nil, fmt.Errorf("add_code_file read-back: %w", err)
 	}
@@ -31,9 +31,9 @@ func (s *Store) AddCodeFile(filePath, language string) (*CodeFile, error) {
 func (s *Store) GetCodeFileByPath(filePath string) (*CodeFile, error) {
 	var cf CodeFile
 	err := s.db.QueryRow(`
-		SELECT id, file_path, language, last_referenced_at
+		SELECT id, file_path, language, ref_type, last_referenced_at
 		FROM code_files WHERE file_path = ?`, filePath,
-	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.LastReferencedAt)
+	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.LastReferencedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get_code_file_by_path: %w", err)
 	}
@@ -42,7 +42,7 @@ func (s *Store) GetCodeFileByPath(filePath string) (*CodeFile, error) {
 
 func (s *Store) GetReferencedCodeFiles(docID string) ([]CodeFile, error) {
 	rows, err := s.db.Query(`
-		SELECT cf.id, cf.file_path, cf.language, cf.last_referenced_at
+		SELECT cf.id, cf.file_path, cf.language, cf.ref_type, cf.last_referenced_at
 		FROM refs r
 		JOIN code_files cf ON cf.id = r.code_file_id
 		WHERE r.doc_id = ?`, docID)
@@ -54,7 +54,7 @@ func (s *Store) GetReferencedCodeFiles(docID string) ([]CodeFile, error) {
 	var files []CodeFile
 	for rows.Next() {
 		var cf CodeFile
-		if err := rows.Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.LastReferencedAt); err != nil {
+		if err := rows.Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.LastReferencedAt); err != nil {
 			return nil, fmt.Errorf("get_referenced_code_files scan: %w", err)
 		}
 		files = append(files, cf)

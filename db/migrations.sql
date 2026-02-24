@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS code_files (
     id TEXT PRIMARY KEY,
     file_path TEXT UNIQUE NOT NULL,
     language TEXT NOT NULL DEFAULT '',
+    ref_type TEXT NOT NULL DEFAULT 'file',
     last_referenced_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

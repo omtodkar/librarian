@@ -24,6 +24,9 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 			mcp.Min(1),
 			mcp.Max(20),
 		),
+		mcp.WithBoolean("include_refs",
+			mcp.Description("Include referenced code files for each result"),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -33,6 +36,7 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		limit := req.GetInt("limit", 5)
+		includeRefs := req.GetBool("include_refs", false)
 
 		vector, err := embedder.Embed(query)
 		if err != nil {
@@ -56,6 +60,25 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 			output += fmt.Sprintf("**File:** %s\n", chunk.FilePath)
 			output += fmt.Sprintf("**Section:** %s\n", chunk.SectionHeading)
 			output += fmt.Sprintf("**Content:**\n%s\n\n", chunk.Content)
+
+			if includeRefs {
+				doc, err := st.GetDocumentByPath(chunk.FilePath)
+				if err != nil {
+					continue
+				}
+				codeFiles, err := st.GetReferencedCodeFiles(doc.ID)
+				if err != nil || len(codeFiles) == 0 {
+					continue
+				}
+				output += "**Refs:** "
+				for j, cf := range codeFiles {
+					if j > 0 {
+						output += ", "
+					}
+					output += cf.FilePath
+				}
+				output += "\n\n"
+			}
 		}
 
 		return mcp.NewToolResultText(output), nil

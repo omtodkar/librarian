@@ -77,8 +77,8 @@ func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding
 		}
 		output += "\n"
 
-		// Step 4: Referenced code files
-		output += "## Referenced Code Files:\n"
+		// Step 4: Referenced code files, grouped by type
+		var files, dirs, patterns []store.CodeFile
 		seenCodeFiles := make(map[string]bool)
 		for _, docID := range docIDs {
 			codeFiles, err := st.GetReferencedCodeFiles(docID)
@@ -90,11 +90,51 @@ func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding
 					continue
 				}
 				seenCodeFiles[cf.FilePath] = true
-				output += fmt.Sprintf("- %s (%s)\n", cf.FilePath, cf.Language)
+				switch cf.RefType {
+				case "directory":
+					dirs = append(dirs, cf)
+				case "pattern":
+					patterns = append(patterns, cf)
+				default:
+					files = append(files, cf)
+				}
 			}
 		}
+
+		output += "## Referenced Code:\n"
 		if len(seenCodeFiles) == 0 {
 			output += "None found.\n"
+		} else {
+			if len(files) > 0 {
+				output += "**Files:** "
+				for i, f := range files {
+					if i > 0 {
+						output += ", "
+					}
+					output += fmt.Sprintf("%s (%s)", f.FilePath, f.Language)
+				}
+				output += "\n"
+			}
+			if len(dirs) > 0 {
+				output += "**Directories:** "
+				for i, d := range dirs {
+					if i > 0 {
+						output += ", "
+					}
+					output += d.FilePath
+				}
+				output += "\n"
+			}
+			if len(patterns) > 0 {
+				output += "**Patterns:** "
+				for i, p := range patterns {
+					if i > 0 {
+						output += ", "
+					}
+					output += p.FilePath
+				}
+				output += "\n"
+			}
 		}
 		output += "\n"
 
