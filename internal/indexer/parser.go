@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	east "github.com/yuin/goldmark/extension/ast"
 	meta "github.com/yuin/goldmark-meta"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
@@ -21,6 +23,7 @@ type ParsedDocument struct {
 	Frontmatter map[string]interface{}
 	Sections    []Section
 	Diagrams    []DiagramInfo
+	Tables      []TableInfo
 	RawContent  string
 }
 
@@ -38,7 +41,10 @@ func ParseMarkdown(filePath string) (*ParsedDocument, error) {
 	}
 
 	md := goldmark.New(
-		goldmark.WithExtensions(meta.Meta),
+		goldmark.WithExtensions(
+			meta.Meta,
+			extension.Table,
+		),
 	)
 
 	ctx := parser.NewContext()
@@ -128,8 +134,37 @@ func ParseMarkdown(filePath string) (*ParsedDocument, error) {
 			}
 			return ast.WalkSkipChildren, nil
 
+		case *east.Table:
+			info, summary := ProcessTableNode(n, content)
+			parsed.Tables = append(parsed.Tables, *info)
+			if currentSection != nil {
+				currentSection.Content += summary + "\n"
+			} else if parsed.Summary == "" {
+				parsed.Summary = strings.TrimSpace(summary)
+			}
+			return ast.WalkSkipChildren, nil
+
+		case *ast.HTMLBlock:
+			nodeText := extractBlockText(n, content)
+			if isHTMLTable(nodeText) {
+				if info, summary, ok := ProcessHTMLTable(nodeText); ok {
+					parsed.Tables = append(parsed.Tables, *info)
+					if currentSection != nil {
+						currentSection.Content += summary + "\n"
+					}
+					return ast.WalkSkipChildren, nil
+				}
+			}
+			// fallthrough to regular handling
+			if currentSection != nil {
+				currentSection.Content += nodeText + "\n"
+			} else if nodeText != "" && parsed.Summary == "" {
+				parsed.Summary = strings.TrimSpace(nodeText)
+			}
+			return ast.WalkSkipChildren, nil
+
 		case *ast.Paragraph, *ast.CodeBlock,
-			*ast.List, *ast.Blockquote, *ast.ThematicBreak, *ast.HTMLBlock:
+			*ast.List, *ast.Blockquote, *ast.ThematicBreak:
 			nodeText := extractBlockText(n, content)
 			if currentSection != nil {
 				currentSection.Content += nodeText + "\n"
