@@ -20,6 +20,7 @@ type ParsedDocument struct {
 	Headings    []string
 	Frontmatter map[string]interface{}
 	Sections    []Section
+	Diagrams    []DiagramInfo
 	RawContent  string
 }
 
@@ -109,7 +110,25 @@ func ParseMarkdown(filePath string) (*ParsedDocument, error) {
 
 		// Accumulate content for current section
 		switch n := node.(type) {
-		case *ast.Paragraph, *ast.FencedCodeBlock, *ast.CodeBlock,
+		case *ast.FencedCodeBlock:
+			lang := string(n.Language(content))
+			nodeText := extractBlockText(n, content)
+			info, summary, isDiagram := ProcessDiagramBlock(lang, nodeText)
+			if isDiagram {
+				parsed.Diagrams = append(parsed.Diagrams, *info)
+				if currentSection != nil {
+					currentSection.Content += summary + "\n"
+				}
+			} else {
+				if currentSection != nil {
+					currentSection.Content += nodeText + "\n"
+				} else if nodeText != "" && parsed.Summary == "" {
+					parsed.Summary = strings.TrimSpace(nodeText)
+				}
+			}
+			return ast.WalkSkipChildren, nil
+
+		case *ast.Paragraph, *ast.CodeBlock,
 			*ast.List, *ast.Blockquote, *ast.ThematicBreak, *ast.HTMLBlock:
 			nodeText := extractBlockText(n, content)
 			if currentSection != nil {
