@@ -54,6 +54,9 @@ internal/
     walker.go      Filesystem walk, file filtering, exclude patterns
     parser.go      Goldmark-based markdown parsing, frontmatter, AST walk
     chunker.go     Section-aware chunking with paragraph fallback
+    diagrams.go    Diagram detection and label extraction (Mermaid, PlantUML, ASCII)
+    tables.go      Table linearization for better embeddings
+    emphasis.go    Bold text signal extraction for metadata and re-ranking
     references.go  Regex-based code file reference extraction
     indexer.go      Orchestrator: hash check, store, build edges
 
@@ -110,7 +113,7 @@ The SQLite schema uses six tables: three primary entity tables and three relatio
 | Table | Purpose |
 |-------|---------|
 | `documents` | Document metadata: file path, title, type, content hash, chunk count |
-| `doc_chunks` | Chunk content linked to documents via `doc_id` foreign key |
+| `doc_chunks` | Chunk content linked to documents via `doc_id` foreign key, with `signal_meta` for emphasis signals |
 | `doc_chunk_vectors` | vec0 virtual table storing float32[3072] embeddings for similarity search |
 | `code_files` | Source files referenced in documentation |
 | `refs` | Junction table connecting documents to code files (with context) |

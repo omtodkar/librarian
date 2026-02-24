@@ -1,7 +1,7 @@
 ---
 title: Indexing Pipeline
 type: reference
-description: How the indexing pipeline works, from file walking through parsing, chunking, code reference extraction, and incremental indexing.
+description: How the indexing pipeline works, from file walking through parsing, chunking, content processing (diagrams, tables, emphasis), code reference extraction, and incremental indexing.
 ---
 
 # Indexing Pipeline
@@ -31,6 +31,9 @@ The indexing pipeline transforms markdown files into searchable vector chunks st
 - `internal/indexer/walker.go` - Stage 1: Walk
 - `internal/indexer/parser.go` - Stage 2: Parse
 - `internal/indexer/chunker.go` - Stage 3: Chunk
+- `internal/indexer/diagrams.go` - Diagram detection and label extraction
+- `internal/indexer/tables.go` - Table linearization for embeddings
+- `internal/indexer/emphasis.go` - Bold text signal extraction
 - `internal/indexer/references.go` - Code reference extraction
 - `internal/indexer/indexer.go` - Stage 4: Store + orchestration
 
@@ -107,6 +110,150 @@ This gives the embedding model additional context about where the content sits w
 ### Overlap
 
 After all chunks are generated, overlap is applied: the last `overlap_lines` (default: 3) lines of each chunk are prepended to the next chunk. This provides continuity across chunk boundaries during retrieval.
+
+## Diagram Processing
+
+The diagram processor (`ProcessDiagramBlock` in `internal/indexer/diagrams.go`) detects diagram code blocks and extracts human-readable labels for embedding. Raw diagram syntax (Mermaid arrows, PlantUML keywords, box-drawing characters) embeds poorly — the extracted labels capture the semantic content instead.
+
+### Detection
+
+Fenced code blocks are checked by language tag:
+
+| Language Tag | Diagram Type |
+|--------------|-------------|
+| `mermaid` | Mermaid |
+| `plantuml`, `puml` | PlantUML |
+| `ascii`, `ascii-art` | ASCII art |
+| `""`, `text`, `txt` | ASCII art (if heuristic passes) |
+
+For unlabeled or plain-text code blocks, the `isASCIIDiagram` heuristic checks whether box-drawing characters (`│`, `├`, `┌`, `─`, `-->`, etc.) make up more than 30% of the content. This catches ASCII diagrams that aren't explicitly tagged.
+
+### Label Extraction
+
+Each diagram type has its own label extraction strategy:
+
+**Mermaid** — Extracts from five regex patterns:
+- Node labels: text inside `[]`, `()`, `{}` brackets
+- Edge labels: text between `|pipes|`
+- Participants/actors: `participant "Name"` or `participant Name`
+- Titles: `title: ...`
+- Subgraph names: `subgraph Name`
+
+**PlantUML** — Extracts from four regex patterns:
+- Titles: `title: ...`
+- Participants: `participant`, `actor`, `database`, `entity`, `boundary`, `control`, `collections`
+- Classes: `class`, `interface`, `enum`, `component`, `package`
+- Arrow labels: `--> Target : label`
+
+**ASCII art** — Extracts text from box patterns: `| text |` where text is 3+ alphabetic characters.
+
+### Subtype Detection
+
+Mermaid diagrams are classified by their opening keyword:
+
+| Prefix | Subtype |
+|--------|---------|
+| `graph`, `flowchart` | flowchart |
+| `sequenceDiagram` | sequence diagram |
+| `classDiagram` | class diagram |
+| `stateDiagram` | state diagram |
+| `erDiagram` | ER diagram |
+| `gantt` | gantt chart |
+| `pie` | pie chart |
+
+### Output
+
+The extracted labels are formatted into a summary string that replaces the raw diagram code in the chunk's embedding text:
+
+```
+[Diagram: mermaid flowchart — Auth Service, User Database, validate credentials]
+```
+
+Labels are capped at 10 per diagram to avoid noise.
+
+## Table Processing
+
+The table processor (`internal/indexer/tables.go`) converts markdown and HTML tables into linearized natural-language text for better embedding quality. Tabular data in its raw form (pipes, dashes, HTML tags) doesn't embed well — linearization turns each row into a key-value sentence.
+
+### Markdown Tables
+
+`ProcessTableNode` walks a Goldmark `Table` AST node to extract headers from `TableHeader` cells and data from `TableRow` cells. Both are capped at 20 columns and 20 rows.
+
+### HTML Tables
+
+`ProcessHTMLTable` parses raw HTML using Go's `html` package, finding the first `<table>` element. It handles:
+- `<thead>` / `<tbody>` structure
+- `<th>` vs `<td>` cells
+- Tables without explicit headers (uses first row or generates `Column 1`, `Column 2`, etc.)
+
+HTML tables in markdown are detected by the `isHTMLTable` function, which checks if the content starts with `<table`.
+
+### Linearization
+
+Both table types are linearized into the same format:
+
+```
+[Table: 3 columns, 5 rows — Name, Type, Description]
+Name: docs_dir, Type: string, Description: Path to documentation directory
+Name: db_path, Type: string, Description: Path to the SQLite database file
+```
+
+The prefix line includes column count, row count, and header names for context. Each subsequent line joins header-value pairs with commas.
+
+## Emphasis Signal Extraction
+
+The emphasis processor (`internal/indexer/emphasis.go`) scans markdown AST nodes for bold text (`**bold**`) and classifies it into structured signals. These signals serve two purposes:
+
+1. **Selective embedding augmentation** — A `SignalLine()` like `Signals: warning, deprecated` is appended to the chunk's embedding text, making the chunk findable by queries like "what's deprecated"
+2. **Re-ranking metadata** — The signals are stored as JSON in the `signal_meta` column on `doc_chunks`, used by the search re-ranker to boost chunks containing warnings, decisions, and risk markers (see [Storage Layer](storage.md#search-re-ranking))
+
+### Signal Classification
+
+Bold text is classified into three categories:
+
+**Inline Labels** — Bold text followed by a colon, mapped to canonical names:
+
+| Variations | Canonical Label |
+|-----------|----------------|
+| `warn`, `warning`, `caution` | `warning` |
+| `note`, `info`, `tip` | `note` |
+| `decision` | `decision` |
+| `important` | `important` |
+| `input`, `output` | `input`, `output` |
+| `example` | `example` |
+| `todo`, `fixme` | `todo`, `fixme` |
+| `default`, `prerequisite`, `requirement` | `default`, `prerequisite`, `requirement` |
+
+Example: `**Warning:** This will delete all data` produces label `warning` with value `This will delete all data`.
+
+**Risk Markers** — Standalone bold text (no colon) matching risk patterns:
+
+| Variations | Canonical Marker |
+|-----------|-----------------|
+| `deprecated` | `deprecated` |
+| `breaking`, `breaking change` | `breaking-change` |
+| `unsafe` | `unsafe` |
+| `experimental`, `unstable` | `experimental` |
+| `do not run`, `do-not-run` | `do-not-run` |
+
+**Emphasis Terms** — All bold text is also recorded as-is (normalized to lowercase) in the `emphasis_terms` array. This captures bold text that doesn't match labels or risk markers.
+
+### EmphasisSignals Struct
+
+```go
+type EmphasisSignals struct {
+    InlineLabels  []string          // canonical label names
+    RiskMarkers   []string          // canonical risk marker names
+    EmphasisTerms []string          // all bold text (normalized)
+    LabelValues   map[string]string // label → value after colon
+    HasWarning    bool              // shortcut flag
+    HasDecision   bool              // shortcut flag
+}
+```
+
+### Storage
+
+Signals are serialized to JSON via `ToJSON()` and stored in the `signal_meta` column of `doc_chunks`. Only `InlineLabels` and `RiskMarkers` are included in the `SignalLine()` that augments the embedding text — general emphasis terms are stored but not embedded, to avoid noise.
 
 ## Code Reference Extraction
 

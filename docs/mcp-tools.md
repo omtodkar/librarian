@@ -61,7 +61,13 @@ Semantic vector search across all indexed documentation chunks. Returns the most
 | `query` | `string` | yes | - | Natural language search query |
 | `limit` | `number` | no | `5` | Maximum results to return (1-20) |
 
-**Behavior:** Calls `SearchChunks` which performs a vector similarity search against chunk embeddings in the `doc_chunk_vectors` table via sqlite-vec. Results are ranked by semantic similarity.
+**Behavior:** Calls `SearchChunks` which performs a vector similarity search against chunk embeddings in the `doc_chunk_vectors` table via sqlite-vec. Candidates are over-fetched (3x the requested limit) and then re-ranked using a weighted formula:
+
+```
+finalScore = 0.90 * vectorSimilarity + 0.10 * metadataBoost
+```
+
+The metadata boost promotes chunks containing emphasis signals — warnings (+0.3), decisions (+0.3), important labels (+0.3), risk markers like deprecated or breaking-change (+0.2), and other inline labels (+0.1). This surfaces actionable content like warnings and deprecation notices without overriding semantic relevance. See [Storage Layer](storage.md#search-re-ranking) for full details.
 
 **Annotations:** Read-only.
 
