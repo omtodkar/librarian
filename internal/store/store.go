@@ -38,6 +38,9 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
 
+	// Idempotent migration for existing databases
+	sqlDB.Exec(`ALTER TABLE doc_chunks ADD COLUMN signal_meta TEXT NOT NULL DEFAULT '{}'`)
+
 	return &Store{db: sqlDB}, nil
 }
 

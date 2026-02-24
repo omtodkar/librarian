@@ -2,17 +2,24 @@ package store
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 )
 
 func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
+	signalMeta := input.SignalMeta
+	if signalMeta == "" {
+		signalMeta = "{}"
+	}
+
 	res, err := s.db.Exec(`
-		INSERT INTO doc_chunks (file_path, section_heading, section_hierarchy, chunk_index, content, token_count, doc_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO doc_chunks (file_path, section_heading, section_hierarchy, chunk_index, content, token_count, doc_id, signal_meta)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		input.FilePath, input.SectionHeading, input.SectionHierarchy,
-		input.ChunkIndex, input.Content, input.TokenCount, input.DocID,
+		input.ChunkIndex, input.Content, input.TokenCount, input.DocID, signalMeta,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("add_chunk: %w", err)
@@ -39,41 +46,118 @@ func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
 		ChunkIndex:       input.ChunkIndex,
 		Content:          input.Content,
 		TokenCount:       input.TokenCount,
+		SignalMeta:       signalMeta,
 	}, nil
+}
+
+type scoredChunk struct {
+	chunk      DocChunk
+	distance   float64
+	finalScore float64
 }
 
 func (s *Store) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
 	vecBytes := float64sToFloat32Bytes(vector)
 
+	// Over-fetch candidates for re-ranking
+	fetchLimit := limit * 3
+	if fetchLimit < 10 {
+		fetchLimit = 10
+	}
+
 	rows, err := s.db.Query(`
-		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.token_count
+		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.token_count, c.signal_meta, v.distance
 		FROM doc_chunk_vectors v
 		JOIN doc_chunks c ON c.id = v.chunk_id
 		WHERE v.embedding MATCH ?
 		  AND k = ?
-		ORDER BY v.distance`, vecBytes, limit)
+		ORDER BY v.distance`, vecBytes, fetchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("search_chunks: %w", err)
 	}
 	defer rows.Close()
 
-	var chunks []DocChunk
+	var candidates []scoredChunk
 	for rows.Next() {
-		var chunk DocChunk
+		var sc scoredChunk
 		var id int64
-		if err := rows.Scan(&id, &chunk.FilePath, &chunk.SectionHeading,
-			&chunk.SectionHierarchy, &chunk.ChunkIndex, &chunk.Content, &chunk.TokenCount); err != nil {
+		if err := rows.Scan(&id, &sc.chunk.FilePath, &sc.chunk.SectionHeading,
+			&sc.chunk.SectionHierarchy, &sc.chunk.ChunkIndex, &sc.chunk.Content,
+			&sc.chunk.TokenCount, &sc.chunk.SignalMeta, &sc.distance); err != nil {
 			return nil, fmt.Errorf("search_chunks scan: %w", err)
 		}
-		chunk.ID = strconv.FormatInt(id, 10)
-		chunks = append(chunks, chunk)
+		sc.chunk.ID = strconv.FormatInt(id, 10)
+		candidates = append(candidates, sc)
 	}
-	return chunks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return rerankWithSignals(candidates, limit), nil
+}
+
+func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
+	for i := range candidates {
+		vectorScore := 1.0 - candidates[i].distance
+		boost := computeMetadataBoost(candidates[i].chunk.SignalMeta)
+		candidates[i].finalScore = 0.90*vectorScore + 0.10*boost
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].finalScore > candidates[j].finalScore
+	})
+
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	chunks := make([]DocChunk, len(candidates))
+	for i, sc := range candidates {
+		chunks[i] = sc.chunk
+	}
+	return chunks
+}
+
+func computeMetadataBoost(signalMetaJSON string) float64 {
+	if signalMetaJSON == "" || signalMetaJSON == "{}" {
+		return 0.0
+	}
+
+	var signals struct {
+		InlineLabels []string `json:"inline_labels"`
+		RiskMarkers  []string `json:"risk_markers"`
+	}
+	if err := json.Unmarshal([]byte(signalMetaJSON), &signals); err != nil {
+		return 0.0
+	}
+
+	boost := 0.0
+	highValueLabels := map[string]bool{
+		"warning":   true,
+		"decision":  true,
+		"important": true,
+	}
+
+	for _, label := range signals.InlineLabels {
+		if highValueLabels[label] {
+			boost += 0.3
+		} else {
+			boost += 0.1
+		}
+	}
+	for range signals.RiskMarkers {
+		boost += 0.2
+	}
+
+	if boost > 1.0 {
+		boost = 1.0
+	}
+	return boost
 }
 
 func (s *Store) GetChunksForDocument(docID string) ([]DocChunk, error) {
 	rows, err := s.db.Query(`
-		SELECT id, file_path, section_heading, section_hierarchy, chunk_index, content, token_count
+		SELECT id, file_path, section_heading, section_hierarchy, chunk_index, content, token_count, signal_meta
 		FROM doc_chunks WHERE doc_id = ? ORDER BY chunk_index`, docID)
 	if err != nil {
 		return nil, fmt.Errorf("get_chunks_for_document: %w", err)
@@ -85,7 +169,8 @@ func (s *Store) GetChunksForDocument(docID string) ([]DocChunk, error) {
 		var chunk DocChunk
 		var id int64
 		if err := rows.Scan(&id, &chunk.FilePath, &chunk.SectionHeading,
-			&chunk.SectionHierarchy, &chunk.ChunkIndex, &chunk.Content, &chunk.TokenCount); err != nil {
+			&chunk.SectionHierarchy, &chunk.ChunkIndex, &chunk.Content, &chunk.TokenCount,
+			&chunk.SignalMeta); err != nil {
 			return nil, fmt.Errorf("get_chunks_for_document scan: %w", err)
 		}
 		chunk.ID = strconv.FormatInt(id, 10)

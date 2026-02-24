@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     chunk_index INTEGER NOT NULL DEFAULT 0,
     content TEXT NOT NULL DEFAULT '',
     token_count INTEGER NOT NULL DEFAULT 0,
-    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    signal_meta TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunk_vectors USING vec0(

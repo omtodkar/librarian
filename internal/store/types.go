@@ -23,6 +23,7 @@ type DocChunk struct {
 	ChunkIndex       uint32 `json:"chunk_index"`
 	Content          string `json:"content"`
 	TokenCount       uint32 `json:"token_count"`
+	SignalMeta       string `json:"signal_meta"`
 }
 
 type CodeFile struct {
@@ -53,4 +54,5 @@ type AddChunkInput struct {
 	ChunkIndex       uint32    `json:"chunk_index"`
 	TokenCount       uint32    `json:"token_count"`
 	DocID            string    `json:"doc_id"`
+	SignalMeta       string    `json:"signal_meta"`
 }

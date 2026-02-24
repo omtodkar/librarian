@@ -13,6 +13,7 @@ type Chunk struct {
 	ChunkIndex       uint32
 	TokenCount       uint32
 	EmbeddingText    string
+	SignalMeta       string
 }
 
 type ChunkConfig struct {
@@ -68,8 +69,18 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 		hierarchyStr := strings.Join(section.Hierarchy, " > ")
 		contextHeader := fmt.Sprintf("Document: %s | Section: %s", doc.Title, hierarchyStr)
 
+		signalMeta := "{}"
+		signalLine := ""
+		if section.Signals != nil {
+			signalMeta = section.Signals.ToJSON()
+			signalLine = section.Signals.SignalLine()
+		}
+
 		if tokens <= cfg.MaxTokens {
 			embeddingText := contextHeader + "\n\n" + content
+			if signalLine != "" {
+				embeddingText += "\n" + signalLine
+			}
 			chunks = append(chunks, Chunk{
 				Content:          content,
 				SectionHeading:   section.Heading,
@@ -77,6 +88,7 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 				ChunkIndex:       chunkIndex,
 				TokenCount:       uint32(tokens),
 				EmbeddingText:    embeddingText,
+				SignalMeta:       signalMeta,
 			})
 			chunkIndex++
 		} else {
@@ -87,6 +99,9 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 					continue
 				}
 				embeddingText := contextHeader + "\n\n" + sub
+				if signalLine != "" {
+					embeddingText += "\n" + signalLine
+				}
 				chunks = append(chunks, Chunk{
 					Content:          sub,
 					SectionHeading:   section.Heading,
@@ -94,6 +109,7 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 					ChunkIndex:       chunkIndex,
 					TokenCount:       uint32(subTokens),
 					EmbeddingText:    embeddingText,
+					SignalMeta:       signalMeta,
 				})
 				chunkIndex++
 			}

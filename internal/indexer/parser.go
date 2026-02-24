@@ -32,6 +32,7 @@ type Section struct {
 	Hierarchy []string
 	Level     int
 	Content   string
+	Signals   *EmphasisSignals
 }
 
 func ParseMarkdown(filePath string) (*ParsedDocument, error) {
@@ -163,8 +164,19 @@ func ParseMarkdown(filePath string) (*ParsedDocument, error) {
 			}
 			return ast.WalkSkipChildren, nil
 
-		case *ast.Paragraph, *ast.CodeBlock,
-			*ast.List, *ast.Blockquote, *ast.ThematicBreak:
+		case *ast.Paragraph, *ast.List:
+			nodeText := extractBlockText(n, content)
+			if currentSection != nil {
+				currentSection.Content += nodeText + "\n"
+				if sig := ExtractEmphasisSignals(n, content); sig != nil {
+					mergeSignals(currentSection, sig)
+				}
+			} else if nodeText != "" && parsed.Summary == "" {
+				parsed.Summary = strings.TrimSpace(nodeText)
+			}
+			return ast.WalkSkipChildren, nil
+
+		case *ast.CodeBlock, *ast.Blockquote, *ast.ThematicBreak:
 			nodeText := extractBlockText(n, content)
 			if currentSection != nil {
 				currentSection.Content += nodeText + "\n"
