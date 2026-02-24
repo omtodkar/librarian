@@ -7,7 +7,9 @@ Librarian indexes markdown files into a searchable vector database. AI tools lik
 ## Prerequisites
 
 - **Go 1.25+**
-- **Gemini API key** for embedding generation
+- An embedding provider — one of:
+  - **LM Studio**, **Ollama**, or any OpenAI-compatible API (local, no API key needed)
+  - **Gemini API key** for Google's embedding API
 
 ## Quick Start
 
@@ -24,17 +26,35 @@ git clone <repo-url> && cd librarian
 go build -o librarian .
 ```
 
-### 2. Set your Gemini API key
+### 2. Configure your embedding provider
 
-```sh
-export GEMINI_API_KEY="your-key-here"
-```
-
-Or add it to `.librarian.yaml`:
+**LM Studio** (local, recommended):
 
 ```yaml
+# .librarian.yaml
 embedding:
-  api_key: "your-key-here"
+  provider: openai
+  base_url: http://localhost:1234/v1
+  model: text-embedding-nomic-embed-text-v1.5
+```
+
+**Ollama** (local):
+
+```yaml
+# .librarian.yaml
+embedding:
+  provider: openai
+  base_url: http://localhost:11434/v1
+  model: nomic-embed-text
+```
+
+**Gemini** (cloud):
+
+```yaml
+# .librarian.yaml
+embedding:
+  provider: gemini
+  api_key: "your-key-here"  # or set GEMINI_API_KEY env var
 ```
 
 ### 3. Initialize in your project
@@ -52,7 +72,7 @@ This creates a `.librarian/` directory containing the SQLite database with the s
 librarian index
 ```
 
-This walks `docs/` (configurable), parses markdown files, generates Gemini embeddings, and stores everything in SQLite.
+This walks `docs/` (configurable), parses markdown files, generates embeddings via the configured provider, and stores everything in SQLite. Vector dimensions are detected automatically from the model output.
 
 ### 5. Search
 
@@ -184,8 +204,10 @@ db_path: .librarian/librarian.db
 
 # Embedding configuration
 embedding:
-  provider: gemini
-  api_key: ""            # or set GEMINI_API_KEY env var
+  provider: openai       # "gemini" or "openai" (any OpenAI-compatible API)
+  model: ""              # Model name (required for openai provider)
+  api_key: ""            # API key (or set GEMINI_API_KEY env var for gemini)
+  base_url: ""           # Base URL for openai provider (default: http://localhost:1234/v1)
 
 # Chunking strategy
 chunking:
@@ -215,8 +237,10 @@ exclude_patterns:
 |-------|------|---------|-------------|
 | `docs_dir` | `string` | `"docs"` | Path to documentation directory |
 | `db_path` | `string` | `".librarian/librarian.db"` | Path to the SQLite database file |
-| `embedding.provider` | `string` | `"gemini"` | Embedding provider |
-| `embedding.api_key` | `string` | `""` | API key (falls back to `GEMINI_API_KEY` env var) |
+| `embedding.provider` | `string` | `"gemini"` | Embedding provider: `"gemini"` or `"openai"` (any OpenAI-compatible API) |
+| `embedding.model` | `string` | `""` | Model identifier. Required for the `openai` provider |
+| `embedding.api_key` | `string` | `""` | API key. Falls back to `GEMINI_API_KEY` env var for gemini |
+| `embedding.base_url` | `string` | `""` | Base URL for `openai` provider. Defaults to `http://localhost:1234/v1` (LM Studio) |
 | `chunking.max_tokens` | `int` | `512` | Max tokens per chunk |
 | `chunking.min_tokens` | `int` | `50` | Min tokens per chunk |
 | `chunking.overlap_lines` | `int` | `3` | Overlap lines between chunks |
@@ -227,10 +251,13 @@ exclude_patterns:
 
 | Variable | Description |
 |----------|-------------|
-| `GEMINI_API_KEY` | Gemini API key for embeddings |
+| `GEMINI_API_KEY` | Gemini API key (fallback for `embedding.api_key`) |
 | `LIBRARIAN_DOCS_DIR` | Documentation directory |
 | `LIBRARIAN_DB_PATH` | Path to SQLite database file |
-| `LIBRARIAN_EMBEDDING_API_KEY` | Embedding API key (alternative to `GEMINI_API_KEY`) |
+| `LIBRARIAN_EMBEDDING_PROVIDER` | Embedding provider (`gemini` or `openai`) |
+| `LIBRARIAN_EMBEDDING_MODEL` | Model identifier |
+| `LIBRARIAN_EMBEDDING_API_KEY` | Embedding API key |
+| `LIBRARIAN_EMBEDDING_BASE_URL` | Base URL for openai provider |
 | `LIBRARIAN_CHUNKING_MAX_TOKENS` | Max tokens per chunk |
 | `LIBRARIAN_CHUNKING_MIN_TOKENS` | Min tokens per chunk |
 | `LIBRARIAN_CHUNKING_OVERLAP_LINES` | Overlap lines between chunks |
@@ -249,7 +276,7 @@ Librarian uses a 4-stage indexing pipeline:
 1. **Walk** -- Find all `.md`/`.markdown` files, apply exclude patterns
 2. **Parse** -- Goldmark AST walk: extract frontmatter, build section hierarchy
 3. **Chunk** -- Section-aware splitting at H2 boundaries with paragraph fallback
-4. **Store** -- Generate Gemini embeddings, store documents + vector chunks + relationships in SQLite
+4. **Store** -- Generate embeddings via configured provider, store documents + vector chunks + relationships in SQLite
 
 Data is stored across several tables:
 
@@ -297,7 +324,7 @@ cmd/
 
 internal/
   config/          Configuration struct and defaults
-  embedding/       Gemini embedding client (Embedder interface)
+  embedding/       Embedder interface, Gemini and OpenAI-compatible providers, factory
   indexer/         Walk, parse, chunk, store pipeline
   store/           SQLite + sqlite-vec storage layer
   mcpserver/       MCP tool implementations

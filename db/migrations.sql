@@ -23,11 +23,6 @@ CREATE TABLE IF NOT EXISTS doc_chunks (
     signal_meta TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunk_vectors USING vec0(
-    chunk_id INTEGER PRIMARY KEY,
-    embedding float[3072]
-);
-
 CREATE TABLE IF NOT EXISTS code_files (
     id TEXT PRIMARY KEY,
     file_path TEXT UNIQUE NOT NULL,

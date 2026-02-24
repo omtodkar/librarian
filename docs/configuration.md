@@ -26,9 +26,10 @@ db_path: .librarian/librarian.db
 
 # Embedding configuration
 embedding:
-  provider: gemini       # Embedding provider (gemini uses gemini-embedding-001)
-  model: ""              # Model name (provider-specific)
-  api_key: ""            # API key (or set GEMINI_API_KEY env var)
+  provider: gemini       # Embedding provider: "gemini" or "openai"
+  model: ""              # Model name (required for openai provider)
+  api_key: ""            # API key (or set GEMINI_API_KEY env var for gemini)
+  base_url: ""           # Base URL for openai provider (default: http://localhost:1234/v1)
 
 # Chunking strategy
 chunking:
@@ -58,9 +59,10 @@ exclude_patterns:
 |-------|------|---------|-------------|
 | `docs_dir` | `string` | `"docs"` | Path to the documentation directory (relative to project root) |
 | `db_path` | `string` | `".librarian/librarian.db"` | Path to the SQLite database file |
-| `embedding.provider` | `string` | `"gemini"` | Embedding provider. `"gemini"` uses Google's gemini-embedding-001 API |
-| `embedding.model` | `string` | `""` | Model identifier (depends on provider) |
-| `embedding.api_key` | `string` | `""` | API key for the embedding provider. Falls back to `GEMINI_API_KEY` env var |
+| `embedding.provider` | `string` | `"gemini"` | Embedding provider: `"gemini"` for Google's API, `"openai"` for any OpenAI-compatible API |
+| `embedding.model` | `string` | `""` | Model identifier. Required for the `openai` provider |
+| `embedding.api_key` | `string` | `""` | API key. Falls back to `GEMINI_API_KEY` env var for the gemini provider |
+| `embedding.base_url` | `string` | `""` | Base URL for the `openai` provider. Defaults to `http://localhost:1234/v1` (LM Studio) |
 | `chunking.max_tokens` | `int` | `512` | Maximum token count per chunk. Sections exceeding this are split at paragraph boundaries |
 | `chunking.min_tokens` | `int` | `50` | Minimum token count. Chunks below this threshold are discarded |
 | `chunking.overlap_lines` | `int` | `3` | Number of lines from the end of the previous chunk prepended to the next chunk for context continuity |
@@ -78,6 +80,7 @@ All configuration fields can be set via environment variables with the `LIBRARIA
 | `LIBRARIAN_EMBEDDING_PROVIDER` | `embedding.provider` | `LIBRARIAN_EMBEDDING_PROVIDER=gemini` |
 | `LIBRARIAN_EMBEDDING_MODEL` | `embedding.model` | `LIBRARIAN_EMBEDDING_MODEL=text-embedding-3-small` |
 | `LIBRARIAN_EMBEDDING_API_KEY` | `embedding.api_key` | `LIBRARIAN_EMBEDDING_API_KEY=sk-...` |
+| `LIBRARIAN_EMBEDDING_BASE_URL` | `embedding.base_url` | `LIBRARIAN_EMBEDDING_BASE_URL=http://localhost:11434/v1` |
 | `GEMINI_API_KEY` | `embedding.api_key` (fallback) | `GEMINI_API_KEY=AIza...` |
 | `LIBRARIAN_CHUNKING_MAX_TOKENS` | `chunking.max_tokens` | `LIBRARIAN_CHUNKING_MAX_TOKENS=1024` |
 | `LIBRARIAN_CHUNKING_MIN_TOKENS` | `chunking.min_tokens` | `LIBRARIAN_CHUNKING_MIN_TOKENS=100` |
@@ -133,6 +136,24 @@ code_file_patterns:
   - "*.swift"
   - "*.kt"
   - "*.scala"
+```
+
+### LM Studio (local embeddings)
+
+```yaml
+embedding:
+  provider: openai
+  base_url: http://localhost:1234/v1
+  model: text-embedding-nomic-embed-text-v1.5
+```
+
+### Ollama (local embeddings)
+
+```yaml
+embedding:
+  provider: openai
+  base_url: http://localhost:11434/v1
+  model: nomic-embed-text
 ```
 
 ### Monorepo with exclusions

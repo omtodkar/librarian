@@ -47,7 +47,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		return runDryIndex(docsDir, absDir)
 	}
 
-	embedder, err := embedding.NewGeminiEmbedder(cfg.Embedding.APIKey)
+	embedder, err := embedding.NewEmbedder(cfg.Embedding)
 	if err != nil {
 		return fmt.Errorf("creating embedder: %w", err)
 	}

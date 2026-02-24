@@ -30,6 +30,11 @@ func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
 		return nil, fmt.Errorf("add_chunk last_insert_id: %w", err)
 	}
 
+	// Lazily create vec0 table sized to the actual embedding dimensions
+	if err := s.ensureVecTable(len(input.Vector)); err != nil {
+		return nil, fmt.Errorf("add_chunk ensure_vec_table: %w", err)
+	}
+
 	// Insert the vector into the vec0 virtual table
 	vecBytes := float64sToFloat32Bytes(input.Vector)
 	_, err = s.db.Exec(`INSERT INTO doc_chunk_vectors (chunk_id, embedding) VALUES (?, ?)`,

@@ -48,7 +48,9 @@ internal/
     config.go      Configuration struct, defaults, Viper binding
 
   embedding/
-    gemini.go      Gemini embedding client (Embedder interface)
+    gemini.go      Gemini embedding client
+    openai.go      OpenAI-compatible embedding client (LM Studio, Ollama, vLLM)
+    provider.go    Factory function: NewEmbedder(cfg) → Embedder
 
   indexer/
     walker.go      Filesystem walk, file filtering, exclude patterns
@@ -91,7 +93,7 @@ The SQLite schema uses six tables: three primary entity tables and three relatio
 ┌──────────┐───┘    │ section_*    │     ┌──────────────────┐
 │documents │        │ content      │────>│doc_chunk_vectors │
 │          │        │ token_count  │     │ (vec0 virtual)   │
-│ file_path│        └──────────────┘     │ embedding[3072]  │
+│ file_path│        └──────────────┘     │ embedding[N]     │
 │ title    │                             └──────────────────┘
 │ doc_type │───┐    ┌──────────────┐
 │ summary  │   │    │  code_files  │
@@ -114,7 +116,7 @@ The SQLite schema uses six tables: three primary entity tables and three relatio
 |-------|---------|
 | `documents` | Document metadata: file path, title, type, content hash, chunk count |
 | `doc_chunks` | Chunk content linked to documents via `doc_id` foreign key, with `signal_meta` for emphasis signals |
-| `doc_chunk_vectors` | vec0 virtual table storing float32[3072] embeddings for similarity search |
+| `doc_chunk_vectors` | vec0 virtual table storing float32 embeddings for similarity search (dimensions determined by embedding model) |
 | `code_files` | Source files referenced in documentation |
 | `refs` | Junction table connecting documents to code files (with context) |
 | `related_docs` | Junction table connecting documents that share code references |
@@ -127,7 +129,7 @@ The SQLite schema uses six tables: three primary entity tables and three relatio
 | Document → CodeFiles | `refs` junction table |
 | Document → Document | `related_docs` junction table |
 
-`doc_chunk_vectors` is a **vec0 virtual table** that enables vector similarity search. Embeddings are generated client-side using the Gemini API and stored as float32 arrays. The `MATCH` operator performs KNN search.
+`doc_chunk_vectors` is a **vec0 virtual table** that enables vector similarity search. Embeddings are generated client-side using the configured embedding provider and stored as float32 arrays. The table is created lazily on first insert, with dimensions matching the model's output. The `MATCH` operator performs KNN search.
 
 ## Data Flow
 
@@ -147,7 +149,7 @@ When `librarian index` runs, a markdown file moves through four pipeline stages:
       │           overlap between chunks, context header prepended for embedding
       ▼
  4. Store ─────── SHA-256 content hash check (skip if unchanged),
-                  generate Gemini embeddings client-side for each chunk,
+                  generate embeddings via configured provider for each chunk,
                   INSERT into documents + doc_chunks + doc_chunk_vectors,
                   extract code references → INSERT into code_files + refs,
                   build related_docs entries for docs sharing code references
@@ -169,9 +171,9 @@ Fixed-window chunking (e.g., every 512 tokens) splits text without regard for se
 
 Documentation frequently references source files (e.g., `internal/store/store.go`). Rather than treating these as plain text, Librarian extracts them as structured `code_files` rows connected via `refs`. This enables the `get_context` tool to join across tables: search for chunks, find their source documents, join to `refs` to discover relevant code files, and join to `related_docs` to surface related documentation.
 
-### Client-side Gemini embeddings
+### Pluggable embedding providers
 
-Embedding generation happens client-side using the Gemini `gemini-embedding-001` API (3072 dimensions). The `internal/embedding` package provides an `Embedder` interface with a `GeminiEmbedder` implementation. During indexing, each chunk is embedded and the resulting float64 vector is converted to float32 before being stored in the vec0 virtual table. During search, the query is embedded and matched against stored vectors using sqlite-vec's KNN search.
+The `internal/embedding` package provides an `Embedder` interface with two implementations: `GeminiEmbedder` for Google's API and `OpenAIEmbedder` for any OpenAI-compatible endpoint (LM Studio, Ollama, vLLM). The factory function `NewEmbedder(cfg)` selects the provider based on config. The vec0 virtual table is created lazily on first insert, sized to the actual embedding dimensions, so no manual dimension configuration is needed.
 
 ### Content hashing for incremental indexing
 

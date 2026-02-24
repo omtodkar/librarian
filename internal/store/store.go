@@ -17,7 +17,8 @@ func init() {
 }
 
 type Store struct {
-	db *sql.DB
+	db             *sql.DB
+	vecTableReady  bool
 }
 
 // Open opens (or creates) a SQLite database at dbPath, loads the sqlite-vec
@@ -38,10 +39,34 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
 
-	// Idempotent migration for existing databases
-	sqlDB.Exec(`ALTER TABLE doc_chunks ADD COLUMN signal_meta TEXT NOT NULL DEFAULT '{}'`)
+	s := &Store{db: sqlDB}
 
-	return &Store{db: sqlDB}, nil
+	// Check if the vector table already exists (from a previous indexing run)
+	var name string
+	err = sqlDB.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='doc_chunk_vectors'`).Scan(&name)
+	if err == nil {
+		s.vecTableReady = true
+	}
+
+	return s, nil
+}
+
+// ensureVecTable creates the doc_chunk_vectors virtual table sized to the
+// given vector dimensions. Called lazily on first vector insert so the
+// dimension is always derived from the actual embedding model output.
+func (s *Store) ensureVecTable(dimensions int) error {
+	if s.vecTableReady {
+		return nil
+	}
+	vecSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunk_vectors USING vec0(
+    chunk_id INTEGER PRIMARY KEY,
+    embedding float[%d]
+)`, dimensions)
+	if _, err := s.db.Exec(vecSQL); err != nil {
+		return fmt.Errorf("creating vector table: %w", err)
+	}
+	s.vecTableReady = true
+	return nil
 }
 
 func (s *Store) Close() error {

@@ -10,12 +10,13 @@ The storage layer (`internal/store/`) manages all interactions with the SQLite d
 
 ## Database Initialization
 
-`store.Open(dbPath)` in `internal/store/store.go` performs four steps:
+`store.Open(dbPath)` in `internal/store/store.go` performs three steps:
 
 1. Creates the parent directory if it doesn't exist
 2. Opens a SQLite connection with WAL mode and foreign keys enabled via query string: `?_journal_mode=WAL&_foreign_keys=on`
 3. Applies the schema from `db/migrations.sql` (embedded at build time via `db/embed.go`)
-4. Runs an idempotent migration to add the `signal_meta` column if it doesn't exist (for databases created before emphasis signal support)
+
+The `doc_chunk_vectors` vec0 table is **not** created during `Open()`. It is created lazily on the first vector insert via `ensureVecTable()`, with dimensions derived from the actual embedding model output. This avoids hardcoding a vector size and ensures the table always matches the active model.
 
 The sqlite-vec extension is loaded automatically via `sqlite_vec.Auto()` in the package `init()` function, which registers the `vec0` virtual table type.
 
@@ -27,7 +28,7 @@ The database has six tables. The full DDL is in `db/migrations.sql`.
 |-------|-------------|---------|
 | `documents` | `id` (UUID text) | Document metadata |
 | `doc_chunks` | `id` (autoincrement int) | Chunk content, linked to documents via `doc_id` FK |
-| `doc_chunk_vectors` | `chunk_id` (int) | vec0 virtual table with `float[3072]` embeddings |
+| `doc_chunk_vectors` | `chunk_id` (int) | vec0 virtual table with float embeddings (dimensions set by embedding model) |
 | `code_files` | `id` (UUID text) | Source files referenced in documentation |
 | `refs` | `(doc_id, code_file_id)` | Junction table connecting documents to code files |
 | `related_docs` | `(from_doc_id, to_doc_id)` | Junction table connecting related documents |
@@ -65,9 +66,9 @@ Implemented in `internal/store/chunks.go`.
 
 ### AddChunk
 
-Inserts a chunk into `doc_chunks` with its metadata (file path, section heading, section hierarchy, content, token count, signal metadata). Then inserts the embedding vector into the `doc_chunk_vectors` vec0 table.
+Inserts a chunk into `doc_chunks` with its metadata (file path, section heading, section hierarchy, content, token count, signal metadata). Calls `ensureVecTable()` to lazily create the vec0 table if it doesn't exist yet, then inserts the embedding vector.
 
-Vectors arrive as `[]float64` from the Gemini API and are converted to little-endian `[]byte` of float32 values via `float64sToFloat32Bytes`, as sqlite-vec expects float32 binary format.
+Vectors arrive as `[]float64` from the embedding provider and are converted to little-endian `[]byte` of float32 values via `float64sToFloat32Bytes`, as sqlite-vec expects float32 binary format.
 
 ### GetChunksForDocument
 
@@ -139,7 +140,7 @@ Joins `related_docs` with `documents` to return all documents related to a given
 
 ## Vector Format
 
-sqlite-vec expects embeddings as binary blobs of little-endian float32 values. The Gemini API returns `[]float64`, so conversion happens at the store boundary:
+sqlite-vec expects embeddings as binary blobs of little-endian float32 values. The embedding providers return `[]float64`, so conversion happens at the store boundary:
 
 ```go
 func float64sToFloat32Bytes(vec []float64) []byte {
@@ -151,4 +152,4 @@ func float64sToFloat32Bytes(vec []float64) []byte {
 }
 ```
 
-Each embedding is 3072 dimensions * 4 bytes = 12,288 bytes per chunk.
+The size per chunk depends on the embedding model (e.g., 3072 dims * 4 bytes = 12,288 bytes for Gemini, 768 dims * 4 bytes = 3,072 bytes for nomic-embed-text).

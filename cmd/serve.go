@@ -21,7 +21,7 @@ func init() {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	embedder, err := embedding.NewGeminiEmbedder(cfg.Embedding.APIKey)
+	embedder, err := embedding.NewEmbedder(cfg.Embedding)
 	if err != nil {
 		return fmt.Errorf("creating embedder: %w", err)
 	}

@@ -32,7 +32,7 @@ func init() {
 func runSearch(cmd *cobra.Command, args []string) error {
 	query := strings.Join(args, " ")
 
-	embedder, err := embedding.NewGeminiEmbedder(cfg.Embedding.APIKey)
+	embedder, err := embedding.NewEmbedder(cfg.Embedding)
 	if err != nil {
 		return fmt.Errorf("creating embedder: %w", err)
 	}
