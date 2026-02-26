@@ -13,13 +13,13 @@ import (
 
 func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding.Embedder) {
 	tool := mcp.NewTool("get_context",
-		mcp.WithDescription("Comprehensive briefing: semantic search combined with graph traversal for related docs and code references. Use this for understanding a topic in depth."),
+		mcp.WithDescription("Comprehensive briefing: semantic search combined with graph traversal for related docs and code references. Use this for understanding a topic in depth. Adjust limit for broader or narrower results."),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description("Natural language query for the topic you want context on"),
 		),
 		mcp.WithNumber("limit",
-			mcp.Description("Number of initial search results"),
+			mcp.Description("Number of results to return. Use higher values for broader exploration, lower for focused lookups."),
 			mcp.DefaultNumber(5),
 			mcp.Min(1),
 			mcp.Max(10),
