@@ -117,3 +117,15 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+<!-- librarian:start - managed by `librarian install`, do not edit -->
+## Librarian
+
+This project uses Librarian for semantic search and graph-based code navigation.
+See **`.librarian/rules.md`** for the full guidance (how to use `librarian search`,
+`librarian context`, etc.).
+
+Before exploring the codebase with grep/find, try `librarian search "<topic>"` or
+`librarian context "<topic>"`. Read `.librarian/out/GRAPH_REPORT.md` for a topology
+snapshot (god nodes, communities, cross-cluster edges).
+<!-- librarian:end -->
