@@ -35,7 +35,7 @@ func installCursor(ws *workspace.Workspace, _ io.Writer) ([]string, error) {
 	// so template updates land on re-install.
 	existing, err := os.ReadFile(path)
 	if err == nil && string(existing) == tmplCursorPointer {
-		return []string{}, nil
+		return nil, nil
 	}
 	if err := os.WriteFile(path, []byte(tmplCursorPointer), 0o644); err != nil {
 		return nil, fmt.Errorf("writing %s: %w", path, err)

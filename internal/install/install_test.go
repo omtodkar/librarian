@@ -55,11 +55,12 @@ func TestRun_AllPlatformsEndToEnd(t *testing.T) {
 	mustContain(t, filepath.Join(ws.Root, "GEMINI.md"), "librarian")
 	mustContain(t, filepath.Join(ws.Root, ".cursor", "rules", "librarian.mdc"), "Librarian")
 
-	// JSON hook files.
+	// JSON hook files. Gemini intentionally omitted — Gemini CLI has no
+	// SessionStart hook API, so writing .gemini/settings.json would claim
+	// success for a no-op.
 	for _, jsonPath := range []string{
 		filepath.Join(ws.Root, ".claude", "settings.json"),
 		filepath.Join(ws.Root, ".codex", "hooks.json"),
-		filepath.Join(ws.Root, ".gemini", "settings.json"),
 	} {
 		var doc map[string]any
 		b, err := os.ReadFile(jsonPath)
@@ -74,6 +75,14 @@ func TestRun_AllPlatformsEndToEnd(t *testing.T) {
 			t.Errorf("no SessionStart hook in %s", jsonPath)
 		}
 	}
+	// Gemini's pointer file is written; its JSON hook file is not.
+	if _, err := os.Stat(filepath.Join(ws.Root, ".gemini", "settings.json")); !os.IsNotExist(err) {
+		t.Errorf(".gemini/settings.json should not be written (no Gemini hooks API): err=%v", err)
+	}
+
+	// Claude Code skill must land at .claude/skills/librarian/SKILL.md so
+	// /librarian is actually invocable.
+	mustExist(t, filepath.Join(ws.Root, ".claude", "skills", "librarian", "SKILL.md"))
 
 	// Git hook.
 	mustContain(t, filepath.Join(ws.Root, ".git", "hooks", "post-commit"), "librarian index")

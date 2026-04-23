@@ -11,7 +11,7 @@ func TestUpsertMarkedBlock_FreshFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "CLAUDE.md")
 
-	changed, err := upsertMarkedBlock(path, "hello world")
+	changed, err := upsertMarkedBlock(path, "hello world", nil)
 	if err != nil {
 		t.Fatalf("fresh write: %v", err)
 	}
@@ -31,10 +31,10 @@ func TestUpsertMarkedBlock_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "CLAUDE.md")
 
-	if _, err := upsertMarkedBlock(path, "body v1"); err != nil {
+	if _, err := upsertMarkedBlock(path, "body v1", nil); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := upsertMarkedBlock(path, "body v1")
+	changed, err := upsertMarkedBlock(path, "body v1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,10 +47,10 @@ func TestUpsertMarkedBlock_ReplacesOldBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "CLAUDE.md")
 
-	if _, err := upsertMarkedBlock(path, "old body"); err != nil {
+	if _, err := upsertMarkedBlock(path, "old body", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := upsertMarkedBlock(path, "new body"); err != nil {
+	if _, err := upsertMarkedBlock(path, "new body", nil); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, path)
@@ -75,7 +75,7 @@ func TestUpsertMarkedBlock_PreservesUserContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := upsertMarkedBlock(path, "librarian block"); err != nil {
+	if _, err := upsertMarkedBlock(path, "librarian block", nil); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, path)
@@ -90,7 +90,7 @@ func TestUpsertMarkedBlock_PreservesUserContent(t *testing.T) {
 	}
 
 	// Re-run: should be a no-op now that markers exist.
-	changed, err := upsertMarkedBlock(path, "librarian block")
+	changed, err := upsertMarkedBlock(path, "librarian block", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestUpsertMarkedBlock_UserContentAboveAndBelow(t *testing.T) {
 	path := filepath.Join(dir, "CLAUDE.md")
 
 	// First install (file didn't exist).
-	if _, err := upsertMarkedBlock(path, "librarian v1"); err != nil {
+	if _, err := upsertMarkedBlock(path, "librarian v1", nil); err != nil {
 		t.Fatal(err)
 	}
 	// User adds content above and below the markers.
@@ -115,7 +115,7 @@ func TestUpsertMarkedBlock_UserContentAboveAndBelow(t *testing.T) {
 	}
 
 	// Reinstall with a different body.
-	if _, err := upsertMarkedBlock(path, "librarian v2"); err != nil {
+	if _, err := upsertMarkedBlock(path, "librarian v2", nil); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, path)
@@ -145,7 +145,7 @@ func TestUpsertMarkedBlock_TornBlockDoesNotDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := upsertMarkedBlock(path, "fresh body"); err != nil {
+	if _, err := upsertMarkedBlock(path, "fresh body", nil); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, path)
@@ -156,7 +156,7 @@ func TestUpsertMarkedBlock_TornBlockDoesNotDuplicate(t *testing.T) {
 	// A correct installer should at minimum not end up with MORE than one
 	// block. Either it replaces-from-start (ideal) or it leaves a torn block
 	// alone — but it must not accumulate duplicates on repeat runs.
-	if _, err := upsertMarkedBlock(path, "fresh body"); err != nil {
+	if _, err := upsertMarkedBlock(path, "fresh body", nil); err != nil {
 		t.Fatal(err)
 	}
 	content2 := readString(t, path)
@@ -174,7 +174,7 @@ func TestUpsertMarkedBlock_CRLFExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "CLAUDE.md")
 
-	if _, err := upsertMarkedBlock(path, "body v1"); err != nil {
+	if _, err := upsertMarkedBlock(path, "body v1", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -188,7 +188,7 @@ func TestUpsertMarkedBlock_CRLFExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := upsertMarkedBlock(path, "body v2"); err != nil {
+	if _, err := upsertMarkedBlock(path, "body v2", nil); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, path)
@@ -197,6 +197,84 @@ func TestUpsertMarkedBlock_CRLFExistingFile(t *testing.T) {
 	}
 	if !strings.Contains(content, "body v2") {
 		t.Errorf("body not updated in CRLF file:\n%q", content)
+	}
+}
+
+// upsertBlock kernel tests below this line exercise the byte-manipulation
+// directly (as opposed to upsertMarkedBlock above, which tests the file-IO
+// wrapper). They use the shell-comment markers because that's where the edge
+// cases are most interesting — both markers flow through the same parameterised
+// function so verifying one marker set validates both.
+
+// If a user hook above the librarian block happens to contain the literal
+// string "# librarian:end", an unanchored endIdx search flips the order and
+// the installer falls through to the append path — duplicating the block on
+// every reinstall. Anchoring endIdx after startIdx prevents this.
+func TestUpsertBlock_EndMarkerBeforeStart(t *testing.T) {
+	existing := []byte("#!/usr/bin/env bash\n# librarian:end\necho 'user code'\n\n" +
+		shMarkerStart + "\noriginal body\n" + shMarkerEnd + "\n")
+
+	updated, torn := upsertBlock(existing, shMarkerStart, shMarkerEnd, "new body")
+	if torn {
+		t.Error("well-formed block should not be reported as torn")
+	}
+	got := string(updated)
+
+	if strings.Count(got, shMarkerStart) != 1 {
+		t.Errorf("expected one start marker, got %d:\n%s", strings.Count(got, shMarkerStart), got)
+	}
+	if !strings.Contains(got, "new body") {
+		t.Errorf("new body missing:\n%s", got)
+	}
+	if strings.Contains(got, "original body") {
+		t.Errorf("old body still present:\n%s", got)
+	}
+	if !strings.Contains(got, "# librarian:end\necho 'user code'") {
+		t.Errorf("user content with stray end-marker was corrupted:\n%s", got)
+	}
+}
+
+// Empty existing bytes must not gain a spurious leading newline in the append
+// path. An earlier bug produced "\n" + block on first append and stripped it
+// on second, requiring two runs to stabilise.
+func TestUpsertBlock_EmptyExistingProducesNoLeadingNewline(t *testing.T) {
+	updated, torn := upsertBlock(nil, shMarkerStart, shMarkerEnd, "body")
+	if torn {
+		t.Error("empty existing should not be reported as torn")
+	}
+	if len(updated) > 0 && updated[0] == '\n' {
+		t.Errorf("append to empty file produced leading newline:\n%q", updated)
+	}
+
+	again, _ := upsertBlock(updated, shMarkerStart, shMarkerEnd, "body")
+	if string(again) != string(updated) {
+		t.Errorf("append unstable across runs:\nfirst:  %q\nsecond: %q", updated, again)
+	}
+}
+
+// Torn block: start marker present, end marker missing (user hand-edit went
+// wrong). Installer should recover by replacing from the start marker to EOF
+// rather than duplicating or refusing, and must surface torn=true so the
+// caller can warn the user.
+func TestUpsertBlock_MissingEndMarker(t *testing.T) {
+	existing := []byte("#!/usr/bin/env bash\necho user\n\n" + shMarkerStart + "\nold body (no end marker!)\n")
+	updated, torn := upsertBlock(existing, shMarkerStart, shMarkerEnd, "new")
+	if !torn {
+		t.Error("torn block was not detected")
+	}
+	got := string(updated)
+
+	if strings.Count(got, shMarkerStart) != 1 {
+		t.Errorf("expected one start marker, got %d:\n%s", strings.Count(got, shMarkerStart), got)
+	}
+	if !strings.Contains(got, shMarkerEnd) {
+		t.Errorf("new end marker missing:\n%s", got)
+	}
+	if strings.Contains(got, "old body") {
+		t.Errorf("torn block body not replaced:\n%s", got)
+	}
+	if !strings.Contains(got, "echo user") {
+		t.Errorf("user code before torn block lost:\n%s", got)
 	}
 }
 

@@ -14,6 +14,7 @@
 package install
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -28,13 +29,12 @@ import (
 const hookCommand = "bash .librarian/hooks/sessionstart.sh"
 
 // Platform describes one assistant integration — its human name, CLI key,
-// detection heuristic, and install action. Adding a new platform means adding
-// a new *Platform to allPlatforms() in registry.go.
+// detection heuristic, and install action.
 type Platform struct {
 	Name     string
 	Key      string
 	Detected func(root string) bool
-	Install  func(ws *workspace.Workspace, out io.Writer) ([]string, error)
+	Install  func(ws *workspace.Workspace, warn io.Writer) ([]string, error)
 }
 
 // Options control Run. Zero value = interactive TTY prompt over all platforms,
@@ -95,7 +95,7 @@ func Run(ws *workspace.Workspace, opts Options) ([]string, error) {
 	if !opts.NoGitHook {
 		fmt.Fprintln(opts.Out, "-> git post-commit hook")
 		if !opts.DryRun {
-			path, changed, err := installGitPostCommit(ws)
+			path, changed, err := installGitPostCommit(ws, opts.Out)
 			if err != nil {
 				return written, fmt.Errorf("installing git post-commit hook: %w", err)
 			}
@@ -133,9 +133,9 @@ func selectRequested(root string, opts Options) ([]*Platform, error) {
 
 // writeSharedTemplates writes the librarian-owned files every platform shares:
 // rules.md and skill.md (user-editable — only written if missing), plus
-// sessionstart.sh (librarian-managed — refreshed when content differs). In
-// dry-run mode nothing touches disk; returned paths are the writes that *would*
-// happen on a real run.
+// sessionstart.sh (librarian-managed — refreshed when content differs).
+// Dry-run compares against on-disk content (reads are side-effect-free) so it
+// accurately predicts what a real run would change.
 func writeSharedTemplates(ws *workspace.Workspace, dryRun bool) ([]string, error) {
 	if !dryRun {
 		if err := os.MkdirAll(ws.HooksDir(), 0o755); err != nil {
@@ -166,58 +166,57 @@ func writeSharedTemplates(ws *workspace.Workspace, dryRun bool) ([]string, error
 	}
 
 	hookPath := filepath.Join(ws.HooksDir(), "sessionstart.sh")
-	if dryRun {
-		// Dry-run is pessimistic about hooks: no way to know without reading
-		// disk whether the script differs from the embed. List it as planned.
+	changed, err := writeExecutableIfChanged(hookPath, tmplSessionStart, dryRun)
+	if err != nil {
+		return written, err
+	}
+	if changed {
 		written = append(written, hookPath)
-	} else {
-		changed, err := writeExecutableIfChanged(hookPath, tmplSessionStart)
-		if err != nil {
-			return written, err
-		}
-		if changed {
-			written = append(written, hookPath)
-		}
 	}
 	return written, nil
 }
 
 // writeExecutableIfChanged writes body to path with 0o755 perms only if content
 // differs, keeping re-install summaries accurate. If content matches but the
-// executable bit is missing (someone chmod'd it away), just chmod.
-func writeExecutableIfChanged(path, body string) (bool, error) {
+// executable bit is missing (user chmod'd it away), re-assert +x. When dryRun
+// is true, only the prediction is returned — no disk mutation, no chmod.
+func writeExecutableIfChanged(path, body string, dryRun bool) (bool, error) {
 	existing, err := os.ReadFile(path)
 	if err == nil && string(existing) == body {
 		info, statErr := os.Stat(path)
 		if statErr == nil && info.Mode().Perm()&0o100 != 0 {
 			return false, nil
 		}
+		if dryRun {
+			return true, nil
+		}
 		return true, os.Chmod(path, 0o755)
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("reading %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		return false, fmt.Errorf("writing %s: %w", path, err)
+	if dryRun {
+		return true, nil
 	}
-	if err := os.Chmod(path, 0o755); err != nil {
-		return false, fmt.Errorf("chmod +x %s: %w", path, err)
-	}
-	return true, nil
+	return true, writeWithMode(path, []byte(body), 0o755)
 }
 
-// installMarkerAndHook is the generic path followed by the three platforms that
-// use both a pointer file (CLAUDE.md / AGENTS.md / GEMINI.md) and a JSON hook
-// config (.claude/settings.json / .codex/hooks.json / .gemini/settings.json).
-// Returns the absolute paths of files that actually changed on disk.
-func installMarkerAndHook(ws *workspace.Workspace, pointerFile, hookConfig string) ([]string, error) {
+// installMarkerAndHook is the generic path followed by the pointer-plus-hook
+// platforms (Claude Code, Codex, Gemini CLI). hookConfig may be "" when a
+// platform has no SessionStart hook API yet — in that case we write only the
+// pointer file and skip the JSON merge.
+func installMarkerAndHook(ws *workspace.Workspace, pointerFile, hookConfig string, warn io.Writer) ([]string, error) {
 	var written []string
 
 	pointerPath := filepath.Join(ws.Root, pointerFile)
-	if changed, err := upsertMarkedBlock(pointerPath, tmplPointer); err != nil {
+	if changed, err := upsertMarkedBlock(pointerPath, tmplPointer, warn); err != nil {
 		return written, err
 	} else if changed {
 		written = append(written, pointerPath)
+	}
+
+	if hookConfig == "" {
+		return written, nil
 	}
 
 	hookPath := filepath.Join(ws.Root, hookConfig)
@@ -227,4 +226,39 @@ func installMarkerAndHook(ws *workspace.Workspace, pointerFile, hookConfig strin
 		written = append(written, hookPath)
 	}
 	return written, nil
+}
+
+// installClaudeSkill places the workspace skill.md at .claude/skills/librarian/SKILL.md
+// so Claude Code discovers the `/librarian` slash-skill. Claude Code only reads
+// skills from .claude/skills/<name>/SKILL.md — .librarian/skill.md alone is
+// never loaded.
+//
+// Reads from .librarian/skill.md (not the embedded template) so user edits to
+// the canonical workspace copy propagate on reinstall. Falls back to the
+// embedded template only if the workspace copy is missing — writeSharedTemplates
+// runs first, so the workspace copy always exists on the real install path.
+func installClaudeSkill(ws *workspace.Workspace) ([]string, error) {
+	source, err := os.ReadFile(ws.SkillPath())
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading %s: %w", ws.SkillPath(), err)
+		}
+		source = []byte(tmplSkillMD)
+	}
+
+	dest := filepath.Join(ws.Root, ".claude", "skills", "librarian", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return nil, fmt.Errorf("creating %s: %w", filepath.Dir(dest), err)
+	}
+	existing, err := os.ReadFile(dest)
+	if err == nil && bytes.Equal(existing, source) {
+		return nil, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("reading %s: %w", dest, err)
+	}
+	if err := os.WriteFile(dest, source, 0o644); err != nil {
+		return nil, fmt.Errorf("writing %s: %w", dest, err)
+	}
+	return []string{dest}, nil
 }

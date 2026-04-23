@@ -50,16 +50,9 @@ func upsertJSONHook(path, event, command string) (changed bool, err error) {
 	}
 	entries, _ := hooks[event].([]any)
 
-	newEntry := map[string]any{
-		"matcher": "",
-		"hooks": []any{
-			map[string]any{"type": "command", "command": command},
-		},
-	}
-
 	replaced := false
-	for i, raw := range entries {
-		entry, ok := raw.(map[string]any)
+	for i, elem := range entries {
+		entry, ok := elem.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -67,7 +60,14 @@ func upsertJSONHook(path, event, command string) (changed bool, err error) {
 		for _, h := range inner {
 			hm, _ := h.(map[string]any)
 			if cmd, _ := hm["command"].(string); cmd == command {
-				entries[i] = newEntry
+				// Preserve every field on the outer entry (matcher, user-added
+				// keys like description) and replace only the inner hooks list.
+				// An earlier version rebuilt the entry from scratch and silently
+				// reset matcher="*.go" back to "" on reinstall.
+				entry["hooks"] = []any{
+					map[string]any{"type": "command", "command": command},
+				}
+				entries[i] = entry
 				replaced = true
 				break
 			}
@@ -77,7 +77,12 @@ func upsertJSONHook(path, event, command string) (changed bool, err error) {
 		}
 	}
 	if !replaced {
-		entries = append(entries, newEntry)
+		entries = append(entries, map[string]any{
+			"matcher": "",
+			"hooks": []any{
+				map[string]any{"type": "command", "command": command},
+			},
+		})
 	}
 	hooks[event] = entries
 

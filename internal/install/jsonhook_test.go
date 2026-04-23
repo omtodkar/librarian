@@ -10,14 +10,14 @@ func TestUpsertJSONHook_FreshFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".claude", "settings.json")
 
-	changed, err := upsertJSONHook(path, "SessionStart", "bash .librarian/hooks/claude-sessionstart.sh")
+	changed, err := upsertJSONHook(path, "SessionStart", hookCommand)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !changed {
 		t.Error("fresh write should report changed=true")
 	}
-	assertJSONContainsHook(t, path, "SessionStart", "bash .librarian/hooks/claude-sessionstart.sh")
+	assertJSONContainsHook(t, path, "SessionStart", hookCommand)
 }
 
 func TestUpsertJSONHook_PreservesOtherEntries(t *testing.T) {
@@ -38,7 +38,7 @@ func TestUpsertJSONHook_PreservesOtherEntries(t *testing.T) {
 	}
 	mustWriteJSON(t, path, existing)
 
-	if _, err := upsertJSONHook(path, "SessionStart", "bash .librarian/hooks/claude-sessionstart.sh"); err != nil {
+	if _, err := upsertJSONHook(path, "SessionStart", hookCommand); err != nil {
 		t.Fatal(err)
 	}
 
@@ -57,7 +57,7 @@ func TestUpsertJSONHook_PreservesOtherEntries(t *testing.T) {
 			if cmd == "bd prime" {
 				sawBD = true
 			}
-			if cmd == "bash .librarian/hooks/claude-sessionstart.sh" {
+			if cmd == hookCommand {
 				sawLibrarian = true
 			}
 		}
@@ -73,7 +73,7 @@ func TestUpsertJSONHook_PreservesOtherEntries(t *testing.T) {
 func TestUpsertJSONHook_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".claude", "settings.json")
-	cmd := "bash .librarian/hooks/claude-sessionstart.sh"
+	cmd := hookCommand
 
 	if _, err := upsertJSONHook(path, "SessionStart", cmd); err != nil {
 		t.Fatal(err)
@@ -99,13 +99,15 @@ func TestUpsertJSONHook_SemanticIdempotencyAcrossFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Deliberately funky formatting: 4-space indent, keys in non-alpha order.
+	// Stringly-assembled so the production command constant stays the only
+	// source of truth for the hook invocation.
 	custom := `{
     "hooks": {
         "SessionStart": [
             {
                 "matcher": "",
                 "hooks": [
-                    {"command": "bash .librarian/hooks/sessionstart.sh", "type": "command"}
+                    {"command": "` + hookCommand + `", "type": "command"}
                 ]
             }
         ]
@@ -115,14 +117,14 @@ func TestUpsertJSONHook_SemanticIdempotencyAcrossFormatting(t *testing.T) {
 	if err := os.WriteFile(path, []byte(custom), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := upsertJSONHook(path, "SessionStart", "bash .librarian/hooks/sessionstart.sh")
+	changed, err := upsertJSONHook(path, "SessionStart", hookCommand)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The raw bytes ARE different (indent width etc.); the point is that
 	// re-running should converge — second run must be a no-op.
 	_ = changed
-	changed2, err := upsertJSONHook(path, "SessionStart", "bash .librarian/hooks/sessionstart.sh")
+	changed2, err := upsertJSONHook(path, "SessionStart", hookCommand)
 	if err != nil {
 		t.Fatal(err)
 	}

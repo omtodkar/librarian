@@ -2,10 +2,13 @@ package install
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // selectPlatforms is the interactive checklist shown when `librarian install` is
@@ -44,7 +47,12 @@ func selectPlatforms(in io.Reader, out io.Writer, platforms []*Platform, root st
 
 	reader := bufio.NewReader(in)
 	line, err := reader.ReadString('\n')
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
+		// Ctrl-C and similar user interrupts arrive as syscall.EINTR or
+		// ErrUnexpectedEOF; surface a clean message instead of a raw errno.
+		if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "interrupted") {
+			return nil, fmt.Errorf("install cancelled")
+		}
 		return nil, fmt.Errorf("reading selection: %w", err)
 	}
 	line = strings.TrimSpace(line)
@@ -82,18 +90,14 @@ func selectPlatforms(in io.Reader, out io.Writer, platforms []*Platform, root st
 	return out2, nil
 }
 
-// isTerminal reports whether r is a terminal. Only *os.File can be a terminal;
-// anything else (pipes, bytes.Buffer in tests) is treated as non-tty. We detect
-// character-device mode from the underlying FileInfo to avoid pulling in
-// golang.org/x/term just for this one check.
+// isTerminal reports whether r is an interactive terminal. Uses golang.org/x/term
+// (tcgetattr / GetConsoleMode under the hood) so /dev/null and similar character
+// devices correctly fail the check — a prior FileInfo-based heuristic let
+// `librarian install < /dev/null` silently install for detected platforms.
 func isTerminal(r io.Reader) bool {
 	f, ok := r.(*os.File)
 	if !ok {
 		return false
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(f.Fd()))
 }

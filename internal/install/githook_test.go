@@ -9,23 +9,9 @@ import (
 	"librarian/internal/workspace"
 )
 
-// newGitWS creates a tempdir with a .git/ and .librarian/ directory and returns
-// a *workspace.Workspace rooted there. Enough structure for installGitPostCommit
-// to treat it as a real repo without invoking the git binary.
-func newGitWS(t *testing.T) *workspace.Workspace {
-	t.Helper()
-	dir := t.TempDir()
-	for _, sub := range []string{".git", ".librarian", ".librarian/out"} {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return &workspace.Workspace{Root: dir}
-}
-
 func TestInstallGitPostCommit_FreshRepo(t *testing.T) {
-	ws := newGitWS(t)
-	path, changed, err := installGitPostCommit(ws)
+	ws := newWS(t)
+	path, changed, err := installGitPostCommit(ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,11 +37,11 @@ func TestInstallGitPostCommit_FreshRepo(t *testing.T) {
 }
 
 func TestInstallGitPostCommit_Idempotent(t *testing.T) {
-	ws := newGitWS(t)
-	if _, _, err := installGitPostCommit(ws); err != nil {
+	ws := newWS(t)
+	if _, _, err := installGitPostCommit(ws, nil); err != nil {
 		t.Fatal(err)
 	}
-	path, changed, err := installGitPostCommit(ws)
+	path, changed, err := installGitPostCommit(ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +55,7 @@ func TestInstallGitPostCommit_Idempotent(t *testing.T) {
 }
 
 func TestInstallGitPostCommit_AppendsToExistingHook(t *testing.T) {
-	ws := newGitWS(t)
+	ws := newWS(t)
 	hookPath := filepath.Join(ws.Root, ".git", "hooks", "post-commit")
 	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -79,7 +65,7 @@ func TestInstallGitPostCommit_AppendsToExistingHook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := installGitPostCommit(ws); err != nil {
+	if _, _, err := installGitPostCommit(ws, nil); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, hookPath)
@@ -94,7 +80,7 @@ func TestInstallGitPostCommit_AppendsToExistingHook(t *testing.T) {
 func TestInstallGitPostCommit_NotAGitRepo(t *testing.T) {
 	dir := t.TempDir()
 	ws := &workspace.Workspace{Root: dir}
-	path, changed, err := installGitPostCommit(ws)
+	path, changed, err := installGitPostCommit(ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +109,7 @@ func TestInstallGitPostCommit_Worktree(t *testing.T) {
 	}
 
 	ws := &workspace.Workspace{Root: dir}
-	path, changed, err := installGitPostCommit(ws)
+	path, changed, err := installGitPostCommit(ws, nil)
 	if err != nil {
 		t.Fatalf("worktree install: %v", err)
 	}
@@ -140,51 +126,32 @@ func TestInstallGitPostCommit_Worktree(t *testing.T) {
 	}
 }
 
-// If a user hook above the librarian block happens to contain the literal
-// string "# librarian:end", an unanchored endIdx search flips the order and
-// the installer falls through to the append path — duplicating the block on
-// every reinstall. Anchoring endIdx after startIdx prevents this.
-func TestUpsertShellMarkedBlock_EndMarkerBeforeStart(t *testing.T) {
-	existing := []byte("#!/usr/bin/env bash\n# librarian:end\necho 'user code'\n\n" +
-		shMarkerStart + "\noriginal body\n" + shMarkerEnd + "\n")
+// Worktree with a RELATIVE gitdir: path — git itself often writes these
+// (e.g., `gitdir: ../.git/worktrees/feat`). Installer must resolve them
+// relative to the worktree root, not to CWD.
+func TestInstallGitPostCommit_WorktreeRelativeGitdir(t *testing.T) {
+	dir := t.TempDir()
+	relGitdir := filepath.Join(".gitmain", "worktrees", "feat")
+	absGitdir := filepath.Join(dir, relGitdir)
+	if err := os.MkdirAll(absGitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".librarian"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+relGitdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	updated := upsertShellMarkedBlock(existing, shMarkerStart+"\nnew body\n"+shMarkerEnd+"\n")
-	got := string(updated)
-
-	// Exactly one pair of librarian markers — old block replaced, not duplicated.
-	if strings.Count(got, shMarkerStart) != 1 {
-		t.Errorf("expected one start marker, got %d:\n%s", strings.Count(got, shMarkerStart), got)
+	ws := &workspace.Workspace{Root: dir}
+	path, changed, err := installGitPostCommit(ws, nil)
+	if err != nil {
+		t.Fatalf("relative-gitdir worktree install: %v", err)
 	}
-	if !strings.Contains(got, "new body") {
-		t.Errorf("new body missing:\n%s", got)
+	if !changed {
+		t.Error("relative-gitdir install should report changed=true")
 	}
-	if strings.Contains(got, "original body") {
-		t.Errorf("old body still present:\n%s", got)
-	}
-	// User's pre-existing "# librarian:end" line is preserved.
-	if !strings.Contains(got, "# librarian:end\necho 'user code'") {
-		t.Errorf("user content with stray end-marker was corrupted:\n%s", got)
-	}
-}
-
-// Torn block: start marker present, end marker missing (user hand-edit went
-// wrong). Installer should recover by replacing from the start marker to EOF
-// rather than duplicating or refusing.
-func TestUpsertShellMarkedBlock_MissingEndMarker(t *testing.T) {
-	existing := []byte("#!/usr/bin/env bash\necho user\n\n" + shMarkerStart + "\nold body (no end marker!)\n")
-	updated := upsertShellMarkedBlock(existing, shMarkerStart+"\nnew\n"+shMarkerEnd+"\n")
-	got := string(updated)
-
-	if strings.Count(got, shMarkerStart) != 1 {
-		t.Errorf("expected one start marker, got %d:\n%s", strings.Count(got, shMarkerStart), got)
-	}
-	if !strings.Contains(got, shMarkerEnd) {
-		t.Errorf("new end marker missing:\n%s", got)
-	}
-	if strings.Contains(got, "old body") {
-		t.Errorf("torn block body not replaced:\n%s", got)
-	}
-	if !strings.Contains(got, "echo user") {
-		t.Errorf("user code before torn block lost:\n%s", got)
+	if !strings.HasPrefix(path, absGitdir) {
+		t.Errorf("expected hook under resolved absolute gitdir %s, got %s", absGitdir, path)
 	}
 }

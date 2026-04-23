@@ -27,8 +27,9 @@ Cursor, Gemini CLI) discover Librarian automatically.
 
 Pointers are written as delimited <!-- librarian:start/end --> blocks so reinstalls
 are idempotent and user content around the block is preserved. Hook entries in JSON
-configs (.claude/settings.json, .codex/hooks.json, .gemini/settings.json) are merged
-by command string so other hooks (bd prime, custom scripts) are left untouched.
+configs (.claude/settings.json, .codex/hooks.json) are merged by command string so
+other hooks (bd prime, custom scripts) are left untouched. Gemini CLI has no
+SessionStart hook API at present, so only GEMINI.md is written for that platform.
 
 Default behaviour when run on a TTY is an interactive checklist with detected
 platforms pre-checked. Scripted callers should pass --all or --platforms.
@@ -92,11 +93,31 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%s %d file(s):\n", verb, len(written))
 	for _, p := range written {
-		display := p
-		if rel, err := filepath.Rel(ws.Root, p); err == nil && !strings.HasPrefix(rel, "..") {
-			display = rel
+		fmt.Printf("  %s\n", relOrAbs(ws.Root, p))
+	}
+
+	// Warn about gitignored files. Teammates who clone the repo won't receive
+	// these and must re-run `librarian install` locally — surfacing that here
+	// prevents silent divergence between collaborators' assistant behaviour.
+	if !installDryRun {
+		if ignored := install.FilterGitignored(ws.Root, written); len(ignored) > 0 {
+			fmt.Println()
+			fmt.Println("Note: these files are gitignored and won't propagate to teammates:")
+			for _, p := range ignored {
+				fmt.Printf("  %s\n", relOrAbs(ws.Root, p))
+			}
+			fmt.Println("Teammates must run 'librarian install' locally to wire them up.")
 		}
-		fmt.Printf("  %s\n", display)
 	}
 	return nil
+}
+
+// relOrAbs returns the path relative to base when it resolves to somewhere
+// inside base, otherwise the original absolute path. Keeps summary output
+// short for project-local files while staying correct for anything outside.
+func relOrAbs(base, path string) string {
+	if rel, err := filepath.Rel(base, path); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return path
 }
