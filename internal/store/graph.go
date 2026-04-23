@@ -165,6 +165,48 @@ func (s *Store) FindNodes(query string, limit int) ([]Node, error) {
 	return out, rows.Err()
 }
 
+// ListNodes returns every graph_node row. Used by graph-wide analytics
+// (community detection, centrality) that need the full topology in memory.
+func (s *Store) ListNodes() ([]Node, error) {
+	rows, err := s.db.Query(`SELECT id, kind, label, source_path, metadata FROM graph_nodes`)
+	if err != nil {
+		return nil, fmt.Errorf("list_nodes: %w", err)
+	}
+	defer rows.Close()
+	var out []Node
+	for rows.Next() {
+		var n Node
+		var sp sql.NullString
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+			return nil, fmt.Errorf("list_nodes scan: %w", err)
+		}
+		if sp.Valid {
+			n.SourcePath = sp.String
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// ListEdges returns every graph_edges row. Companion to ListNodes for
+// graph-wide analytics.
+func (s *Store) ListEdges() ([]Edge, error) {
+	rows, err := s.db.Query(`SELECT from_node, to_node, kind, weight, metadata FROM graph_edges`)
+	if err != nil {
+		return nil, fmt.Errorf("list_edges: %w", err)
+	}
+	defer rows.Close()
+	var out []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.From, &e.To, &e.Kind, &e.Weight, &e.Metadata); err != nil {
+			return nil, fmt.Errorf("list_edges scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // Neighbors returns edges incident to nodeID.
 // direction: "out" (outgoing only), "in" (incoming only), "" or "both" (both directions).
 func (s *Store) Neighbors(nodeID, direction string) ([]Edge, error) {
