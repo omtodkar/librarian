@@ -57,7 +57,8 @@ func (s *Store) ListDocuments() ([]Document, error) {
 }
 
 func (s *Store) DeleteDocument(docID string) error {
-	// Delete vector entries for this document's chunks first
+	// Delete vector entries for this document's chunks first (not cascaded
+	// because sqlite-vec virtual tables don't participate in FK CASCADE).
 	_, err := s.db.Exec(`
 		DELETE FROM doc_chunk_vectors WHERE chunk_id IN (
 			SELECT id FROM doc_chunks WHERE doc_id = ?
@@ -66,25 +67,22 @@ func (s *Store) DeleteDocument(docID string) error {
 		return fmt.Errorf("delete_document vectors: %w", err)
 	}
 
-	// Delete related_docs edges (both directions)
-	_, err = s.db.Exec(`DELETE FROM related_docs WHERE from_doc_id = ? OR to_doc_id = ?`, docID, docID)
+	// Delete the document's graph node; graph_edges cascade via FK.
+	_, err = s.db.Exec(`DELETE FROM graph_nodes WHERE id = ?`, DocNodeID(docID))
 	if err != nil {
-		return fmt.Errorf("delete_document related_docs: %w", err)
+		return fmt.Errorf("delete_document graph_node: %w", err)
 	}
 
-	// Delete refs edges
+	// Delete refs + chunks + document. refs and doc_chunks cascade via FK on
+	// documents; explicit deletes here preserve the prior idempotency guarantee.
 	_, err = s.db.Exec(`DELETE FROM refs WHERE doc_id = ?`, docID)
 	if err != nil {
 		return fmt.Errorf("delete_document refs: %w", err)
 	}
-
-	// Delete chunks (CASCADE would handle this, but be explicit)
 	_, err = s.db.Exec(`DELETE FROM doc_chunks WHERE doc_id = ?`, docID)
 	if err != nil {
 		return fmt.Errorf("delete_document chunks: %w", err)
 	}
-
-	// Delete the document
 	_, err = s.db.Exec(`DELETE FROM documents WHERE id = ?`, docID)
 	if err != nil {
 		return fmt.Errorf("delete_document: %w", err)

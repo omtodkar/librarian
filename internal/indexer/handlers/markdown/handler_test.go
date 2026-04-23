@@ -76,8 +76,11 @@ Body A.
 			t.Errorf("Unit.Kind = %q, want %q", u.Kind, "section")
 		}
 	}
-	if doc.Metadata == nil || doc.Metadata["frontmatter"] == nil {
-		t.Error("expected frontmatter in metadata")
+	if doc.Frontmatter == nil {
+		t.Error("expected Frontmatter to be populated")
+	}
+	if len(doc.Headings) == 0 {
+		t.Error("expected Headings to be populated")
 	}
 }
 

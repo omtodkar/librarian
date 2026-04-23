@@ -55,27 +55,15 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("searching: %w", err)
 	}
 
-	// Collect referenced code files per chunk file path when requested.
 	var refs map[string][]string
 	if searchIncludeRefs {
-		refs = make(map[string][]string)
+		paths := make([]string, 0, len(chunks))
 		for _, chunk := range chunks {
-			if _, already := refs[chunk.FilePath]; already {
-				continue
-			}
-			doc, err := s.GetDocumentByPath(chunk.FilePath)
-			if err != nil || doc == nil {
-				continue
-			}
-			codeFiles, err := s.GetReferencedCodeFiles(doc.ID)
-			if err != nil {
-				continue
-			}
-			paths := make([]string, 0, len(codeFiles))
-			for _, cf := range codeFiles {
-				paths = append(paths, cf.FilePath)
-			}
-			refs[chunk.FilePath] = paths
+			paths = append(paths, chunk.FilePath)
+		}
+		refs, err = s.GetReferencedPathsForDocPaths(paths)
+		if err != nil {
+			return fmt.Errorf("collecting refs: %w", err)
 		}
 	}
 

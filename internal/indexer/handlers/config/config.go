@@ -49,17 +49,28 @@ func extractSignals(comments string) []indexer.Signal {
 	return out
 }
 
-// registerConfigHandlers is called by init() in each per-format file to wire a
-// single handler into the default registry. Consolidated here so the call
-// shape stays consistent.
-func registerConfigHandlers(handlers ...indexer.FileHandler) {
-	for _, h := range handlers {
+// init wires all config handlers into the default registry. A single
+// consolidated registration makes it obvious what this package contributes
+// and keeps the per-format files focused on their parser logic.
+func init() {
+	for _, h := range []indexer.FileHandler{
+		NewEnv(),
+		NewProperties(),
+		NewJSON(),
+		NewTOML(),
+		NewYAML(),
+		NewXML(),
+	} {
 		indexer.RegisterDefault(h)
 	}
 }
 
 // chunkFromUnits is the shared chunker for config handlers. Each top-level Unit
 // becomes one SectionInput; ChunkSections handles token-aware splitting.
+//
+// Unit-scoped signals (TODO/FIXME/NOTE extracted from comments) propagate into
+// the chunk via the pipeline's standard SignalLine + SignalMeta channels, so
+// ranking boosts pick them up the same way markdown signals do.
 func chunkFromUnits(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) []indexer.Chunk {
 	inputs := make([]indexer.SectionInput, 0, len(doc.Units))
 	for _, u := range doc.Units {
@@ -67,9 +78,11 @@ func chunkFromUnits(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) []indexer.Ch
 			continue
 		}
 		inputs = append(inputs, indexer.SectionInput{
-			Heading:   u.Title,
-			Hierarchy: []string{u.Title},
-			Content:   u.Content,
+			Heading:    u.Title,
+			Hierarchy:  []string{u.Title},
+			Content:    u.Content,
+			SignalLine: indexer.SignalLineFromSignals(u.Signals),
+			SignalMeta: indexer.SignalsToJSON(u.Signals),
 		})
 	}
 	return indexer.ChunkSections(doc.Title, doc.RawContent, inputs, opts)

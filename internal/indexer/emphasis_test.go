@@ -152,23 +152,21 @@ func TestSignalLine(t *testing.T) {
 		InlineLabels: []string{"warning"},
 		RiskMarkers:  []string{"deprecated"},
 	}
-	got := sig.SignalLine()
+	got := SignalLineFromSignals(sig.ToSignals())
 	if got != "Signals: warning, deprecated" {
-		t.Errorf("SignalLine() = %q, want %q", got, "Signals: warning, deprecated")
+		t.Errorf("SignalLineFromSignals = %q, want %q", got, "Signals: warning, deprecated")
 	}
 }
 
 func TestSignalLine_Empty(t *testing.T) {
 	sig := &EmphasisSignals{}
-	got := sig.SignalLine()
-	if got != "" {
-		t.Errorf("SignalLine() = %q, want empty string", got)
+	if got := SignalLineFromSignals(sig.ToSignals()); got != "" {
+		t.Errorf("SignalLineFromSignals(empty) = %q, want empty string", got)
 	}
 
 	var nilSig *EmphasisSignals
-	got = nilSig.SignalLine()
-	if got != "" {
-		t.Errorf("nil.SignalLine() = %q, want empty string", got)
+	if got := SignalLineFromSignals(nilSig.ToSignals()); got != "" {
+		t.Errorf("SignalLineFromSignals(nil) = %q, want empty string", got)
 	}
 }
 
@@ -177,20 +175,19 @@ func TestToJSON(t *testing.T) {
 		InlineLabels: []string{"warning"},
 		HasWarning:   true,
 	}
-	j := sig.ToJSON()
+	j := SignalsToJSON(sig.ToSignals())
 	if !strings.Contains(j, `"inline_labels"`) {
-		t.Errorf("ToJSON() missing inline_labels: %s", j)
+		t.Errorf("SignalsToJSON missing inline_labels: %s", j)
 	}
 	if !strings.Contains(j, `"has_warning":true`) {
-		t.Errorf("ToJSON() missing has_warning: %s", j)
+		t.Errorf("SignalsToJSON missing has_warning: %s", j)
 	}
 }
 
 func TestToJSON_Nil(t *testing.T) {
 	var sig *EmphasisSignals
-	got := sig.ToJSON()
-	if got != "{}" {
-		t.Errorf("nil.ToJSON() = %q, want %q", got, "{}")
+	if got := SignalsToJSON(sig.ToSignals()); got != "{}" {
+		t.Errorf("SignalsToJSON(nil) = %q, want %q", got, "{}")
 	}
 }
 

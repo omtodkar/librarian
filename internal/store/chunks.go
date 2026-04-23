@@ -128,9 +128,13 @@ func computeMetadataBoost(signalMetaJSON string) float64 {
 		return 0.0
 	}
 
+	// Fields mirror the JSON shape emitted by SignalsToJSON (signals.go).
+	// Extending this struct is safe; unknown keys are ignored by Unmarshal.
 	var signals struct {
 		InlineLabels []string `json:"inline_labels"`
 		RiskMarkers  []string `json:"risk_markers"`
+		Todos        []string `json:"todos"`
+		Rationale    []string `json:"rationale"`
 	}
 	if err := json.Unmarshal([]byte(signalMetaJSON), &signals); err != nil {
 		return 0.0
@@ -152,6 +156,14 @@ func computeMetadataBoost(signalMetaJSON string) float64 {
 	}
 	for range signals.RiskMarkers {
 		boost += 0.2
+	}
+	// TODOs and rationale (WHY/NOTE) carry caveats or design intent the author
+	// flagged; a small boost surfaces them without drowning out real warnings.
+	for range signals.Todos {
+		boost += 0.05
+	}
+	for range signals.Rationale {
+		boost += 0.05
 	}
 
 	if boost > 1.0 {

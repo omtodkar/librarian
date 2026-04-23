@@ -47,8 +47,7 @@ func (*Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error) {
 
 // Chunk implements indexer.FileHandler. It walks ParsedDoc.Units, converts section
 // units into the generic SectionInput shape, and delegates to indexer.ChunkSections
-// for the token-aware splitting/fallback logic. No ParsedDoc -> ParsedDocument
-// round-trip is required.
+// for the token-aware splitting/fallback logic.
 func (*Handler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	inputs := make([]indexer.SectionInput, 0, len(doc.Units))
 	for _, u := range doc.Units {
@@ -57,19 +56,12 @@ func (*Handler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer
 		}
 		hierarchy, _ := u.Metadata["hierarchy"].([]string)
 
-		line := ""
-		meta := "{}"
-		if emphasis := signalsToEmphasis(u.Signals); emphasis != nil {
-			line = emphasis.SignalLine()
-			meta = emphasis.ToJSON()
-		}
-
 		inputs = append(inputs, indexer.SectionInput{
 			Heading:    u.Title,
 			Hierarchy:  hierarchy,
 			Content:    u.Content,
-			SignalLine: line,
-			SignalMeta: meta,
+			SignalLine: indexer.SignalLineFromSignals(u.Signals),
+			SignalMeta: indexer.SignalsToJSON(u.Signals),
 		})
 	}
 	return indexer.ChunkSections(doc.Title, doc.RawContent, inputs, opts), nil

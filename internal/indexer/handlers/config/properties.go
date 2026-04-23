@@ -59,5 +59,3 @@ func (*PropertiesHandler) Parse(path string, content []byte) (*indexer.ParsedDoc
 func (*PropertiesHandler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	return chunkFromUnits(doc, opts), nil
 }
-
-func init() { registerConfigHandlers(NewProperties()) }

@@ -93,5 +93,3 @@ func (*JSONHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, erro
 func (*JSONHandler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	return chunkFromUnits(doc, opts), nil
 }
-
-func init() { registerConfigHandlers(NewJSON()) }

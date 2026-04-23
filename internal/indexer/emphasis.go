@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 	"unicode"
 
@@ -260,29 +259,26 @@ func mergeSignals(section *Section, src *EmphasisSignals) {
 	}
 }
 
-// SignalLine generates a selective embedding augmentation string.
-// Only includes InlineLabels and RiskMarkers (not all emphasis terms).
-func (s *EmphasisSignals) SignalLine() string {
+// ToSignals converts the markdown-specific EmphasisSignals into the generic
+// []Signal shape. Used by the chunker and handler paths so there's a single
+// source of truth for signal-line and signal-meta formatting
+// (SignalLineFromSignals and SignalsToJSON in signals.go).
+func (s *EmphasisSignals) ToSignals() []Signal {
 	if s == nil {
-		return ""
+		return nil
 	}
-	var parts []string
-	parts = append(parts, s.InlineLabels...)
-	parts = append(parts, s.RiskMarkers...)
-	if len(parts) == 0 {
-		return ""
+	var out []Signal
+	for _, l := range s.InlineLabels {
+		out = append(out, Signal{Kind: "label", Value: l})
 	}
-	return "Signals: " + strings.Join(parts, ", ")
-}
-
-// ToJSON serializes the signals to JSON for storage.
-func (s *EmphasisSignals) ToJSON() string {
-	if s == nil {
-		return "{}"
+	for _, r := range s.RiskMarkers {
+		out = append(out, Signal{Kind: "risk", Value: r})
 	}
-	b, err := json.Marshal(s)
-	if err != nil {
-		return "{}"
+	for _, t := range s.EmphasisTerms {
+		out = append(out, Signal{Kind: "emphasis", Value: t})
 	}
-	return string(b)
+	for k, v := range s.LabelValues {
+		out = append(out, Signal{Kind: "label-value", Value: k, Detail: v})
+	}
+	return out
 }

@@ -10,20 +10,19 @@ import (
 // flat headings list) live in ParsedDoc.Metadata.
 func toParsedDoc(pd *indexer.ParsedDocument, path string) *indexer.ParsedDoc {
 	doc := &indexer.ParsedDoc{
-		Path:       path,
-		Format:     "markdown",
-		Title:      pd.Title,
-		DocType:    pd.DocType,
-		Summary:    pd.Summary,
-		RawContent: pd.RawContent,
-		Metadata:   map[string]any{},
+		Path:        path,
+		Format:      "markdown",
+		Title:       pd.Title,
+		DocType:     pd.DocType,
+		Summary:     pd.Summary,
+		Headings:    pd.Headings,
+		Frontmatter: pd.Frontmatter,
+		RawContent:  pd.RawContent,
+		Metadata:    map[string]any{},
 	}
-	if pd.Frontmatter != nil {
-		doc.Metadata["frontmatter"] = pd.Frontmatter
-	}
-	if len(pd.Headings) > 0 {
-		doc.Metadata["headings"] = pd.Headings
-	}
+	// Diagrams and Tables are markdown-specific extracted structures; keep
+	// them in Metadata so consumers that care about them can type-assert,
+	// while leaving the generic pipeline format-agnostic.
 	if len(pd.Diagrams) > 0 {
 		doc.Metadata["diagrams"] = pd.Diagrams
 	}
@@ -51,9 +50,7 @@ func sectionToUnit(s indexer.Section) indexer.Unit {
 		// Preserved as a slice so round-trip survives headings containing " > ".
 		u.Metadata["hierarchy"] = s.Hierarchy
 	}
-	if s.Signals != nil {
-		u.Signals = emphasisToSignals(s.Signals)
-	}
+	u.Signals = s.Signals.ToSignals()
 	return u
 }
 
@@ -68,61 +65,4 @@ func joinHierarchy(h []string) string {
 	return out
 }
 
-// emphasisToSignals flattens an EmphasisSignals struct into the generic []Signal
-// shape. Each InlineLabel / RiskMarker / EmphasisTerm becomes its own Signal;
-// each LabelValues entry becomes a "label-value" Signal with Value=key, Detail=value.
-// HasWarning / HasDecision are omitted because they're derivable from InlineLabels.
-func emphasisToSignals(e *indexer.EmphasisSignals) []indexer.Signal {
-	if e == nil {
-		return nil
-	}
-	var out []indexer.Signal
-	for _, l := range e.InlineLabels {
-		out = append(out, indexer.Signal{Kind: "label", Value: l})
-	}
-	for _, r := range e.RiskMarkers {
-		out = append(out, indexer.Signal{Kind: "risk", Value: r})
-	}
-	for _, t := range e.EmphasisTerms {
-		out = append(out, indexer.Signal{Kind: "emphasis", Value: t})
-	}
-	for k, v := range e.LabelValues {
-		out = append(out, indexer.Signal{Kind: "label-value", Value: k, Detail: v})
-	}
-	return out
-}
 
-// signalsToEmphasis is the inverse of emphasisToSignals. HasWarning / HasDecision
-// are re-derived from InlineLabels.
-func signalsToEmphasis(sigs []indexer.Signal) *indexer.EmphasisSignals {
-	if len(sigs) == 0 {
-		return nil
-	}
-	e := &indexer.EmphasisSignals{}
-	for _, s := range sigs {
-		switch s.Kind {
-		case "label":
-			e.InlineLabels = append(e.InlineLabels, s.Value)
-			switch s.Value {
-			case "warning":
-				e.HasWarning = true
-			case "decision":
-				e.HasDecision = true
-			}
-		case "risk":
-			e.RiskMarkers = append(e.RiskMarkers, s.Value)
-		case "emphasis":
-			e.EmphasisTerms = append(e.EmphasisTerms, s.Value)
-		case "label-value":
-			if e.LabelValues == nil {
-				e.LabelValues = map[string]string{}
-			}
-			e.LabelValues[s.Value] = s.Detail
-		}
-	}
-	if len(e.InlineLabels) == 0 && len(e.RiskMarkers) == 0 &&
-		len(e.EmphasisTerms) == 0 && len(e.LabelValues) == 0 {
-		return nil
-	}
-	return e
-}

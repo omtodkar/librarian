@@ -12,23 +12,37 @@ import (
 // it prints them to stderr and returns an error asking for disambiguation.
 //
 // Resolution order:
-//  1. Exact node id (e.g. "doc:abc-123", "file:internal/auth/service.go").
-//  2. Common prefixes tried automatically: "doc:<input>", "file:<input>".
-//  3. Substring match against id, label, and source_path (FindNodes).
+//  1. Exact node id (e.g. "doc:abc-123", "file:internal/auth/service.go") —
+//     an exact hit short-circuits everything else.
+//  2. All automatic prefix-expansions ("doc:<input>", "file:<input>", etc.)
+//     combined into a candidate set.
+//  3. If still empty, substring match against id, label, and source_path.
+//
+// Step 2 collects *all* prefix hits so an input like "auth" that matches both
+// "doc:auth" and "file:auth" surfaces the ambiguity instead of silently picking
+// whichever prefix the loop hits first.
 func resolveNode(s *store.Store, query string) (*store.Node, error) {
 	if n, err := s.GetNode(query); err == nil && n != nil {
 		return n, nil
 	}
-	for _, prefix := range []string{"doc:", "file:"} {
-		if n, err := s.GetNode(prefix + query); err == nil && n != nil {
-			return n, nil
+
+	var candidates []store.Node
+	seen := make(map[string]bool)
+	for _, prefix := range store.NodeIDPrefixes() {
+		if n, err := s.GetNode(prefix + query); err == nil && n != nil && !seen[n.ID] {
+			candidates = append(candidates, *n)
+			seen[n.ID] = true
 		}
 	}
 
-	candidates, err := s.FindNodes(query, 10)
-	if err != nil {
-		return nil, fmt.Errorf("find_nodes: %w", err)
+	if len(candidates) == 0 {
+		found, err := s.FindNodes(query, 10)
+		if err != nil {
+			return nil, fmt.Errorf("find_nodes: %w", err)
+		}
+		candidates = found
 	}
+
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no node matching %q", query)
 	}

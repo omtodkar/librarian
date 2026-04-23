@@ -108,6 +108,7 @@ func (*YAMLHandler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]ind
 	return chunkFromUnits(doc, opts), nil
 }
 
+
 // gatherComments concatenates head / line / foot comments from a key/value pair
 // into a single string for signal extraction. Empty if no comments.
 func gatherComments(keyNode, valNode *yaml.Node) string {
@@ -120,5 +121,3 @@ func gatherComments(keyNode, valNode *yaml.Node) string {
 	}
 	return strings.Join(parts, "\n")
 }
-
-func init() { registerConfigHandlers(NewYAML()) }

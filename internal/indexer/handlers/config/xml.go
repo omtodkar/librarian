@@ -62,5 +62,3 @@ func (*XMLHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, error
 func (*XMLHandler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	return chunkFromUnits(doc, opts), nil
 }
-
-func init() { registerConfigHandlers(NewXML()) }

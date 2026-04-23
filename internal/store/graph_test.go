@@ -116,6 +116,51 @@ func TestGraph_ShortestPath(t *testing.T) {
 	}
 }
 
+// TestGraph_ShortestPath_SpecialCharsInNodeIDs guards against a bug in the
+// earlier CTE-based ShortestPath: node IDs containing `|`, `,`, `>`, `_`, or
+// `%` would either be mis-parsed when splitting the edge trail, or match too
+// many rows under the NOT LIKE cycle guard. The application-level BFS is
+// byte-exact and immune to either.
+func TestGraph_ShortestPath_SpecialCharsInNodeIDs(t *testing.T) {
+	s := newTestStore(t)
+	weird := []string{"file:a|b.go", "file:a,b.go", "file:a>b.go", "file:a_b%c.go"}
+	for _, id := range weird {
+		s.UpsertNode(Node{ID: id, Kind: NodeKindCodeFile, Label: id})
+	}
+	for i := 0; i < len(weird)-1; i++ {
+		s.UpsertEdge(Edge{From: weird[i], To: weird[i+1], Kind: "next"})
+	}
+
+	path, err := s.ShortestPath(weird[0], weird[3], 0)
+	if err != nil {
+		t.Fatalf("ShortestPath: %v", err)
+	}
+	if len(path) != 3 {
+		t.Fatalf("path length = %d, want 3: %+v", len(path), path)
+	}
+	for i, step := range path {
+		if step.From != weird[i] || step.To != weird[i+1] {
+			t.Errorf("step %d = %+v, want %s->%s", i, step, weird[i], weird[i+1])
+		}
+	}
+}
+
+// TestGraph_ShortestPath_SelfLoop documents that ShortestPath returns (nil,
+// nil) when source and destination are the same node. Callers can treat this
+// as "the empty path" rather than "no path exists".
+func TestGraph_ShortestPath_SelfLoop(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertNode(Node{ID: "doc:a", Kind: NodeKindDocument})
+
+	path, err := s.ShortestPath("doc:a", "doc:a", 0)
+	if err != nil {
+		t.Fatalf("ShortestPath: %v", err)
+	}
+	if path != nil {
+		t.Errorf("expected nil path for fromID == toID, got %+v", path)
+	}
+}
+
 func TestGraph_ShortestPath_NoPath(t *testing.T) {
 	s := newTestStore(t)
 	s.UpsertNode(Node{ID: "doc:a", Kind: NodeKindDocument})

@@ -4,9 +4,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 )
+
+// likeEscaper backslash-escapes LIKE wildcard characters in a user-supplied
+// query so substring matches don't degrade when the query literally contains
+// "%" or "_". The SQL statement must pair this with `ESCAPE '\'`.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // Graph edge kinds used by the current indexer. Additional kinds will land as
 // new handlers extract richer structural information (imports, calls, etc.).
@@ -15,10 +19,13 @@ const (
 	EdgeKindSharedCodeRef  = "shared_code_ref"  // document → document (both mention same code file)
 )
 
-// Graph node kinds.
+// Graph node kinds. Additional kinds will land as new handlers emit richer
+// structural information.
 const (
-	NodeKindDocument = "document"
-	NodeKindCodeFile = "code_file"
+	NodeKindDocument  = "document"
+	NodeKindCodeFile  = "code_file"
+	NodeKindSymbol    = "symbol"     // tree-sitter method/class/function nodes
+	NodeKindConfigKey = "config_key" // YAML/TOML/properties key paths
 )
 
 // Node is a row in graph_nodes.
@@ -52,6 +59,22 @@ func DocNodeID(docID string) string { return "doc:" + docID }
 
 // CodeFileNodeID returns the stable graph node id for a code file (keyed by path).
 func CodeFileNodeID(filePath string) string { return "file:" + filePath }
+
+// SymbolNodeID returns the stable graph node id for a code symbol (fully
+// qualified name, e.g. "com.acme.AuthService.validate").
+func SymbolNodeID(target string) string { return "sym:" + target }
+
+// ConfigKeyNodeID returns the stable graph node id for a config key (dotted
+// path, e.g. "spring.datasource.url").
+func ConfigKeyNodeID(target string) string { return "key:" + target }
+
+// NodeIDPrefixes returns the namespaced id prefixes used by the built-in node
+// id constructors. Callers that resolve user input against all known node
+// kinds (e.g. the CLI's resolveNode) iterate this list rather than hardcoding
+// a parallel copy.
+func NodeIDPrefixes() []string {
+	return []string{"doc:", "file:", "sym:", "key:"}
+}
 
 // UpsertNode inserts or replaces a graph node. Idempotent — safe to call on re-index.
 func (s *Store) UpsertNode(n Node) error {
@@ -108,16 +131,18 @@ func (s *Store) GetNode(id string) (*Node, error) {
 }
 
 // FindNodes returns nodes matching a substring against id, label, or source_path.
-// Used by CLI commands to accept friendly names.
+// Used by CLI commands to accept friendly names. Wildcard characters (%, _, \)
+// in the query are backslash-escaped so a query like "test_helpers" matches
+// literally instead of treating "_" as "any single char".
 func (s *Store) FindNodes(query string, limit int) ([]Node, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	like := "%" + query + "%"
+	like := "%" + likeEscaper.Replace(query) + "%"
 	rows, err := s.db.Query(`
 		SELECT id, kind, label, source_path, metadata
 		FROM graph_nodes
-		WHERE id = ? OR label LIKE ? OR source_path LIKE ?
+		WHERE id = ? OR label LIKE ? ESCAPE '\' OR source_path LIKE ? ESCAPE '\'
 		ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, label
 		LIMIT ?`, query, like, like, query, limit)
 	if err != nil {
@@ -174,63 +199,88 @@ func (s *Store) Neighbors(nodeID, direction string) ([]Edge, error) {
 	return out, rows.Err()
 }
 
-// ShortestPath finds the shortest directed path from → to via BFS in SQL
-// (recursive CTE). maxDepth caps the search; zero or negative values default to 6.
-// Returns nil if no path exists.
+// ShortestPath finds the shortest directed path from → to via breadth-first
+// search over graph_edges. maxDepth caps the search; zero or negative values
+// default to 6. Returns nil if no path exists.
 //
-// The recursive CTE encodes the traversal trail as a delimited string so we can
-// skip visited nodes and reconstruct the edge sequence from a single column at
-// the end — cheaper than joining back to graph_edges per-step.
+// Implemented as application-level BFS rather than a recursive CTE so that
+// node IDs containing SQL-LIKE special characters (`%`, `_`) or the string
+// delimiters a CTE would need (`|`, `,`, `>`) don't corrupt traversal. For
+// typical project graphs (< 50k edges) the extra round-trips are negligible.
 func (s *Store) ShortestPath(fromID, toID string, maxDepth int) ([]PathStep, error) {
 	if maxDepth <= 0 {
 		maxDepth = 6
 	}
-	const q = `
-		WITH RECURSIVE paths AS (
-			SELECT from_node, to_node, 1 AS depth,
-				   '>' || from_node || '>' || to_node || '>' AS trail,
-				   from_node || '|' || to_node || '|' || kind || '|' || weight AS edges
-			FROM graph_edges
-			WHERE from_node = ?
-
-			UNION ALL
-
-			SELECT p.from_node, e.to_node, p.depth + 1,
-				   p.trail || e.to_node || '>',
-				   p.edges || ',' || e.from_node || '|' || e.to_node || '|' || e.kind || '|' || e.weight
-			FROM paths p
-			JOIN graph_edges e ON e.from_node = p.to_node
-			WHERE p.depth < ?
-			AND p.trail NOT LIKE '%>' || e.to_node || '>%'
-		)
-		SELECT edges FROM paths
-		WHERE to_node = ?
-		ORDER BY depth ASC
-		LIMIT 1`
-	var edges string
-	err := s.db.QueryRow(q, fromID, maxDepth, toID).Scan(&edges)
-	if errors.Is(err, sql.ErrNoRows) {
+	if fromID == toID {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("shortest_path: %w", err)
-	}
 
-	var steps []PathStep
-	for _, e := range strings.Split(edges, ",") {
-		parts := strings.Split(e, "|")
-		if len(parts) < 4 {
-			continue
+	// visited records, for every reached node, the edge that got us there.
+	// Reconstructing the path is then a walk back from toID to fromID.
+	visited := map[string]Edge{fromID: {}}
+	frontier := []string{fromID}
+
+	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
+		var next []string
+		for _, nodeID := range frontier {
+			edges, err := s.outgoingEdges(nodeID)
+			if err != nil {
+				return nil, fmt.Errorf("shortest_path bfs: %w", err)
+			}
+			for _, e := range edges {
+				if _, seen := visited[e.To]; seen {
+					continue
+				}
+				visited[e.To] = e
+				if e.To == toID {
+					return reconstructPath(visited, fromID, toID), nil
+				}
+				next = append(next, e.To)
+			}
 		}
-		w, _ := strconv.ParseFloat(parts[3], 64)
-		steps = append(steps, PathStep{
-			From:   parts[0],
-			To:     parts[1],
-			Kind:   parts[2],
-			Weight: w,
-		})
+		frontier = next
 	}
-	return steps, nil
+	return nil, nil
+}
+
+// outgoingEdges returns outgoing edges for a node. Kept separate from
+// Neighbors so ShortestPath always walks in the directed "out" sense without
+// bouncing on incoming edges.
+func (s *Store) outgoingEdges(nodeID string) ([]Edge, error) {
+	rows, err := s.db.Query(
+		`SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE from_node = ?`,
+		nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("outgoing_edges: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.From, &e.To, &e.Kind, &e.Weight, &e.Metadata); err != nil {
+			return nil, fmt.Errorf("outgoing_edges scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// reconstructPath walks the visited-edge map backwards from toID to fromID,
+// returning the edges in forward order.
+func reconstructPath(visited map[string]Edge, fromID, toID string) []PathStep {
+	var steps []PathStep
+	for cur := toID; cur != fromID; {
+		e, ok := visited[cur]
+		if !ok {
+			// Should not happen if BFS reached toID, but guard defensively
+			// rather than loop forever on a corrupted visited map.
+			return nil
+		}
+		steps = append([]PathStep{{From: e.From, To: e.To, Kind: e.Kind, Weight: e.Weight}}, steps...)
+		cur = e.From
+	}
+	return steps
 }
 
 // DeleteNode removes a node and (via FK cascade) its incident edges.

@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -52,6 +53,15 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 			return mcp.NewToolResultText("No results found for query: " + query), nil
 		}
 
+		var refs map[string][]string
+		if includeRefs {
+			paths := make([]string, 0, len(chunks))
+			for _, c := range chunks {
+				paths = append(paths, c.FilePath)
+			}
+			refs, _ = st.GetReferencedPathsForDocPaths(paths)
+		}
+
 		var output string
 		output = fmt.Sprintf("Found %d results for %q:\n\n", len(chunks), query)
 
@@ -62,22 +72,11 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 			output += fmt.Sprintf("**Content:**\n%s\n\n", chunk.Content)
 
 			if includeRefs {
-				doc, err := st.GetDocumentByPath(chunk.FilePath)
-				if err != nil {
+				paths, ok := refs[chunk.FilePath]
+				if !ok || len(paths) == 0 {
 					continue
 				}
-				codeFiles, err := st.GetReferencedCodeFiles(doc.ID)
-				if err != nil || len(codeFiles) == 0 {
-					continue
-				}
-				output += "**Refs:** "
-				for j, cf := range codeFiles {
-					if j > 0 {
-						output += ", "
-					}
-					output += cf.FilePath
-				}
-				output += "\n\n"
+				output += "**Refs:** " + strings.Join(paths, ", ") + "\n\n"
 			}
 		}
 

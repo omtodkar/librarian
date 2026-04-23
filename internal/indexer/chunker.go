@@ -142,24 +142,20 @@ func ChunkSections(docTitle, rawContent string, sections []SectionInput, cfg Chu
 }
 
 // ChunkDocument is the legacy entry point for the markdown-specific ParsedDocument
-// shape. It converts Sections to []SectionInput and delegates to ChunkSections so
-// the chunking logic has a single source of truth. New handler code should call
-// ChunkSections directly.
+// shape. It converts Sections to []SectionInput via the shared signal path
+// (EmphasisSignals.ToSignals + SignalLineFromSignals + SignalsToJSON) and
+// delegates to ChunkSections so the chunking logic has a single source of
+// truth. New handler code should call ChunkSections directly.
 func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 	inputs := make([]SectionInput, 0, len(doc.Sections))
 	for _, s := range doc.Sections {
-		line := ""
-		meta := "{}"
-		if s.Signals != nil {
-			line = s.Signals.SignalLine()
-			meta = s.Signals.ToJSON()
-		}
+		sigs := s.Signals.ToSignals()
 		inputs = append(inputs, SectionInput{
 			Heading:    s.Heading,
 			Hierarchy:  s.Hierarchy,
 			Content:    s.Content,
-			SignalLine: line,
-			SignalMeta: meta,
+			SignalLine: SignalLineFromSignals(sigs),
+			SignalMeta: SignalsToJSON(sigs),
 		})
 	}
 	return ChunkSections(doc.Title, doc.RawContent, inputs, cfg)

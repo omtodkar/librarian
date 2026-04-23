@@ -56,5 +56,3 @@ func (*EnvHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, error
 func (*EnvHandler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	return chunkFromUnits(doc, opts), nil
 }
-
-func init() { registerConfigHandlers(NewEnv()) }

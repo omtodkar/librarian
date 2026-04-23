@@ -80,10 +80,22 @@ func (idx *Indexer) IndexSingleFile(filePath, absPath string, force bool) (*Inde
 		FilePath: filePath,
 		AbsPath:  absPath,
 	}
-	err := idx.indexFile(file, result, force)
-	if err != nil {
+	if err := idx.indexFile(file, result, force); err != nil {
 		return nil, err
 	}
+
+	// Refresh graph edges over all indexed documents so shared_code_ref edges
+	// stay consistent after a single-file update. Cheaper than selectively
+	// invalidating the subset that references files this doc touched.
+	docs, err := idx.store.ListDocuments()
+	if err != nil {
+		return nil, fmt.Errorf("refresh graph after single-file index: %w", err)
+	}
+	files := make([]WalkResult, 0, len(docs))
+	for _, d := range docs {
+		files = append(files, WalkResult{FilePath: d.FilePath})
+	}
+	idx.buildGraphEdges(files)
 
 	return result, nil
 }
@@ -106,21 +118,14 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 
 	contentHash := computeHash(parsed.RawContent)
 
-	// Check if document already exists and hasn't changed
-	if !force {
-		existing, err := idx.store.GetDocumentByPath(file.FilePath)
-		if err == nil && existing != nil && existing.ContentHash == contentHash {
+	// Skip-if-unchanged (unless --force). In both cases, any prior version of
+	// the document is deleted before re-insert so we never leave orphans.
+	if existing, _ := idx.store.GetDocumentByPath(file.FilePath); existing != nil {
+		if !force && existing.ContentHash == contentHash {
 			result.Skipped++
 			return nil
 		}
-		if err == nil && existing != nil {
-			idx.store.DeleteDocument(existing.ID)
-		}
-	} else {
-		existing, err := idx.store.GetDocumentByPath(file.FilePath)
-		if err == nil && existing != nil {
-			idx.store.DeleteDocument(existing.ID)
-		}
+		idx.store.DeleteDocument(existing.ID)
 	}
 
 	chunkCfg := ChunkConfig{
@@ -133,22 +138,13 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		return fmt.Errorf("chunking: %w", err)
 	}
 
-	var headings []string
-	if h, ok := parsed.Metadata["headings"].([]string); ok {
-		headings = h
-	}
-	var frontmatter map[string]interface{}
-	if fm, ok := parsed.Metadata["frontmatter"].(map[string]interface{}); ok {
-		frontmatter = fm
-	}
-
 	doc, err := idx.store.AddDocument(store.AddDocumentInput{
 		FilePath:    file.FilePath,
 		Title:       parsed.Title,
 		DocType:     parsed.DocType,
 		Summary:     parsed.Summary,
-		Headings:    HeadingsToJSON(headings),
-		Frontmatter: FrontmatterToJSON(frontmatter),
+		Headings:    HeadingsToJSON(parsed.Headings),
+		Frontmatter: FrontmatterToJSON(parsed.Frontmatter),
 		ContentHash: contentHash,
 		ChunkCount:  uint32(len(chunks)),
 	})
@@ -199,8 +195,61 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		result.CodeFilesFound++
 	}
 
+	// Handler-emitted structured refs (tree-sitter call/import edges, config-key
+	// references, etc.) flow straight into graph_edges. These bypass the
+	// refs/code_files tables because their targets (symbols, config keys) don't
+	// fit that file-centric schema. For a markdown file where the handler only
+	// populates codeRefs via the regex pass above, parsed.Refs is empty and
+	// this loop is a no-op.
+	for _, ref := range parsed.Refs {
+		targetID := graphTargetID(ref)
+		if targetID == "" {
+			continue
+		}
+		idx.store.UpsertNode(store.Node{
+			ID:         targetID,
+			Kind:       graphNodeKindFromRef(ref),
+			Label:      ref.Target,
+			SourcePath: ref.Target,
+		})
+		idx.store.UpsertEdge(store.Edge{
+			From: store.DocNodeID(doc.ID),
+			To:   targetID,
+			Kind: ref.Kind,
+		})
+	}
+
 	result.DocumentsIndexed++
 	return nil
+}
+
+// graphTargetID maps a Reference to a namespaced graph node id via the store's
+// node-id constructors. Returns "" for reference kinds that don't yet have a
+// node-kind mapping (the edge is skipped rather than invented).
+func graphTargetID(ref Reference) string {
+	switch ref.Kind {
+	case "code-file":
+		return store.CodeFileNodeID(ref.Target)
+	case "import", "call", "extends", "implements":
+		return store.SymbolNodeID(ref.Target)
+	case "config-key":
+		return store.ConfigKeyNodeID(ref.Target)
+	}
+	return ""
+}
+
+// graphNodeKindFromRef maps a Reference kind to the store NodeKind of its
+// target. Must agree with graphTargetID on which kinds are supported.
+func graphNodeKindFromRef(ref Reference) string {
+	switch ref.Kind {
+	case "code-file":
+		return store.NodeKindCodeFile
+	case "import", "call", "extends", "implements":
+		return store.NodeKindSymbol
+	case "config-key":
+		return store.NodeKindConfigKey
+	}
+	return "unknown"
 }
 
 // buildGraphEdges is the post-indexing pass that projects document/code-file/refs

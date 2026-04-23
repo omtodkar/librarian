@@ -59,6 +59,16 @@ type ParsedDoc struct {
 	// paragraph, etc. May be empty.
 	Summary string
 
+	// Headings is a flat list of the document's heading / section titles, in
+	// document order. Populated by handlers whose format has a natural heading
+	// structure (markdown, PDF with ToC). Consumers use this for quick
+	// table-of-contents rendering without walking Units.
+	Headings []string
+
+	// Frontmatter is the parsed YAML / TOML frontmatter block of a markdown
+	// document, or nil for formats without frontmatter.
+	Frontmatter map[string]any
+
 	// Units are hierarchical parsed content nodes. A markdown document is a tree of
 	// sections; a Java file is a tree of package > class > method; a YAML document is
 	// a tree of key paths.
