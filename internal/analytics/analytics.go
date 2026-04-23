@@ -92,10 +92,24 @@ type SuggestedQuestion struct {
 	Kind     string   // "god_pair" | "bridge" | "cluster_tour"
 }
 
+// Result is the full output of Analyze: the Report plus the raw nodes +
+// edges the analytics pass queried. Embedding *Report means callers that
+// only care about the analyses (`result.Communities`, `result.GodNodes`)
+// keep working without a refactor; callers that also need to render the
+// raw graph (cmd/report.go, lib-652 install commands) read Nodes / Edges
+// directly instead of re-querying the store and risking a WAL-snapshot
+// mismatch.
+type Result struct {
+	*Report
+	Nodes []store.Node
+	Edges []store.Edge
+}
+
 // Analyze runs every analysis pass against the current graph store and
-// returns a Report. Returns an empty-but-non-nil Report for an empty graph
-// so downstream code can render "nothing to show" without nil-checking.
-func Analyze(s *store.Store) (*Report, error) {
+// returns a Result. Returns a Result with an empty-but-non-nil Report for
+// an empty graph so downstream code can render "nothing to show" without
+// nil-checking.
+func Analyze(s *store.Store) (*Result, error) {
 	nodes, err := s.ListNodes()
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -109,17 +123,18 @@ func Analyze(s *store.Store) (*Report, error) {
 		TotalNodes: len(nodes),
 		TotalEdges: len(edges),
 	}
+	result := &Result{Report: report, Nodes: nodes, Edges: edges}
 	if len(nodes) == 0 {
-		return report, nil
+		return result, nil
 	}
 
 	// One pass to build shared state — every downstream computation reads
 	// these maps. Consolidated here to avoid the earlier drift where
 	// buildGraph and computeGodNodes each recomputed degree with subtly
 	// different semantics (self-loop handling, duplicate edges).
-	labels := buildLabels(nodes)
+	labels := BuildLabels(nodes)
 	kinds := buildKinds(nodes)
-	degree := buildDegree(edges)
+	degree := BuildDegree(edges)
 
 	g := buildGonumGraph(nodes, edges)
 	report.Communities = detectCommunities(g, nodes, labels, degree)
@@ -135,13 +150,13 @@ func Analyze(s *store.Store) (*Report, error) {
 	report.SurprisingConnections = computeSurprisingConnections(edges, nodeToCommunity, 10)
 	report.SuggestedQuestions = suggestQuestions(report, labels)
 
-	return report, nil
+	return result, nil
 }
 
-// buildLabels maps node id → display label. Returns the stored Label when
-// present, else the bare id. This is the single source of truth for label
-// lookups in the analytics package; downstream code reads from the map.
-func buildLabels(nodes []store.Node) map[string]string {
+// BuildLabels maps node id -> display label. Returns the stored Label when
+// present, else the bare id. Exported so the report package shares the
+// single source of truth for label derivation.
+func BuildLabels(nodes []store.Node) map[string]string {
 	out := make(map[string]string, len(nodes))
 	for _, n := range nodes {
 		if n.Label != "" {
@@ -153,7 +168,8 @@ func buildLabels(nodes []store.Node) map[string]string {
 	return out
 }
 
-// buildKinds maps node id → NodeKind.
+// buildKinds maps node id -> NodeKind. Unexported — no external caller
+// currently needs it; export if the list grows.
 func buildKinds(nodes []store.Node) map[string]string {
 	out := make(map[string]string, len(nodes))
 	for _, n := range nodes {
@@ -162,10 +178,11 @@ func buildKinds(nodes []store.Node) map[string]string {
 	return out
 }
 
-// buildDegree counts edge incidences per node. Self-loops contribute +1 to
+// BuildDegree counts edge incidences per node. Self-loops contribute +1 to
 // the single endpoint (not +2); duplicate typed edges each contribute. See
-// package doc for the rationale.
-func buildDegree(edges []store.Edge) map[string]int {
+// package doc for the rationale. Exported so the report package doesn't
+// have to reimplement this and drift from the documented semantics.
+func BuildDegree(edges []store.Edge) map[string]int {
 	out := make(map[string]int)
 	for _, e := range edges {
 		out[e.From]++
