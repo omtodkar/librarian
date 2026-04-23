@@ -10,44 +10,8 @@
 package config
 
 import (
-	"regexp"
-	"strings"
-
 	"librarian/internal/indexer"
 )
-
-// rationaleRegex catches common rationale markers in comments. Matches the
-// marker at the start of a trimmed line or after whitespace following a comment
-// leader (#, //, <!--).
-var rationaleRegex = regexp.MustCompile(`(?i)\b(TODO|FIXME|HACK|WHY|NOTE)\b:?\s*(.*)$`)
-
-// extractSignals scans a block of comment lines for rationale markers and
-// returns the corresponding Signals. The caller is responsible for stripping
-// comment leaders (# / // / <!-- -->) before passing the text in.
-func extractSignals(comments string) []indexer.Signal {
-	if comments == "" {
-		return nil
-	}
-	var out []indexer.Signal
-	for _, line := range strings.Split(comments, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		m := rationaleRegex.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		kind := strings.ToLower(m[1])
-		switch kind {
-		case "todo", "fixme", "hack":
-			out = append(out, indexer.Signal{Kind: "todo", Value: kind, Detail: strings.TrimSpace(m[2])})
-		case "why", "note":
-			out = append(out, indexer.Signal{Kind: "rationale", Value: kind, Detail: strings.TrimSpace(m[2])})
-		}
-	}
-	return out
-}
 
 // init wires all config handlers into the default registry. A single
 // consolidated registration makes it obvious what this package contributes

@@ -37,7 +37,7 @@ func (*XMLHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, error
 	for _, m := range xmlCommentRegex.FindAllStringSubmatch(raw, -1) {
 		commentBodies = append(commentBodies, m[1])
 	}
-	signals := extractSignals(strings.Join(commentBodies, "\n"))
+	signals := indexer.ExtractRationaleSignals(strings.Join(commentBodies, "\n"))
 
 	doc := &indexer.ParsedDoc{
 		Path:       path,

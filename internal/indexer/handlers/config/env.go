@@ -40,7 +40,7 @@ func (*EnvHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, error
 		DocType:    "env",
 		RawContent: raw,
 		Metadata:   map[string]any{},
-		Signals:    extractSignals(strings.Join(commentLines, "\n")),
+		Signals:    indexer.ExtractRationaleSignals(strings.Join(commentLines, "\n")),
 	}
 
 	doc.Units = []indexer.Unit{{

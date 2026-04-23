@@ -2,8 +2,48 @@ package indexer
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
+
+// rationaleRegex matches TODO / FIXME / HACK / WHY / NOTE markers inside a
+// comment body. Comment leaders ("//", "/*", "#", "<!--", etc.) must already
+// be stripped before the text reaches this regex.
+var rationaleRegex = regexp.MustCompile(`(?i)\b(TODO|FIXME|HACK|WHY|NOTE)\b:?\s*(.*)$`)
+
+// ExtractRationaleSignals scans a block of text line-by-line for rationale
+// markers and returns the corresponding generic Signals. TODO/FIXME/HACK are
+// emitted as Kind="todo"; WHY/NOTE as Kind="rationale". Value holds the
+// lower-cased marker word; Detail holds the text after it on the same line.
+//
+// Handlers (markdown, config, code, ...) share this extractor so rationale
+// semantics stay consistent across formats. The function treats its input as
+// already-stripped comment bodies — strip //, /*, */, #, <!--, --> leaders
+// before passing text in.
+func ExtractRationaleSignals(text string) []Signal {
+	if text == "" {
+		return nil
+	}
+	var out []Signal
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		m := rationaleRegex.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		kind := strings.ToLower(m[1])
+		switch kind {
+		case "todo", "fixme", "hack":
+			out = append(out, Signal{Kind: "todo", Value: kind, Detail: strings.TrimSpace(m[2])})
+		case "why", "note":
+			out = append(out, Signal{Kind: "rationale", Value: kind, Detail: strings.TrimSpace(m[2])})
+		}
+	}
+	return out
+}
 
 // formatSignalEntry renders a Signal as "kind: detail" when both are present,
 // falling back to just the value (or detail) when one is missing. Used by

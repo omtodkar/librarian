@@ -12,8 +12,7 @@ import (
 
 	"librarian/internal/embedding"
 	"librarian/internal/indexer"
-	_ "librarian/internal/indexer/handlers/config"   // register config handlers
-	_ "librarian/internal/indexer/handlers/markdown" // register markdown handler
+	_ "librarian/internal/indexer/handlers/defaults" // register all built-in handlers
 	"librarian/internal/store"
 )
 

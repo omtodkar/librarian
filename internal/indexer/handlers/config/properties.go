@@ -43,7 +43,7 @@ func (*PropertiesHandler) Parse(path string, content []byte) (*indexer.ParsedDoc
 		DocType:    "properties",
 		RawContent: raw,
 		Metadata:   map[string]any{},
-		Signals:    extractSignals(strings.Join(commentLines, "\n")),
+		Signals:    indexer.ExtractRationaleSignals(strings.Join(commentLines, "\n")),
 	}
 
 	doc.Units = []indexer.Unit{{

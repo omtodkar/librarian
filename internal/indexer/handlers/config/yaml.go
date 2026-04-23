@@ -95,12 +95,12 @@ func (*YAMLHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, erro
 			Title:   key,
 			Content: body,
 			Loc:     indexer.Location{Line: keyNode.Line, Column: keyNode.Column},
-			Signals: extractSignals(comments),
+			Signals: indexer.ExtractRationaleSignals(comments),
 		}
 		doc.Units = append(doc.Units, unit)
 	}
 
-	doc.Signals = extractSignals(strings.Join(allComments, "\n"))
+	doc.Signals = indexer.ExtractRationaleSignals(strings.Join(allComments, "\n"))
 	return doc, nil
 }
 
