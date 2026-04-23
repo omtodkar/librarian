@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	searchLimit int
-	searchJSON  bool
+	searchLimit       int
+	searchJSON        bool
+	searchIncludeRefs bool
 )
 
 var searchCmd = &cobra.Command{
@@ -26,6 +27,7 @@ var searchCmd = &cobra.Command{
 func init() {
 	searchCmd.Flags().IntVar(&searchLimit, "limit", 5, "Maximum number of results")
 	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output results as JSON")
+	searchCmd.Flags().BoolVar(&searchIncludeRefs, "include-refs", false, "Include referenced code files for each result")
 	rootCmd.AddCommand(searchCmd)
 }
 
@@ -53,9 +55,41 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("searching: %w", err)
 	}
 
+	// Collect referenced code files per chunk file path when requested.
+	var refs map[string][]string
+	if searchIncludeRefs {
+		refs = make(map[string][]string)
+		for _, chunk := range chunks {
+			if _, already := refs[chunk.FilePath]; already {
+				continue
+			}
+			doc, err := s.GetDocumentByPath(chunk.FilePath)
+			if err != nil || doc == nil {
+				continue
+			}
+			codeFiles, err := s.GetReferencedCodeFiles(doc.ID)
+			if err != nil {
+				continue
+			}
+			paths := make([]string, 0, len(codeFiles))
+			for _, cf := range codeFiles {
+				paths = append(paths, cf.FilePath)
+			}
+			refs[chunk.FilePath] = paths
+		}
+	}
+
 	if searchJSON {
-		out, _ := json.MarshalIndent(chunks, "", "  ")
-		fmt.Println(string(out))
+		if searchIncludeRefs {
+			out, _ := json.MarshalIndent(map[string]any{
+				"chunks": chunks,
+				"refs":   refs,
+			}, "", "  ")
+			fmt.Println(string(out))
+		} else {
+			out, _ := json.MarshalIndent(chunks, "", "  ")
+			fmt.Println(string(out))
+		}
 		return nil
 	}
 
@@ -70,7 +104,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		fmt.Printf("--- Result %d ---\n", i+1)
 		fmt.Printf("File:    %s\n", chunk.FilePath)
 		fmt.Printf("Section: %s\n", chunk.SectionHeading)
-		fmt.Printf("Content:\n%s\n\n", truncate(chunk.Content, 500))
+		fmt.Printf("Content:\n%s\n", truncate(chunk.Content, 500))
+		if searchIncludeRefs {
+			if paths, ok := refs[chunk.FilePath]; ok && len(paths) > 0 {
+				fmt.Printf("Refs:    %s\n", strings.Join(paths, ", "))
+			}
+		}
+		fmt.Println()
 	}
 
 	return nil

@@ -9,6 +9,7 @@ import (
 
 	"librarian/internal/embedding"
 	"librarian/internal/indexer"
+	_ "librarian/internal/indexer/handlers/markdown" // register markdown handler
 	"librarian/internal/store"
 )
 
@@ -90,7 +91,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 }
 
 func runDryIndex(docsDir, absDir string) error {
-	files, err := indexer.WalkDocs(docsDir, cfg.ExcludePatterns)
+	files, err := indexer.WalkDocs(docsDir, cfg.ExcludePatterns, indexer.DefaultRegistry())
 	if err != nil {
 		return fmt.Errorf("walking docs directory: %w", err)
 	}

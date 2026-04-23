@@ -3,6 +3,7 @@ package indexer
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
 
 	"librarian/internal/config"
 	"librarian/internal/embedding"
@@ -13,6 +14,7 @@ type Indexer struct {
 	store    *store.Store
 	cfg      *config.Config
 	embedder embedding.Embedder
+	registry *Registry
 }
 
 type IndexResult struct {
@@ -23,18 +25,27 @@ type IndexResult struct {
 	Errors           []string
 }
 
+// New returns an Indexer that dispatches files through the default handler registry.
 func New(s *store.Store, cfg *config.Config, embedder embedding.Embedder) *Indexer {
+	return NewWithRegistry(s, cfg, embedder, DefaultRegistry())
+}
+
+// NewWithRegistry returns an Indexer that dispatches files through the given registry.
+// Use this when tests need isolated registration or when a custom handler set is
+// required; most callers should use New.
+func NewWithRegistry(s *store.Store, cfg *config.Config, embedder embedding.Embedder, reg *Registry) *Indexer {
 	return &Indexer{
 		store:    s,
 		cfg:      cfg,
 		embedder: embedder,
+		registry: reg,
 	}
 }
 
 func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, error) {
 	result := &IndexResult{}
 
-	files, err := WalkDocs(docsDir, idx.cfg.ExcludePatterns)
+	files, err := WalkDocs(docsDir, idx.cfg.ExcludePatterns, idx.registry)
 	if err != nil {
 		return nil, fmt.Errorf("walking docs directory: %w", err)
 	}
@@ -43,7 +54,7 @@ func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, er
 		return result, nil
 	}
 
-	fmt.Printf("Found %d markdown files\n", len(files))
+	fmt.Printf("Found %d files to index\n", len(files))
 
 	for i, file := range files {
 		fmt.Printf("  [%d/%d] %s", i+1, len(files), file.FilePath)
@@ -78,7 +89,17 @@ func (idx *Indexer) IndexSingleFile(filePath, absPath string, force bool) (*Inde
 }
 
 func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) error {
-	parsed, err := ParseMarkdown(file.AbsPath)
+	handler := idx.registry.HandlerFor(file.FilePath)
+	if handler == nil {
+		return fmt.Errorf("no handler registered for %s", file.FilePath)
+	}
+
+	content, err := os.ReadFile(file.AbsPath)
+	if err != nil {
+		return fmt.Errorf("reading: %w", err)
+	}
+
+	parsed, err := handler.Parse(file.FilePath, content)
 	if err != nil {
 		return fmt.Errorf("parsing: %w", err)
 	}
@@ -107,15 +128,27 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		OverlapLines: idx.cfg.Chunking.OverlapLines,
 		MinTokens:    idx.cfg.Chunking.MinTokens,
 	}
-	chunks := ChunkDocument(parsed, chunkCfg)
+	chunks, err := handler.Chunk(parsed, chunkCfg)
+	if err != nil {
+		return fmt.Errorf("chunking: %w", err)
+	}
+
+	var headings []string
+	if h, ok := parsed.Metadata["headings"].([]string); ok {
+		headings = h
+	}
+	var frontmatter map[string]interface{}
+	if fm, ok := parsed.Metadata["frontmatter"].(map[string]interface{}); ok {
+		frontmatter = fm
+	}
 
 	doc, err := idx.store.AddDocument(store.AddDocumentInput{
 		FilePath:    file.FilePath,
 		Title:       parsed.Title,
 		DocType:     parsed.DocType,
 		Summary:     parsed.Summary,
-		Headings:    HeadingsToJSON(parsed.Headings),
-		Frontmatter: FrontmatterToJSON(parsed.Frontmatter),
+		Headings:    HeadingsToJSON(headings),
+		Frontmatter: FrontmatterToJSON(frontmatter),
 		ContentHash: contentHash,
 		ChunkCount:  uint32(len(chunks)),
 	})

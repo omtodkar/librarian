@@ -11,7 +11,10 @@ type WalkResult struct {
 	AbsPath  string // Absolute path on disk
 }
 
-func WalkDocs(docsDir string, excludePatterns []string) ([]WalkResult, error) {
+// WalkDocs walks docsDir and returns files whose extensions have a registered handler
+// in reg. Exclude patterns skip matching paths. reg must be non-nil; a registry with no
+// handlers yields an empty result.
+func WalkDocs(docsDir string, excludePatterns []string, reg *Registry) ([]WalkResult, error) {
 	var results []WalkResult
 
 	absDocsDir, err := filepath.Abs(docsDir)
@@ -32,8 +35,7 @@ func WalkDocs(docsDir string, excludePatterns []string) ([]WalkResult, error) {
 			return nil
 		}
 
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".md" && ext != ".markdown" {
+		if reg.HandlerFor(path) == nil {
 			return nil
 		}
 

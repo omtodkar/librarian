@@ -30,12 +30,32 @@ func DefaultChunkConfig() ChunkConfig {
 	}
 }
 
-func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
+// SectionInput is the format-agnostic input to ChunkSections. Handlers convert their
+// own section-like units (markdown sections, code methods, YAML key-paths, etc.)
+// into SectionInput before delegating to the shared chunker. SignalLine and
+// SignalMeta are pre-formatted by the handler so the chunker doesn't depend on any
+// format-specific signal representation.
+type SectionInput struct {
+	Heading    string
+	Hierarchy  []string
+	Content    string
+	SignalLine string // prepended to embedding text (empty string = omit)
+	SignalMeta string // stored verbatim on Chunk.SignalMeta; empty string is normalised to "{}"
+}
+
+// ChunkSections splits a sequence of section-like units into chunks suitable for
+// embedding and storage. Empty sections list triggers a no-sections fallback that
+// chunks the rawContent as a single unit (keyed on docTitle).
+//
+// Handlers call this after converting their parsed units into []SectionInput; the
+// legacy ChunkDocument is a thin wrapper for callers still working with
+// ParsedDocument.
+func ChunkSections(docTitle, rawContent string, sections []SectionInput, cfg ChunkConfig) []Chunk {
 	var chunks []Chunk
 	var chunkIndex uint32
 
-	if len(doc.Sections) == 0 {
-		content := strings.TrimSpace(doc.RawContent)
+	if len(sections) == 0 {
+		content := strings.TrimSpace(rawContent)
 		if content == "" {
 			return nil
 		}
@@ -43,11 +63,11 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 		if tokens < cfg.MinTokens {
 			return nil
 		}
-		embeddingText := fmt.Sprintf("Document: %s\n\n%s", doc.Title, content)
+		embeddingText := fmt.Sprintf("Document: %s\n\n%s", docTitle, content)
 		chunks = append(chunks, Chunk{
 			Content:          content,
-			SectionHeading:   doc.Title,
-			SectionHierarchy: []string{doc.Title},
+			SectionHeading:   docTitle,
+			SectionHierarchy: []string{docTitle},
 			ChunkIndex:       0,
 			TokenCount:       uint32(tokens),
 			EmbeddingText:    embeddingText,
@@ -55,8 +75,8 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 		return chunks
 	}
 
-	for _, section := range doc.Sections {
-		content := strings.TrimSpace(section.Content)
+	for _, sec := range sections {
+		content := strings.TrimSpace(sec.Content)
 		if content == "" {
 			continue
 		}
@@ -66,29 +86,27 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 			continue
 		}
 
-		hierarchyStr := strings.Join(section.Hierarchy, " > ")
-		contextHeader := fmt.Sprintf("Document: %s | Section: %s", doc.Title, hierarchyStr)
+		hierarchyStr := strings.Join(sec.Hierarchy, " > ")
+		contextHeader := fmt.Sprintf("Document: %s | Section: %s", docTitle, hierarchyStr)
 
-		signalMeta := "{}"
-		signalLine := ""
-		if section.Signals != nil {
-			signalMeta = section.Signals.ToJSON()
-			signalLine = section.Signals.SignalLine()
+		meta := sec.SignalMeta
+		if meta == "" {
+			meta = "{}"
 		}
 
 		if tokens <= cfg.MaxTokens {
 			embeddingText := contextHeader + "\n\n" + content
-			if signalLine != "" {
-				embeddingText += "\n" + signalLine
+			if sec.SignalLine != "" {
+				embeddingText += "\n" + sec.SignalLine
 			}
 			chunks = append(chunks, Chunk{
 				Content:          content,
-				SectionHeading:   section.Heading,
-				SectionHierarchy: section.Hierarchy,
+				SectionHeading:   sec.Heading,
+				SectionHierarchy: sec.Hierarchy,
 				ChunkIndex:       chunkIndex,
 				TokenCount:       uint32(tokens),
 				EmbeddingText:    embeddingText,
-				SignalMeta:       signalMeta,
+				SignalMeta:       meta,
 			})
 			chunkIndex++
 		} else {
@@ -99,17 +117,17 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 					continue
 				}
 				embeddingText := contextHeader + "\n\n" + sub
-				if signalLine != "" {
-					embeddingText += "\n" + signalLine
+				if sec.SignalLine != "" {
+					embeddingText += "\n" + sec.SignalLine
 				}
 				chunks = append(chunks, Chunk{
 					Content:          sub,
-					SectionHeading:   section.Heading,
-					SectionHierarchy: section.Hierarchy,
+					SectionHeading:   sec.Heading,
+					SectionHierarchy: sec.Hierarchy,
 					ChunkIndex:       chunkIndex,
 					TokenCount:       uint32(subTokens),
 					EmbeddingText:    embeddingText,
-					SignalMeta:       signalMeta,
+					SignalMeta:       meta,
 				})
 				chunkIndex++
 			}
@@ -121,6 +139,30 @@ func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
 	}
 
 	return chunks
+}
+
+// ChunkDocument is the legacy entry point for the markdown-specific ParsedDocument
+// shape. It converts Sections to []SectionInput and delegates to ChunkSections so
+// the chunking logic has a single source of truth. New handler code should call
+// ChunkSections directly.
+func ChunkDocument(doc *ParsedDocument, cfg ChunkConfig) []Chunk {
+	inputs := make([]SectionInput, 0, len(doc.Sections))
+	for _, s := range doc.Sections {
+		line := ""
+		meta := "{}"
+		if s.Signals != nil {
+			line = s.Signals.SignalLine()
+			meta = s.Signals.ToJSON()
+		}
+		inputs = append(inputs, SectionInput{
+			Heading:    s.Heading,
+			Hierarchy:  s.Hierarchy,
+			Content:    s.Content,
+			SignalLine: line,
+			SignalMeta: meta,
+		})
+	}
+	return ChunkSections(doc.Title, doc.RawContent, inputs, cfg)
 }
 
 func splitByParagraphs(content string, cfg ChunkConfig) []string {

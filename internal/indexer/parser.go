@@ -40,7 +40,13 @@ func ParseMarkdown(filePath string) (*ParsedDocument, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseMarkdownBytes(filePath, content)
+}
 
+// ParseMarkdownBytes parses a markdown document from in-memory bytes. The filePath
+// parameter is retained for downstream metadata and error messages; the file is not
+// re-read. This is the bytes entry point the MarkdownHandler uses.
+func ParseMarkdownBytes(_ string, content []byte) (*ParsedDocument, error) {
 	md := goldmark.New(
 		goldmark.WithExtensions(
 			meta.Meta,

@@ -13,6 +13,7 @@ import (
 	"librarian/internal/config"
 	"librarian/internal/embedding"
 	"librarian/internal/indexer"
+	_ "librarian/internal/indexer/handlers/markdown" // register markdown handler for single-file re-index
 	"librarian/internal/store"
 )
 
