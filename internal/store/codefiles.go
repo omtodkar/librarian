@@ -73,23 +73,22 @@ func (s *Store) AddReference(docID, codeFileID, context string) error {
 	return nil
 }
 
-func (s *Store) AddRelatedDoc(fromDocID, toDocID, relationType string) error {
-	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO related_docs (from_doc_id, to_doc_id, relation_type) VALUES (?, ?, ?)`,
-		fromDocID, toDocID, relationType,
-	)
-	if err != nil {
-		return fmt.Errorf("add_related_doc: %w", err)
-	}
-	return nil
-}
-
+// GetRelatedDocuments returns documents reached via a shared_code_ref edge from
+// (or to — these edges are semantically symmetric) the given document. Backed by
+// graph_edges; related_docs was dropped.
 func (s *Store) GetRelatedDocuments(docID string) ([]Document, error) {
+	nodeID := DocNodeID(docID)
 	rows, err := s.db.Query(`
-		SELECT d.id, d.file_path, d.title, d.doc_type, d.summary, d.headings, d.frontmatter, d.content_hash, d.chunk_count, d.indexed_at
-		FROM related_docs r
-		JOIN documents d ON d.id = r.to_doc_id
-		WHERE r.from_doc_id = ?`, docID)
+		SELECT DISTINCT d.id, d.file_path, d.title, d.doc_type, d.summary, d.headings, d.frontmatter, d.content_hash, d.chunk_count, d.indexed_at
+		FROM graph_edges e
+		JOIN documents d ON (
+			(e.from_node = ? AND d.id = substr(e.to_node, 5))
+			OR
+			(e.to_node = ? AND d.id = substr(e.from_node, 5))
+		)
+		WHERE e.kind = ? AND d.id != ?
+		ORDER BY d.title`,
+		nodeID, nodeID, EdgeKindSharedCodeRef, docID)
 	if err != nil {
 		return nil, fmt.Errorf("get_related_documents: %w", err)
 	}

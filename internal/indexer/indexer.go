@@ -67,8 +67,8 @@ func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, er
 		}
 	}
 
-	// Build RelatedDoc edges for documents that share code references
-	idx.buildRelatedDocEdges(files)
+	// Populate graph: document and code-file nodes + mentions and shared_code_ref edges.
+	idx.buildGraphEdges(files)
 
 	return result, nil
 }
@@ -203,47 +203,79 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	return nil
 }
 
-func (idx *Indexer) buildRelatedDocEdges(files []WalkResult) {
-	// Build a map of code file path -> list of document file paths that reference it
-	codeFileToDocPaths := make(map[string][]string)
+// buildGraphEdges is the post-indexing pass that projects document/code-file/refs
+// data into the generic graph_nodes + graph_edges tables.
+//
+// Emits:
+//   - a "document" node per indexed doc
+//   - a "code_file" node per referenced code file
+//   - a "mentions" edge from each doc to every code file it references
+//   - a "shared_code_ref" edge between docs that reference the same code file
+//     (one direction; symmetric semantics handled at query time)
+//
+// Future handlers (code via tree-sitter, config via YAML, etc.) will add their
+// own node kinds and edge kinds to this same table pair.
+func (idx *Indexer) buildGraphEdges(files []WalkResult) {
+	codeFileToDocIDs := make(map[string][]string)
 
 	for _, file := range files {
 		doc, err := idx.store.GetDocumentByPath(file.FilePath)
 		if err != nil {
 			continue
 		}
+
+		if err := idx.store.UpsertNode(store.Node{
+			ID:         store.DocNodeID(doc.ID),
+			Kind:       store.NodeKindDocument,
+			Label:      doc.Title,
+			SourcePath: doc.FilePath,
+		}); err != nil {
+			continue
+		}
+
 		codeFiles, err := idx.store.GetReferencedCodeFiles(doc.ID)
 		if err != nil {
 			continue
 		}
 		for _, cf := range codeFiles {
-			codeFileToDocPaths[cf.FilePath] = append(codeFileToDocPaths[cf.FilePath], file.FilePath)
+			if err := idx.store.UpsertNode(store.Node{
+				ID:         store.CodeFileNodeID(cf.FilePath),
+				Kind:       store.NodeKindCodeFile,
+				Label:      cf.FilePath,
+				SourcePath: cf.FilePath,
+			}); err != nil {
+				continue
+			}
+			idx.store.UpsertEdge(store.Edge{
+				From: store.DocNodeID(doc.ID),
+				To:   store.CodeFileNodeID(cf.FilePath),
+				Kind: store.EdgeKindMentions,
+			})
+			codeFileToDocIDs[cf.FilePath] = append(codeFileToDocIDs[cf.FilePath], doc.ID)
 		}
 	}
 
-	// For each shared code file, create RelatedDoc edges between the documents
 	linked := make(map[string]bool)
-	for _, docPaths := range codeFileToDocPaths {
-		if len(docPaths) < 2 {
+	for _, docIDs := range codeFileToDocIDs {
+		if len(docIDs) < 2 {
 			continue
 		}
-		for i := 0; i < len(docPaths); i++ {
-			for j := i + 1; j < len(docPaths); j++ {
-				key := docPaths[i] + "|" + docPaths[j]
+		for i := 0; i < len(docIDs); i++ {
+			for j := i + 1; j < len(docIDs); j++ {
+				a, b := docIDs[i], docIDs[j]
+				if a == b {
+					continue
+				}
+				key := a + "|" + b
 				if linked[key] {
 					continue
 				}
 				linked[key] = true
-
-				fromDoc, err := idx.store.GetDocumentByPath(docPaths[i])
-				if err != nil {
-					continue
-				}
-				toDoc, err := idx.store.GetDocumentByPath(docPaths[j])
-				if err != nil {
-					continue
-				}
-				idx.store.AddRelatedDoc(fromDoc.ID, toDoc.ID, "shared_code_references")
+				idx.store.UpsertEdge(store.Edge{
+					From: store.DocNodeID(a),
+					To:   store.DocNodeID(b),
+					Kind: store.EdgeKindSharedCodeRef,
+				})
 			}
 		}
 	}
