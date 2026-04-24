@@ -26,49 +26,43 @@ This project has a librarian MCP server configured in `.mcp.json`. Use it to und
 - `get_context` — deep briefing with related code files and documents (use for architecture/design questions)
 - `get_document` — read a full doc by file path
 - `list_documents` — browse all indexed docs
+- `update_docs` — write/overwrite a doc and re-index it
 
 Prefer these tools over raw file reads when looking for how something works or where something is implemented.
 
+## Workspace & CLI
+
+Every command runs against a project-local `.librarian/` workspace (config, ignore file, SQLite DB, generated reports). `cmd/root.go` walks up from the CWD to find it. `librarian init` bootstraps one; every other command requires one.
+
+Primary CLI surface (`cmd/`):
+
+- `init` / `index` / `update` — bootstrap, index, write-and-reindex
+- `search` / `context` / `doc` / `list` / `status` — retrieval
+- `neighbors` / `path` / `explain` / `report` — graph queries
+- `install` — write platform-integration pointers (CLAUDE.md, AGENTS.md, …)
+- `mcp serve` — optional stdio MCP server (opt-in; top-level `mcp` is a subcommand group)
+
+Every command supports `--json` for machine-readable output. See `docs/cli.md` for full flag reference.
+
 ## Architecture
 
-### Dependency wiring
+Canonical reference is `docs/architecture.md` (and the focused docs alongside it: `indexing.md`, `handlers.md`, `storage.md`, `embedding.md`, `configuration.md`). Use the MCP `get_context` tool for architecture questions — it pulls from those docs plus the code.
 
-Commands in `cmd/` share a global `*config.Config` initialized via Cobra/Viper. Each command builds its dependency chain:
+Short version:
 
-```
-config.Load() → embedding.NewEmbedder(cfg.Embedding) → store.Open(cfg.DBPath) → indexer.New(store, cfg, embedder)
-```
-
-### Indexing pipeline (`internal/indexer/`)
-
-Four stages run per file: **Walk** → **Parse** → **Chunk** → **Store**.
-
-- **Walk** (`walker.go`): finds `.md`/`.markdown` files, applies exclude patterns.
-- **Parse** (`parser.go`): goldmark AST walk extracting frontmatter, headings, sections, diagrams, tables, and emphasis signals. Diagrams/tables are converted to natural language summaries for better embedding quality.
-- **Chunk** (`chunker.go`): splits by section at H2 boundaries, falls back to paragraph splitting when sections exceed `MaxTokens`. Enriches embedding text with document title, section hierarchy, and signal labels.
-- **Store**: generates embeddings, stores documents + chunks + code references. After all files are indexed, a second pass (`buildRelatedDocEdges`) creates document-to-document graph edges based on shared code references.
-
-Content hash (SHA-256) skips unchanged files on re-index.
-
-### Store layer (`internal/store/`)
-
-- Schema in `db/migrations.sql` is embedded at build time via `//go:embed`.
-- The `vec0` virtual table (sqlite-vec) is created lazily on the first chunk insert because dimensions depend on the embedding model.
-- Search uses over-fetch + re-rank: fetches `3×limit` candidates from vector search, boosts scores with metadata signals (warnings, decisions, risk markers), then returns the top N.
-- Float64 embeddings from APIs are converted to little-endian float32 bytes for sqlite-vec storage.
-
-### Embedding providers (`internal/embedding/`)
-
-`Embedder` interface with a single `Embed(text string) ([]float64, error)` method. Two implementations: `GeminiEmbedder` and `OpenAIEmbedder` (for any OpenAI-compatible API like LM Studio). Provider selected by `NewEmbedder()` factory in `provider.go` based on `cfg.Provider`.
-
-### MCP server (`internal/mcpserver/`)
-
-Stdio-based JSON-RPC server using `mcp-go`. Each tool is registered in its own file and wired in `Serve()` in `server.go`. The `get_context` tool is the most complex — it joins chunks, documents, code references, and related docs for a comprehensive briefing.
+- **Dependency wiring**: `config.Load() → embedding.NewEmbedder() → store.Open() → indexer.New()`. Cobra + Viper wire a shared `*config.Config` in `cmd/root.go`.
+- **Handler-based indexing** (`internal/indexer/`): one `FileHandler` interface (`handler.go`) covers every format. Per-format packages under `internal/indexer/handlers/<format>/` (markdown, code, config, office, pdf) register themselves at import time into a `Registry` (`registry.go`), keyed by extension. `internal/indexer/handlers/defaults/` blank-imports them all; `cmd/` and `mcpserver/` blank-import `defaults` to wire the full set.
+- **Pipeline per file**: walker → `registry.HandlerFor(ext)` → `Parse` (ParsedDoc) → `Chunk` → embed → store (documents + chunks + code refs + graph nodes). A second pass (`buildRelatedDocEdges`) adds document-to-document edges based on shared code refs. Content hash (SHA-256) skips unchanged files.
+- **Shared chunking**: most handlers (including office/pdf after internal conversion to markdown) delegate chunking to `internal/indexer/chunker.go`'s section-aware splitter with paragraph fallback.
+- **Store layer** (`internal/store/`): schema in `db/migrations.sql` embedded via `//go:embed`. `vec0` virtual table is created lazily on first chunk insert (dimensions come from the live embedding model). Search = vector KNN over-fetch (3× limit) + signal-weighted re-rank. Float64 embeddings → little-endian float32 bytes for sqlite-vec.
+- **Embedding providers** (`internal/embedding/`): `Embedder` interface; Gemini + OpenAI-compatible implementations. Factory in `provider.go`.
+- **MCP server** (`internal/mcpserver/`): stdio JSON-RPC via mcp-go; one file per tool, registered in `Serve()`. `get_context` is the most complex — it joins chunks, documents, code refs, and related docs.
 
 ## Adding new components
 
-- **New embedding provider**: implement `Embedder` interface in `internal/embedding/`, add case to `NewEmbedder()` factory.
-- **New MCP tool**: create file in `internal/mcpserver/`, register in `Serve()`.
+- **New file handler**: create `internal/indexer/handlers/<format>/`, implement the `FileHandler` interface (`handler.go`), call `indexer.RegisterDefault(...)` from a package `init()`, and add one blank-import line to `internal/indexer/handlers/defaults/defaults.go`. No other changes needed — walker, store, signals, and MCP are handler-agnostic. See `docs/handlers.md`.
+- **New embedding provider**: implement `Embedder` in `internal/embedding/`, add a case to `NewEmbedder()` in `provider.go`.
+- **New MCP tool**: create a file in `internal/mcpserver/`, register in `Serve()` in `server.go`.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
@@ -93,44 +87,14 @@ bd close <id>         # Complete work
 
 ## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+When ending a work session:
 
-**MANDATORY WORKFLOW:**
+1. **File issues for remaining work** — create beads issues for anything that needs follow-up.
+2. **Run quality gates** (if code changed) — tests, linters, build.
+3. **Update issue status** — close finished work, update in-progress items.
+4. **Commit** — stage and commit related changes with a descriptive message.
+5. **Push if a remote is configured** — run `git remote -v`. If there's a remote, `git pull --rebase && git push` (and `bd dolt push` if beads has a remote too). This repo is currently local-only; skip the push steps when no remote is set.
+6. **Hand off** — leave a short note on what's next.
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd dolt push
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+Don't leave committed work stranded when a remote exists — push it. Don't invent a remote when none exists.
 <!-- END BEADS INTEGRATION -->
-
-<!-- librarian:start - managed by `librarian install`, do not edit -->
-## Librarian
-
-This project uses Librarian for semantic search and graph-based code navigation.
-See **`.librarian/rules.md`** for the full guidance.
-
-Before exploring with grep/find, try:
-
-- `librarian search "<topic>"` — semantic search over docs + code
-- `librarian context "<topic>"` — deep briefing: related docs + code refs
-- `librarian neighbors <node>` — what does X connect to?
-- `librarian path <from> <to>` — how do these pieces relate?
-
-Read `.librarian/out/GRAPH_REPORT.md` for a topology snapshot (god nodes,
-communities, cross-cluster edges).
-<!-- librarian:end -->

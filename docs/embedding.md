@@ -1,14 +1,14 @@
 ---
 title: Embedding
 type: reference
-description: How the embedding system works, covering the Embedder interface, the Gemini and OpenAI-compatible providers, and vector dimensions.
+description: The Embedder interface, the Gemini and OpenAI-compatible providers, and how embeddings flow through indexing and search.
 ---
 
 # Embedding
 
-The embedding system (`internal/embedding/`) generates vector embeddings from text. These embeddings power Librarian's semantic search — similar text produces similar vectors, enabling retrieval by meaning rather than keywords.
+The embedding layer (`internal/embedding/`) generates vector embeddings from text. Similar text produces similar vectors, which powers Librarian's semantic search — retrieval by meaning rather than keywords.
 
-## Embedder Interface
+## Embedder interface
 
 ```go
 type Embedder interface {
@@ -16,98 +16,100 @@ type Embedder interface {
 }
 ```
 
-The `Embedder` interface has a single method. It takes a text string and returns a float64 vector. This interface is used by the indexer (to embed chunks during indexing) and the MCP server (to embed search queries).
+One method. Takes a string, returns a float64 vector. Used by the indexer (to embed chunks) and by the MCP server + CLI (to embed search queries).
 
-## Provider Factory
+## Provider factory
 
-`embedding.NewEmbedder(cfg)` in `internal/embedding/provider.go` creates the appropriate embedder based on `cfg.Provider`:
+`embedding.NewEmbedder(cfg)` in `internal/embedding/provider.go` selects an implementation based on `cfg.Provider`:
 
-| Provider | Embedder | Description |
-|----------|----------|-------------|
+| Provider | Implementation | Used for |
+|---|---|---|
 | `"gemini"` | `GeminiEmbedder` | Google's Gemini embedding API |
-| `"openai"` | `OpenAIEmbedder` | Any OpenAI-compatible API (LM Studio, Ollama, vLLM, etc.) |
+| `"openai"` | `OpenAIEmbedder` | Any OpenAI-compatible `/v1/embeddings` endpoint (LM Studio, Ollama, vLLM, OpenAI proper, …) |
 
-Unknown providers return an error listing the supported options.
+Unknown providers return an error naming the supported options.
 
 ## GeminiEmbedder
 
-The `GeminiEmbedder` in `internal/embedding/gemini.go` calls Google's Gemini embedding API.
+`internal/embedding/gemini.go` — calls Google's Gemini embedding API.
 
 ### Configuration
 
-`NewGeminiEmbedder(apiKey)` creates an embedder. The API key is resolved in this order:
-1. The `apiKey` argument (from `embedding.api_key` in `.librarian.yaml`)
-2. The `GEMINI_API_KEY` environment variable
+`NewGeminiEmbedder(apiKey)` takes the key from:
 
-If neither is set, initialization fails with an error.
+1. `embedding.api_key` in `.librarian/config.yaml`
+2. `GEMINI_API_KEY` environment variable
+3. `LIBRARIAN_EMBEDDING_API_KEY` environment variable (via Viper's env binding)
 
-### API Details
+If none resolves, initialisation fails with an error.
+
+### API details
 
 | Property | Value |
-|----------|-------|
-| Endpoint | `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent` |
-| Model | `gemini-embedding-001` |
-| Dimensions | 3072 |
-| Input | Single text string per request |
-| Output | `[]float64` vector |
+|---|---|
+| Endpoint | `https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent` |
+| Default model | `gemini-embedding-2` (used when `embedding.model` is empty) |
+| Dimensions | 3072 for `gemini-embedding-2`; `gemini-embedding-001` is 3072; `text-embedding-004` is 768 (deprecated) |
+| Input | Single string per request |
+| Output | `[]float64` |
 | Auth | API key as query parameter |
 
-### Request Format
+### Request shape
 
 ```json
-{
-  "content": {
-    "parts": [{"text": "the text to embed"}]
-  }
-}
+{ "content": { "parts": [ { "text": "the text to embed" } ] } }
 ```
 
 ## OpenAIEmbedder
 
-The `OpenAIEmbedder` in `internal/embedding/openai.go` calls any OpenAI-compatible `/v1/embeddings` endpoint. This works with LM Studio, Ollama, vLLM, and any other server that implements the OpenAI embeddings API.
+`internal/embedding/openai.go` — calls any OpenAI-compatible `/v1/embeddings` endpoint.
 
 ### Configuration
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `embedding.base_url` | No | `http://localhost:1234/v1` | Base URL of the API (LM Studio's default) |
-| `embedding.model` | Yes | — | Model identifier (e.g., `text-embedding-nomic-embed-text-v1.5`) |
-| `embedding.api_key` | No | — | API key, sent as `Authorization: Bearer` header if provided |
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `embedding.base_url` | no | `http://localhost:1234/v1` | LM Studio's default; set to `http://localhost:11434/v1` for Ollama, your provider URL otherwise |
+| `embedding.model` | **yes** | — | Model identifier the endpoint understands (e.g. `text-embedding-3-small`, `nomic-embed-text`) |
+| `embedding.api_key` | no | — | Sent as `Authorization: Bearer` when set; local providers often don't need it |
 
-### API Details
+### API details
 
 | Property | Value |
-|----------|-------|
+|---|---|
 | Endpoint | `{base_url}/embeddings` |
-| Dimensions | Determined by the model (e.g., 768 for nomic-embed-text) |
-| Input | Single text string per request |
-| Output | `[]float64` vector |
-| Auth | Bearer token header (optional) |
+| Dimensions | Determined by the model (768, 1536, 3072, …) |
+| Input | Single string per request |
+| Output | `[]float64` |
+| Auth | Bearer token (optional) |
 
-### Request Format
+### Request shape
 
 ```json
-{
-  "model": "text-embedding-nomic-embed-text-v1.5",
-  "input": "the text to embed"
-}
+{ "model": "text-embedding-3-small", "input": "the text to embed" }
 ```
 
-## Error Handling
+## Error handling
 
-Both embedders check for:
-- HTTP status codes other than 200
+Both embedders surface:
+
+- HTTP non-200 status codes (with status + body snippet)
 - API-level errors in the response JSON
 - Empty embedding arrays in the response
 
-All errors are wrapped with context for debugging.
+All errors wrap the underlying cause via `fmt.Errorf("%w")` so callers can `errors.Is` if needed.
 
-## Vector Dimensions
+## Vector dimensions
 
-Vector dimensions are determined automatically by the embedding model. The sqlite-vec virtual table (`doc_chunk_vectors`) is created lazily on the first vector insert, sized to match the actual model output. There is no dimensions config field — switching models means re-indexing (delete the database and run `librarian index` again).
+Dimensions are discovered at runtime: the first call to `AddChunk` creates the `doc_chunk_vectors` vec0 virtual table sized to whatever the embedder returned. There's no dimensions config field.
 
-## Usage in the Pipeline
+Switching model families (e.g. 768 → 1536 dims) requires deleting the database (`.librarian/librarian.db`) and re-indexing. Dropping just the vec0 table via SQL would also work but isn't exposed as a command today.
 
-During indexing, each chunk's `EmbeddingText` (which includes the context header, content, and signal line) is passed to `Embed()`. The returned `[]float64` vector is then converted to `[]byte` of float32 values by the store layer before insertion into the sqlite-vec virtual table.
+## Pipeline flow
 
-During search, the user's query string is passed to `Embed()` and the resulting vector is used for KNN search against stored chunk vectors.
+**Indexing**: each chunk's `EmbeddingText` (context header + content + signal line — see [Indexing Pipeline](indexing.md#stage-4-chunk)) passes to `Embed()`. The returned `[]float64` is converted to float32 little-endian bytes at the store boundary and inserted into `doc_chunk_vectors` alongside the chunk metadata.
+
+**Search**: `librarian search` / `search_docs` / `get_context` all embed the user's query string once, over-fetch `limit × 3` candidates from sqlite-vec, then re-rank with signal metadata. See [Storage Layer](storage.md#search-re-ranking).
+
+## Cost considerations
+
+One embedding request per chunk at index time. A small docs directory (~50 files, ~200 chunks) is trivially cheap on any provider. A large monorepo with code + docs + PDFs can run into hundreds of thousands of chunks — at that scale a local embedder (LM Studio, Ollama) becomes attractive for iteration speed and cost. Content-hash-based incremental indexing means only changed files re-embed on subsequent runs.

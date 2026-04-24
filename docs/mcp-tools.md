@@ -1,75 +1,65 @@
 ---
 title: MCP Tools
 type: reference
-description: Reference for all 5 MCP tools exposed by librarian serve, with parameters, behavior, and example outputs.
+description: The 5 tools exposed by `librarian mcp serve` — parameters, behaviour, and example outputs.
 ---
 
 # MCP Tools
 
-Librarian exposes 5 tools via the Model Context Protocol (MCP). AI coding tools connect to Librarian over stdio and call these tools to search, retrieve, and update project documentation.
+Librarian's MCP server is **opt-in**. The primary UX is the CLI (`librarian search`, `context`, etc.) plus platform pointers written by `librarian install`. MCP is there for assistants that prefer structured tool calls over shelling out to the CLI.
 
 ## Setup
 
-Start the MCP server:
+Start the server on stdio:
 
 ```sh
-librarian serve
+librarian mcp serve
 ```
 
-This launches an MCP server on stdio. Configure your AI coding tool to connect to it:
+(Earlier versions used `librarian serve`; `librarian install` handles older and newer shape transparently via the pointer files it writes.)
 
-### Claude Code
+Configure your assistant to launch it. `librarian install` writes most of this for you — otherwise:
 
-Add to your project's `.mcp.json`:
+### Claude Code — `.mcp.json`
 
 ```json
 {
   "mcpServers": {
     "librarian": {
       "command": "librarian",
-      "args": ["serve"]
+      "args": ["mcp", "serve"]
     }
   }
 }
 ```
 
-### Cursor
-
-Add to `.cursor/mcp.json`:
+### Cursor — `.cursor/mcp.json`
 
 ```json
 {
   "mcpServers": {
     "librarian": {
       "command": "librarian",
-      "args": ["serve"]
+      "args": ["mcp", "serve"]
     }
   }
 }
 ```
 
-## Tool Reference
+## Tools
+
+The server registers **5 tools** in `Serve()` at `internal/mcpserver/server.go`.
 
 ### `search_docs`
 
-Semantic vector search across all indexed documentation chunks. Returns the most relevant chunks with their file paths and section context.
+Semantic vector search. Returns the top chunks ranked by `0.90 × vector_similarity + 0.10 × metadata_boost`.
 
-**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `query` | string | yes | — | Natural-language search query |
+| `limit` | number | no | 5 | 1–20 |
 
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `query` | `string` | yes | - | Natural language search query |
-| `limit` | `number` | no | `5` | Maximum results to return (1-20) |
-
-**Behavior:** Calls `SearchChunks` which performs a vector similarity search against chunk embeddings in the `doc_chunk_vectors` table via sqlite-vec. Candidates are over-fetched (3x the requested limit) and then re-ranked using a weighted formula:
-
-```
-finalScore = 0.90 * vectorSimilarity + 0.10 * metadataBoost
-```
-
-The metadata boost promotes chunks containing emphasis signals — warnings (+0.3), decisions (+0.3), important labels (+0.3), risk markers like deprecated or breaking-change (+0.2), and other inline labels (+0.1). This surfaces actionable content like warnings and deprecation notices without overriding semantic relevance. See [Storage Layer](storage.md#search-re-ranking) for full details.
-
-**Annotations:** Read-only.
+Behaviour: embeds `query` via the configured embedder, over-fetches `limit × 3` candidates from sqlite-vec, re-ranks with signal metadata (warnings, decisions, risk markers, code annotations), returns the top `limit`. Read-only.
 
 **Example output:**
 
@@ -83,10 +73,12 @@ Found 3 results for "authentication flow":
 The login flow uses OAuth 2.0 with PKCE. The client redirects to...
 
 ### Result 2
-**File:** docs/api.md
-**Section:** Authentication
+**File:** internal/auth/oauth.go
+**Section:** AuthService.Login
 **Content:**
-All API endpoints require a Bearer token in the Authorization header...
+// Login exchanges an authorization code for access + refresh tokens.
+func (s *AuthService) Login(ctx context.Context, code string) (*Session, error) {
+    ...
 
 ### Result 3
 **File:** docs/security.md
@@ -99,57 +91,34 @@ Access tokens expire after 1 hour. Refresh tokens are rotated on each use...
 
 ### `get_document`
 
-Reads the full content of a document from disk and enriches it with metadata from the database (title, type, chunk count).
+Reads a document's full content from disk and enriches it with database metadata (title, type, chunk count).
 
-**Parameters:**
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `file_path` | string | yes | File path relative to workspace root |
 
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `file_path` | `string` | yes | - | File path of the document (e.g., `docs/auth.md`) |
-
-**Behavior:** Resolves the file path to an absolute path, reads the file from disk, and looks up the document in the database for metadata. If the document is not indexed, the raw file content is still returned.
-
-**Annotations:** Read-only.
-
-**Example output:**
-
-```
-# Authentication Guide
-**Type:** guide | **Chunks:** 4
-
----
-title: Authentication Guide
-type: guide
-description: How authentication works in the application.
----
-
-## Login Flow
-
-The login flow uses OAuth 2.0 with PKCE...
-```
+Resolves to an absolute path, reads the file, looks up the document row. If not indexed, the raw content is still returned. Read-only.
 
 ---
 
 ### `get_context`
 
-Comprehensive intelligence briefing that combines semantic search with relational joins. This is the most powerful tool - use it when you need to deeply understand a topic.
+The heavy retrieval tool: comprehensive briefing combining vector search with graph walks. Equivalent to `librarian context`. Use it for "how does X work" or architecture questions.
 
-**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `query` | string | yes | — | Topic to brief |
+| `limit` | number | no | 5 | 1–10 initial search results |
 
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `query` | `string` | yes | - | Natural language query for the topic you want context on |
-| `limit` | `number` | no | `5` | Number of initial search results (1-10) |
+Five-step flow:
 
-**Behavior:** Executes a 5-step intelligence gathering flow:
+1. **Vector search** — matches top chunks for `query`.
+2. **Primary sources** — emits the matched chunks with path + section context.
+3. **Source documents** — unique parent docs of those chunks, with type + title.
+4. **Referenced code files** — joins through `refs` to find code files those docs mention, annotated with language.
+5. **Related documentation** — joins through `graph_edges{kind="shared_code_ref"}` to surface other docs that reference the same code.
 
-1. **Semantic search** - Vector search for relevant chunks matching the query
-2. **Primary sources** - Display the matched chunks with file path and section context
-3. **Source documents** - Collect the unique parent documents of matched chunks, showing their type and title
-4. **Referenced code files** - Join through the `refs` table from source documents to find code files they mention, with language annotations
-5. **Related documentation** - Join through the `related_docs` table to surface other documents that share code references with the source documents
-
-**Annotations:** Read-only.
+Read-only.
 
 **Example output:**
 
@@ -162,12 +131,13 @@ Comprehensive intelligence briefing that combines semantic search with relationa
 The login flow uses OAuth 2.0 with PKCE. The client redirects to
 the identity provider, which returns an authorization code...
 
-### docs/auth.md > Token Refresh
-Access tokens expire after 1 hour. The client uses the refresh
-token to obtain a new access token without user interaction...
+### internal/auth/oauth.go > AuthService.Login
+// Login exchanges an authorization code for access + refresh tokens.
+func (s *AuthService) Login(ctx context.Context, code string) (*Session, error) { … }
 
 ## Source Documents:
-- docs/auth.md (guide) - "Authentication Guide"
+- docs/auth.md (guide) — "Authentication Guide"
+- internal/auth/oauth.go (go)
 
 ## Referenced Code Files:
 - internal/auth/oauth.go (go)
@@ -175,69 +145,65 @@ token to obtain a new access token without user interaction...
 - internal/auth/tokens.go (go)
 
 ## Related Documentation:
-- docs/api.md - "API Reference"
-- docs/security.md - "Security Policy"
+- docs/api.md — "API Reference"
+- docs/security.md — "Security Policy"
 ```
 
 ---
 
 ### `list_documents`
 
-Lists all indexed documents with metadata in a tabular format. Optionally filters by document type.
+Lists every indexed document. Optional type filter.
 
-**Parameters:**
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `doc_type` | string | no | Filter (e.g. `guide`, `reference`, `architecture`, `docx`, `pdf`, `go`, `python`, …) |
 
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `doc_type` | `string` | no | - | Filter by document type (e.g., `guide`, `reference`, `architecture`) |
+Behaviour: queries `documents`, optionally filtered. Read-only.
 
-**Behavior:** Queries the `documents` table for all rows. If `doc_type` is provided, filters results to only include documents of that type.
-
-**Annotations:** Read-only.
-
-**Example output:**
-
-```
-Indexed Documents (4):
-
-File                                     Type           Chunks   Title
-----                                     ----           ------   -----
-docs/architecture.md                     architecture   3        Architecture
-docs/configuration.md                    reference      2        Configuration
-docs/mcp-tools.md                        reference      5        MCP Tools
-docs/indexing.md                         reference      4        Indexing Pipeline
-```
+Since every indexed file becomes a document, this also surfaces source code and Office / PDF documents — filter by their format (`go`, `python`, `docx`, `pdf`, `xlsx`, `pptx`) to narrow down.
 
 ---
 
 ### `update_docs`
 
-Writes or updates a documentation file on disk and re-indexes it. Enforces a path safety constraint: the file path must be within the configured `docs_dir`.
+Writes a documentation file and re-indexes it. Not read-only.
 
-**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `file_path` | string | yes | — | Path relative to workspace root |
+| `content` | string | yes | — | Full markdown body to write |
+| `reindex` | string | no | `"file"` | `"file"` to re-index only this file, `"full"` for the whole docs directory |
 
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `file_path` | `string` | yes | - | File path relative to project root (e.g., `docs/auth.md`) |
-| `content` | `string` | yes | - | Full markdown content to write to the file |
-| `reindex` | `string` | no | `"file"` | Reindex scope: `"file"` to re-index only this file, or `"full"` to re-index the entire docs directory |
+Flow:
 
-**Behavior:**
+1. Validates the resolved path is within `docs_dir` — writes outside the docs directory are rejected.
+2. Creates parent directories as needed.
+3. Writes `content` to the file.
+4. Re-indexes (`reindex="file"`) a single file or (`reindex="full"`) the whole docs directory with `force=true`.
 
-1. Validates that the resolved absolute path is within the configured `docs_dir`
-2. Creates parent directories if they don't exist
-3. Writes the content to the file
-4. Re-indexes either the single file or the full docs directory (with `force=true`, bypassing content hash checks)
+Callers that need to write source code or files outside `docs_dir` should use a conventional filesystem tool; `update_docs` is scoped to documentation.
 
-**Annotations:** Not read-only (writes to disk).
+---
 
-**Example output:**
+## Instructions string
 
-```
-Updated docs/auth.md
+The server advertises a short usage string to connecting assistants:
 
-Re-indexed (file):
-  Documents: 1
-  Chunks:    4
-  Code refs: 3
-```
+> Librarian provides semantic search across project documentation. Use search_docs for quick searches, get_context for comprehensive briefings with related code files and documents, get_document to read full documents, list_documents to browse the index, and update_docs to write and re-index documentation.
+
+This appears in tool listings on assistants that surface instructions.
+
+## CLI equivalents
+
+Most MCP tools have a direct CLI mirror:
+
+| MCP tool | CLI |
+|---|---|
+| `search_docs` | `librarian search <query>` |
+| `get_context` | `librarian context <query>` |
+| `get_document` | `librarian doc <path>` |
+| `list_documents` | `librarian list [--doc-type=…]` |
+| `update_docs` | `librarian update <path> --content=…` |
+
+The CLI also exposes graph-specific commands (`neighbors`, `path`, `explain`, `report`) that aren't yet surfaced as MCP tools — see [CLI Reference](cli.md).

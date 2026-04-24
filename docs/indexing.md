@@ -1,317 +1,192 @@
 ---
 title: Indexing Pipeline
 type: reference
-description: How the indexing pipeline works, from file walking through parsing, chunking, content processing (diagrams, tables, emphasis), code reference extraction, and incremental indexing.
+description: How the indexing pipeline walks the filesystem, dispatches files to format-specific handlers, and stores parsed units, chunks, signals, and graph edges in SQLite.
 ---
 
 # Indexing Pipeline
 
-The indexing pipeline transforms markdown files into searchable vector chunks stored in SQLite with sqlite-vec. It runs when you execute `librarian index` or when the `update_docs` MCP tool triggers a re-index.
+`librarian index` turns a project's documentation + source into a searchable SQLite index. The pipeline is format-agnostic: the walker doesn't know what a `.pdf` or `.py` file is — it dispatches to a handler registered for each extension (see [Handlers](handlers.md)).
 
-## Pipeline Overview
+## Pipeline overview
 
 ```
- docs/
- ├── auth.md
- ├── api.md
- └── security.md
-      │
-      ▼
- ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────────────┐
- │  Walk    │───>│  Parse  │───>│  Chunk  │───>│  Store          │
- │          │    │         │    │         │    │  + Gemini Embed   │
- │ Find .md │    │ AST +   │    │ Section │    │  + Code Refs     │
- │ files    │    │ front-  │    │ aware   │    │  + Related Docs  │
- │          │    │ matter  │    │ split   │    │  + Hash Check    │
- └─────────┘    └─────────┘    └─────────┘    └─────────────────┘
+   filesystem
+       │
+       ▼
+ 1. Walk ────── find files, apply exclude patterns + gitignore-style .librarian/ignore
+       │
+       ▼
+ 2. Dispatch ── registry.HandlerFor(ext)  → FileHandler implementation
+       │
+       ▼
+ 3. Parse ──── handler.Parse(path, bytes) → ParsedDoc (units + signals + refs)
+       │
+       ▼
+ 4. Chunk ──── handler.Chunk(doc, opts)   → []Chunk (embedding text + signal meta)
+       │
+       ▼
+ 5. Embed ──── embedder.Embed(chunk.EmbeddingText) per chunk  →  []float64
+       │
+       ▼
+ 6. Store ──── documents + doc_chunks + doc_chunk_vectors + code_files + refs
+       │        + graph_nodes + graph_edges
+       ▼
+ 7. Link ───── buildRelatedDocEdges — second pass, docs sharing code refs get edges
 ```
 
-### Key files
+Key files:
 
-- `internal/indexer/walker.go` - Stage 1: Walk
-- `internal/indexer/parser.go` - Stage 2: Parse
-- `internal/indexer/chunker.go` - Stage 3: Chunk
-- `internal/indexer/diagrams.go` - Diagram detection and label extraction
-- `internal/indexer/tables.go` - Table linearization for embeddings
-- `internal/indexer/emphasis.go` - Bold text signal extraction
-- `internal/indexer/references.go` - Code reference extraction
-- `internal/indexer/indexer.go` - Stage 4: Store + orchestration
+- `internal/indexer/walker.go` — stage 1
+- `internal/indexer/registry.go` — stage 2 dispatch
+- `internal/indexer/handlers/*/*.go` — stages 3–4, per format
+- `internal/indexer/chunker.go` — shared `ChunkSections`, used by every handler
+- `internal/indexer/indexer.go` — stages 5–7, orchestration
+- `internal/indexer/signals.go`, `emphasis.go` — signal extraction (shared)
 
 ## Stage 1: Walk
 
-The walker (`WalkDocs`) recursively traverses the docs directory using `filepath.Walk`, collecting all files with `.md` or `.markdown` extensions.
+`WalkDocs(dir, excludePatterns, registry)` recursively traverses the workspace using `filepath.Walk`. A file is indexed if:
 
-**Hard-coded directory exclusions:** `.git`, `node_modules`, `vendor`, `.librarian`
+1. Its extension is registered with a `FileHandler` (i.e. the registry knows what to do with it)
+2. Its path doesn't match any `exclude_patterns` glob (config) or `.librarian/ignore` entry
+3. It doesn't fall under the hard-coded ignore list: `.git/`, `node_modules/`, `vendor/`, `.librarian/`
 
-**Configurable exclusions:** The `exclude_patterns` config field supports glob patterns. Patterns containing `**` are expanded to match path segments containing the base pattern.
+Each matched file yields a `WalkResult` with the relative path (stored) + absolute path (for reading).
 
-Each found file is returned as a `WalkResult` with both its relative path (for storage) and absolute path (for reading).
+## Stage 2: Dispatch
 
-## Stage 2: Parse
+The registry (`internal/indexer/registry.go`) is an extension → handler map. `DefaultRegistry().HandlerFor(path)` returns the handler whose `Extensions()` claims this file's extension. Unknown extensions are skipped silently.
 
-The parser (`ParseMarkdown`) uses [Goldmark](https://github.com/yuin/goldmark) with the `goldmark-meta` extension to process each markdown file.
+Handlers register themselves at package init time; blank-importing `internal/indexer/handlers/defaults` wires every built-in handler. `cmd/root.go` re-registers format-specific handlers after `config.Load()` so user-configured options (XLSX row caps, PDF page caps, etc.) flow through.
 
-### Frontmatter Extraction
+## Stage 3: Parse
 
-YAML frontmatter is extracted and mapped to document properties:
-
-| Frontmatter Field | Document Property | Description |
-|-------------------|-------------------|-------------|
-| `title` | `Title` | Document title. Falls back to the first H1 heading if not set in frontmatter |
-| `type` | `DocType` | Document type (e.g., `guide`, `reference`, `architecture`). Defaults to `"guide"` if not set |
-| `description` | `Summary` | Document summary. Falls back to the first paragraph if not set in frontmatter |
-
-All frontmatter fields are also stored as a JSON string in the `frontmatter` column of the `documents` table.
-
-### AST Walk
-
-The parser walks the Goldmark AST to build:
-
-1. **Headings list** - All headings in the document, stored as a JSON array
-2. **Section hierarchy** - A tree structure tracking heading nesting. For each heading, the parser maintains a stack: when a heading of level N is encountered, all headings at level >= N are popped, and the new heading is pushed. This produces a hierarchy like `["Architecture", "Data Model", "Node Types"]`
-3. **Sections** - Each heading starts a new section. Content between headings (paragraphs, code blocks, lists, blockquotes) is accumulated into the current section
-
-## Stage 3: Chunk
-
-The chunker (`ChunkDocument`) converts parsed sections into chunks suitable for vector embedding.
-
-### Section-Aware Splitting
-
-The primary split boundary is the section (typically H2 headings). Each section becomes one chunk, unless it exceeds `max_tokens`.
-
-### Paragraph Fallback
-
-When a section exceeds `max_tokens`, it is split at paragraph boundaries (`\n\n`). The splitter accumulates paragraphs until adding the next paragraph would exceed the token limit, then starts a new chunk. This ensures chunks never break mid-paragraph.
-
-### Token Estimation
-
-Token count is estimated by counting words and dividing by 0.75:
+Each handler turns raw bytes into a `ParsedDoc`:
 
 ```go
-tokens := int(float64(words) / 0.75)
+type ParsedDoc struct {
+    Path       string
+    Format     string          // "markdown", "go", "docx", "pdf", …
+    Title      string
+    DocType    string
+    Summary    string
+    Headings   []string
+    Frontmatter map[string]any
+    Units      []Unit          // tree of sections/symbols/keys
+    Signals    []Signal        // doc-level signals
+    Refs       []Reference     // outbound refs: imports, code files, doc links
+    Metadata   map[string]any  // format-specific extras
+    RawContent string
+}
 ```
 
-### Minimum Token Threshold
+See [Handlers](handlers.md) for the per-format shape. Key behaviours:
 
-Chunks with fewer than `min_tokens` (default: 50) are discarded. This filters out sections that contain only a heading and a brief sentence.
+- **Markdown** uses Goldmark + goldmark-meta. Extracts frontmatter, builds heading hierarchy, processes diagrams and tables (see below), extracts emphasis signals and code references.
+- **Code grammars** use tree-sitter. Each grammar defines symbol kinds, container kinds, comment node types, docstring extraction. The shared walker handles preceding-comment buffering, container descent (class bodies), and rationale signal extraction.
+- **Config handlers** flatten trees into dotted key paths; leading comments become the key's docstring.
+- **Office + PDF handlers** convert to markdown first, then delegate `Parse` to the markdown handler, then stamp `Format` / `DocType` on the result.
 
-### Context Header
+### Markdown-specific processing
 
-Each chunk's embedding text is prefixed with a context header containing the document title and section hierarchy:
+These three transformations run inside the markdown handler (and therefore also run on Office + PDF content, since those convert to markdown first):
 
-```
-Document: Authentication Guide | Section: Authentication > Login Flow
-
-The login flow uses OAuth 2.0 with PKCE...
-```
-
-This gives the embedding model additional context about where the content sits within the document structure.
-
-### Overlap
-
-After all chunks are generated, overlap is applied: the last `overlap_lines` (default: 3) lines of each chunk are prepended to the next chunk. This provides continuity across chunk boundaries during retrieval.
-
-## Diagram Processing
-
-The diagram processor (`ProcessDiagramBlock` in `internal/indexer/diagrams.go`) detects diagram code blocks and extracts human-readable labels for embedding. Raw diagram syntax (Mermaid arrows, PlantUML keywords, box-drawing characters) embeds poorly — the extracted labels capture the semantic content instead.
-
-### Detection
-
-Fenced code blocks are checked by language tag:
-
-| Language Tag | Diagram Type |
-|--------------|-------------|
-| `mermaid` | Mermaid |
-| `plantuml`, `puml` | PlantUML |
-| `ascii`, `ascii-art` | ASCII art |
-| `""`, `text`, `txt` | ASCII art (if heuristic passes) |
-
-For unlabeled or plain-text code blocks, the `isASCIIDiagram` heuristic checks whether box-drawing characters (`│`, `├`, `┌`, `─`, `-->`, etc.) make up more than 30% of the content. This catches ASCII diagrams that aren't explicitly tagged.
-
-### Label Extraction
-
-Each diagram type has its own label extraction strategy:
-
-**Mermaid** — Extracts from five regex patterns:
-- Node labels: text inside `[]`, `()`, `{}` brackets
-- Edge labels: text between `|pipes|`
-- Participants/actors: `participant "Name"` or `participant Name`
-- Titles: `title: ...`
-- Subgraph names: `subgraph Name`
-
-**PlantUML** — Extracts from four regex patterns:
-- Titles: `title: ...`
-- Participants: `participant`, `actor`, `database`, `entity`, `boundary`, `control`, `collections`
-- Classes: `class`, `interface`, `enum`, `component`, `package`
-- Arrow labels: `--> Target : label`
-
-**ASCII art** — Extracts text from box patterns: `| text |` where text is 3+ alphabetic characters.
-
-### Subtype Detection
-
-Mermaid diagrams are classified by their opening keyword:
-
-| Prefix | Subtype |
-|--------|---------|
-| `graph`, `flowchart` | flowchart |
-| `sequenceDiagram` | sequence diagram |
-| `classDiagram` | class diagram |
-| `stateDiagram` | state diagram |
-| `erDiagram` | ER diagram |
-| `gantt` | gantt chart |
-| `pie` | pie chart |
-
-### Output
-
-The extracted labels are formatted into a summary string that replaces the raw diagram code in the chunk's embedding text:
+**Diagrams** (`diagrams.go`) — Mermaid, PlantUML, ASCII diagrams get their raw syntax replaced with extracted labels. Raw arrow/pipe syntax embeds poorly; labels capture the semantic content. Example:
 
 ```
 [Diagram: mermaid flowchart — Auth Service, User Database, validate credentials]
 ```
 
-Labels are capped at 10 per diagram to avoid noise.
+Labels are capped at 10 per diagram. ASCII diagrams are detected heuristically (>30% box-drawing characters).
 
-## Table Processing
-
-The table processor (`internal/indexer/tables.go`) converts markdown and HTML tables into linearized natural-language text for better embedding quality. Tabular data in its raw form (pipes, dashes, HTML tags) doesn't embed well — linearization turns each row into a key-value sentence.
-
-### Markdown Tables
-
-`ProcessTableNode` walks a Goldmark `Table` AST node to extract headers from `TableHeader` cells and data from `TableRow` cells. Both are capped at 20 columns and 20 rows.
-
-### HTML Tables
-
-`ProcessHTMLTable` parses raw HTML using Go's `html` package, finding the first `<table>` element. It handles:
-- `<thead>` / `<tbody>` structure
-- `<th>` vs `<td>` cells
-- Tables without explicit headers (uses first row or generates `Column 1`, `Column 2`, etc.)
-
-HTML tables in markdown are detected by the `isHTMLTable` function, which checks if the content starts with `<table`.
-
-### Linearization
-
-Both table types are linearized into the same format:
+**Tables** (`tables.go`) — Markdown GFM tables and HTML tables are linearised into key-value sentences. Raw pipe syntax embeds poorly; linearised text lets a chunk stay findable by a query that mentions a column value:
 
 ```
 [Table: 3 columns, 5 rows — Name, Type, Description]
 Name: docs_dir, Type: string, Description: Path to documentation directory
-Name: db_path, Type: string, Description: Path to the SQLite database file
 ```
 
-The prefix line includes column count, row count, and header names for context. Each subsequent line joins header-value pairs with commas.
+Both tables are capped at 20 rows × 20 columns.
 
-## Emphasis Signal Extraction
+**Emphasis signals** (`emphasis.go`) — Bold text is classified into three categories: **inline labels** (`**Warning:**`, `**Decision:**`), **risk markers** (standalone `**deprecated**`, `**breaking**`), and **emphasis terms** (all bold). Inline labels and risk markers are appended to the chunk's embedding text as a signal line and stored on `signal_meta` JSON for the re-ranker. Emphasis terms are recorded but not embedded, to keep noise out.
 
-The emphasis processor (`internal/indexer/emphasis.go`) scans markdown AST nodes for bold text (`**bold**`) and classifies it into structured signals. These signals serve two purposes:
+### Rationale signals (every format)
 
-1. **Selective embedding augmentation** — A `SignalLine()` like `Signals: warning, deprecated` is appended to the chunk's embedding text, making the chunk findable by queries like "what's deprecated"
-2. **Re-ranking metadata** — The signals are stored as JSON in the `signal_meta` column on `doc_chunks`, used by the search re-ranker to boost chunks containing warnings, decisions, and risk markers (see [Storage Layer](storage.md#search-re-ranking))
+`ExtractRationaleSignals` scans comments for TODO / FIXME / HACK / XXX / NOTE patterns. Every comment-bearing handler (code grammars + markdown) runs this. Signals land on `Unit.Signals` and the chunk's `signal_meta`.
 
-### Signal Classification
+### Code annotations (Java + TS)
 
-Bold text is classified into three categories:
+Grammars that opt in via the `annotationExtractor` interface emit `Signal{Kind: "annotation", Value: "Deprecated"}` for each `@Annotation` on a symbol. Search boosts these alongside rationale signals.
 
-**Inline Labels** — Bold text followed by a colon, mapped to canonical names:
+## Stage 4: Chunk
 
-| Variations | Canonical Label |
-|-----------|----------------|
-| `warn`, `warning`, `caution` | `warning` |
-| `note`, `info`, `tip` | `note` |
-| `decision` | `decision` |
-| `important` | `important` |
-| `input`, `output` | `input`, `output` |
-| `example` | `example` |
-| `todo`, `fixme` | `todo`, `fixme` |
-| `default`, `prerequisite`, `requirement` | `default`, `prerequisite`, `requirement` |
-
-Example: `**Warning:** This will delete all data` produces label `warning` with value `This will delete all data`.
-
-**Risk Markers** — Standalone bold text (no colon) matching risk patterns:
-
-| Variations | Canonical Marker |
-|-----------|-----------------|
-| `deprecated` | `deprecated` |
-| `breaking`, `breaking change` | `breaking-change` |
-| `unsafe` | `unsafe` |
-| `experimental`, `unstable` | `experimental` |
-| `do not run`, `do-not-run` | `do-not-run` |
-
-**Emphasis Terms** — All bold text is also recorded as-is (normalized to lowercase) in the `emphasis_terms` array. This captures bold text that doesn't match labels or risk markers.
-
-### EmphasisSignals Struct
+Every handler's `Chunk` method ultimately calls `indexer.ChunkSections`:
 
 ```go
-type EmphasisSignals struct {
-    InlineLabels  []string          // canonical label names
-    RiskMarkers   []string          // canonical risk marker names
-    EmphasisTerms []string          // all bold text (normalized)
-    LabelValues   map[string]string // label → value after colon
-    HasWarning    bool              // shortcut flag
-    HasDecision   bool              // shortcut flag
-}
+func ChunkSections(docTitle, rawContent string, inputs []SectionInput, opts ChunkOpts) []Chunk
 ```
 
-### Storage
+One `SectionInput` per H2 section / code symbol / config key block. Each is a candidate for one chunk. The splitter:
 
-Signals are serialized to JSON via `ToJSON()` and stored in the `signal_meta` column of `doc_chunks`. Only `InlineLabels` and `RiskMarkers` are included in the `SignalLine()` that augments the embedding text — general emphasis terms are stored but not embedded, to avoid noise.
+1. **Token count** via words / 0.75 ≈ tokens.
+2. **Section fits** (`≤ max_tokens`) → one chunk.
+3. **Section too big** → split at paragraph boundaries (`\n\n`), accumulate paragraphs until the next one would overflow, then start a new chunk. Never splits mid-paragraph.
+4. **Too small** (`< min_tokens`) → drop; filters single-heading-only sections.
 
-## Code Reference Extraction
-
-The reference extractor (`ExtractCodeReferences`) scans the raw markdown content for file path patterns using a regex:
+Each chunk's `EmbeddingText` is prefixed with a **context header**:
 
 ```
-(?:^|[\s`"'(])([a-zA-Z0-9_/.-]+\.(?:go|ts|tsx|js|jsx|py|rs|java|rb|c|cpp|h|hpp|cs|swift|kt|scala|sh|bash|zsh|yaml|yml|toml|json))(?:$|[\s`"')\]:,])
+Document: Authentication Guide | Section: Authentication > Login Flow
+Signals: warning, decision
+
+The login flow uses OAuth 2.0 with PKCE…
 ```
 
-This matches file paths like `internal/auth/oauth.go` or `src/components/Login.tsx` that appear in documentation text, code blocks, or inline code.
+The context header gives the embedding model structural clues the raw text lacks; the signal line captures metadata that should influence vector distance. **Overlap** lines from the previous chunk prepend to the next for retrieval continuity.
 
-### Filtering
+## Stage 5: Embed
 
-Matched paths are filtered against the `code_file_patterns` config. Only files whose extension matches one of the configured patterns (e.g., `*.go`, `*.ts`) are kept.
+Each chunk's `EmbeddingText` is sent to the configured provider (`embedder.Embed`). Returned `[]float64` is converted to little-endian `[]byte` of float32 at the store boundary — sqlite-vec's expected format. See [Embedding](embedding.md).
 
-### Language Detection
+## Stage 6: Store
 
-The file extension is mapped to a language name (e.g., `.go` -> `"go"`, `.ts`/`.tsx` -> `"typescript"`, `.py` -> `"python"`). This is stored on the `code_files` row.
+Per document:
 
-### Storage
+1. `AddDocument` → `documents` row (or replaces existing when content hash differs)
+2. `AddChunk` per chunk → `doc_chunks` + `doc_chunk_vectors`
+3. `AddCodeFile` + `AddReference` for each extracted code-file mention
+4. `UpsertNode` for every unit that projects into a `graph_node` (symbol, section, key-path)
+5. `UpsertEdge` for every inbound `mentions` / `imports` / `calls` edge
 
-For each extracted reference:
+See [Storage Layer](storage.md) for CRUD detail.
 
-1. Look up or create a `code_files` row in SQLite
-2. Insert a `refs` row linking the document to the code file, with the source line as the `context` column
+## Stage 7: Link related docs
 
-## Incremental Indexing
+After every file in the run has been indexed, `buildRelatedDocEdges` computes doc-to-doc edges:
 
-Each document's raw content is hashed with SHA-256:
+1. Build reverse map `code_file_path → [doc_paths]` from `refs`.
+2. For each code file referenced by 2+ documents, add a `graph_edge{kind: "shared_code_ref"}` between every pair of those documents.
 
-```go
-h := sha256.Sum256([]byte(content))
-hash := fmt.Sprintf("%x", h)
-```
+Duplicates are avoided by tracking pairs in a set keyed by the two doc paths.
 
-On each index run, the hash is compared against the `content_hash` stored in the existing `documents` row:
+The `get_context` MCP tool and the `librarian context` CLI command walk this layer to surface "here's what else in the docs references the same code".
 
-- **Hash matches:** The document is skipped (counted as `Skipped` in the result)
-- **Hash differs:** The existing document and all its chunks/edges are deleted, then the document is re-indexed from scratch
-- **No existing document:** The document is indexed as new
+## Incremental indexing
 
-The `--force` flag on `librarian index` bypasses the hash check and re-indexes all documents unconditionally.
+Every file's raw content is hashed with SHA-256 before Parse. The stored hash on the `documents` row is compared:
 
-## Related Document Building
+| State | Action |
+|---|---|
+| Hash matches | Skip (counted as `Skipped`) |
+| Hash differs | Delete existing doc + chunks + edges, re-index |
+| No existing doc | Index as new |
 
-After all files in a directory are indexed, `buildRelatedDocEdges` runs a second pass:
+`librarian index --force` bypasses the hash check and re-indexes everything.
 
-1. For each indexed document, query the `refs` table for its referenced code files
-2. Build a reverse map: `code_file_path -> [document_paths...]`
-3. For each code file referenced by 2+ documents, insert `related_docs` rows between all pairs of those documents with `relation_type: "shared_code_references"`
+## Frontmatter conventions (markdown)
 
-This means if `docs/auth.md` and `docs/api.md` both reference `internal/auth/oauth.go`, they will be linked by a `related_docs` row. The `get_context` MCP tool joins on this table to surface related documentation.
-
-Duplicate entries are prevented by tracking linked pairs in a set keyed by `docPathA|docPathB`.
-
-## Frontmatter Conventions
-
-To get the most out of Librarian's indexing, use these frontmatter fields in your markdown files:
+Markdown files get the most out of librarian when they include YAML frontmatter:
 
 ```yaml
 ---
@@ -322,9 +197,9 @@ description: How authentication works in the application.
 ```
 
 | Field | Effect |
-|-------|--------|
-| `title` | Used as the document title in search results and the context header prepended to chunk embeddings. Falls back to the first H1 heading |
-| `type` | Stored as `doc_type` in the `documents` table. Used for filtering with `list_documents`. Defaults to `"guide"` |
-| `description` | Stored as `summary` in the `documents` table. Falls back to the first paragraph of the document |
+|---|---|
+| `title` | Used as document title + context header. Falls back to the first H1 |
+| `type` | Stored as `doc_type` — filterable via `list_documents` / `librarian list --doc-type=guide`. Defaults to `"guide"` |
+| `description` | Stored as `summary`. Falls back to the first paragraph |
 
-Additional frontmatter fields are preserved in the `frontmatter` JSON field but do not have special handling.
+Other frontmatter fields are preserved in the `frontmatter` JSON column but aren't otherwise interpreted.

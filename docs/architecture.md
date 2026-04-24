@@ -1,184 +1,193 @@
 ---
 title: Architecture
 type: architecture
-description: System architecture overview covering the data model, data flow, project structure, and key design decisions.
+description: System architecture overview — the FileHandler abstraction, the SQLite + sqlite-vec store, the graph spine, and the command surface exposed as CLI and MCP.
 ---
 
 # Architecture
 
-Librarian is a Go CLI that indexes project documentation into an embedded SQLite database with [sqlite-vec](https://github.com/asg017/sqlite-vec) for vector search, and exposes it to AI coding tools via the [Model Context Protocol](https://modelcontextprotocol.io) (MCP).
+Librarian is a Go CLI that indexes a project's documentation **and** source code into an embedded SQLite database (with [sqlite-vec](https://github.com/asg017/sqlite-vec) for vector search), then exposes the index via both a rich CLI and an opt-in MCP server.
 
-## System Overview
-
-```
- Markdown files          Librarian CLI           SQLite + sqlite-vec
-┌──────────────┐    ┌────────────────────┐    ┌──────────────┐
-│ docs/*.md    │───>│  walker / parser   │───>│  documents   │
-│              │    │  chunker / refs    │    │  doc_chunks  │
-└──────────────┘    └────────────────────┘    │  code_files  │
-                            │                 │  (relations) │
-                            │                 └──────┬───────┘
-                    ┌───────┴────────┐               │
-                    │  MCP Server    │<──────────────-┘
-                    │  (stdio)       │  queries / vector search
-                    └───────┬────────┘
-                            │
-                    AI coding tools
-                    (Claude Code, Cursor, etc.)
-```
-
-The CLI has two modes of operation:
-
-1. **`librarian index`** - Walks a docs directory, parses markdown, chunks content, extracts code references, and stores everything in SQLite.
-2. **`librarian serve`** - Starts an MCP server over stdio that exposes search, retrieval, and update tools backed by SQLite.
-
-## Project Structure
+## System overview
 
 ```
-cmd/
-  root.go          CLI entrypoint, global flags, Viper config init
-  init.go          `librarian init` - create SQLite database
-  index.go         `librarian index` - run the indexing pipeline
-  search.go        `librarian search` - CLI vector search
-  status.go        `librarian status` - show index statistics
-  serve.go         `librarian serve` - start MCP stdio server
+Files (9+ formats)            Librarian CLI           SQLite + sqlite-vec
+┌──────────────────┐   ┌─────────────────────┐   ┌────────────────────┐
+│ docs/*.md        │   │  walker → handler   │   │ documents          │
+│ *.go .py .java   │──>│  parse → chunk      │──>│ doc_chunks         │
+│ .ts .tsx .js     │   │  signals + refs     │   │ doc_chunk_vectors  │
+│ .yaml .json .toml│   │  store + graph pass │   │ code_files + refs  │
+│ .docx .xlsx .pptx│   │                     │   │ graph_nodes/_edges │
+│ .pdf             │   └──────────┬──────────┘   └──────────┬─────────┘
+└──────────────────┘              │                         │
+                                  ▼                         │
+                         ┌────────────────┐                 │
+                         │  CLI surface   │<────────────────┤
+                         │  search/graph  │  queries        │
+                         └────────────────┘                 │
+                         ┌────────────────┐                 │
+                         │  MCP server    │<────────────────┘
+                         │  (stdio)       │  via tools
+                         └────────────────┘
+```
+
+Everything lives in a project-local **workspace** at `.librarian/` (discovered by walking up from the current directory). `librarian init` bootstraps one; every other command requires one.
+
+## Entry points
+
+| Mode | Command | Notes |
+|---|---|---|
+| Indexing | `librarian index [dir]` | Walks `docs_dir` + code, stores everything |
+| CLI search | `librarian search`, `context`, `neighbors`, `path`, `explain`, `list`, `doc`, `report`, `status` | See [CLI Reference](cli.md) |
+| MCP server | `librarian mcp serve` | Stdio JSON-RPC; 5 tools — see [MCP Tools](mcp-tools.md) |
+| Platform install | `librarian install` | Writes assistant-platform pointers (CLAUDE.md, AGENTS.md, …) — see [CLI Reference](cli.md#librarian-install) |
+
+## Project structure
+
+```
+cmd/                         Cobra CLI — 14 subcommands
+  root.go                    global flags, Viper init, workspace discovery
+  init.go index.go search.go context.go list.go doc.go status.go update.go
+  neighbors.go path.go explain.go report.go      # graph commands
+  install.go                 assistant-platform integration pointers
+  mcp.go                     `librarian mcp serve`
 
 internal/
-  config/
-    config.go      Configuration struct, defaults, Viper binding
-
-  embedding/
-    gemini.go      Gemini embedding client
-    openai.go      OpenAI-compatible embedding client (LM Studio, Ollama, vLLM)
-    provider.go    Factory function: NewEmbedder(cfg) → Embedder
-
+  config/                    Config struct, Viper binding, per-handler sub-configs
+  workspace/                 .librarian/ discovery and path helpers
+  embedding/                 Gemini + OpenAI-compatible providers
   indexer/
-    walker.go      Filesystem walk, file filtering, exclude patterns
-    parser.go      Goldmark-based markdown parsing, frontmatter, AST walk
-    chunker.go     Section-aware chunking with paragraph fallback
-    diagrams.go    Diagram detection and label extraction (Mermaid, PlantUML, ASCII)
-    tables.go      Table linearization for better embeddings
-    emphasis.go    Bold text signal extraction for metadata and re-ranking
-    references.go  Regex-based code file reference extraction
-    indexer.go      Orchestrator: hash check, store, build edges
-
+    handler.go               FileHandler interface + ParsedDoc/Unit/Signal/Reference shapes
+    registry.go              Extension → handler map
+    walker.go                Filesystem walk + exclude patterns
+    chunker.go               Shared ChunkSections: token-aware section splitting w/ paragraph fallback
+    indexer.go               Orchestrator: hash check → parse → chunk → embed → store → graph edges
+    parser.go                Goldmark markdown AST walk (shared w/ markdown handler)
+    diagrams.go tables.go    Markdown-specific: diagram/table linearisation for embedding
+    emphasis.go signals.go   Signal extraction (warnings, rationale, risk markers, annotations)
+    references.go            Code-path regex extraction for markdown references
+    handlers/
+      markdown/              .md, .markdown — baseline goldmark handler
+      code/                  Tree-sitter grammars: Go, Python, Java, JS, TS, TSX
+      config/                YAML / JSON / TOML / XML / properties / env
+      office/                DOCX / XLSX / PPTX
+      pdf/                   PDF via go-pdfium (WebAssembly)
+      defaults/              Aggregator: blank-imports every handler
   store/
-    store.go       SQLite database open/close, schema init
-    types.go       Go types for Document, DocChunk, CodeFile, input structs
-    documents.go   Document CRUD operations
-    chunks.go      Chunk add/search/list operations + vec0 vector storage
-    codefiles.go   CodeFile + refs + related_docs operations
-
-  mcpserver/
-    server.go          MCP server setup (mcp-go SDK)
-    search_docs.go     search_docs tool
-    get_document.go    get_document tool
-    get_context.go     get_context tool (intelligence briefing)
-    list_documents.go  list_documents tool
-    update_docs.go     update_docs tool
+    store.go                 Open/close, schema, vec0 lazy init
+    documents.go             Document CRUD
+    chunks.go                Chunk insert + SearchChunks (over-fetch + re-rank)
+    codefiles.go             code_files + refs
+    graph.go                 graph_nodes + graph_edges + BFS shortest-path
+    types.go                 Shared structs
+  analytics/                 Community detection + centrality for `librarian report`
+  report/                    HTML + JSON + markdown report generators
+  install/                   `librarian install` — platform registry + idempotent writes
+  mcpserver/                 MCP tool implementations (mcp-go SDK)
 
 db/
-  migrations.sql   SQLite schema (embedded at build time)
+  migrations.sql             Embedded SQLite schema
+
+docs/                        This documentation (indexed by Librarian itself)
 ```
 
-## Data Model
+## Data model
 
-The SQLite schema uses six tables: three primary entity tables and three relationship tables, using standard relational joins to model the connections between documents, chunks, and code files.
-
-```
-                    ┌──────────────┐
-               ┌───>│  doc_chunks  │  (content, linked by doc_id FK)
-  doc_id FK    │    │              │
-               │    │ file_path    │
-┌──────────┐───┘    │ section_*    │     ┌──────────────────┐
-│documents │        │ content      │────>│doc_chunk_vectors │
-│          │        │ token_count  │     │ (vec0 virtual)   │
-│ file_path│        └──────────────┘     │ embedding[N]     │
-│ title    │                             └──────────────────┘
-│ doc_type │───┐    ┌──────────────┐
-│ summary  │   │    │  code_files  │
-│ headings │   └───>│              │
-│ content_ │  refs  │ file_path    │
-│   hash   │        │ language     │
-│ chunk_   │        └──────────────┘
-│   count  │
-│ indexed_ │
-│   at     │───┐
-└──────────┘   │    ┌──────────────┐
-               └───>│  documents   │
-        related_docs│  (another)   │
-                    └──────────────┘
-```
-
-### Tables
-
-| Table | Purpose |
-|-------|---------|
-| `documents` | Document metadata: file path, title, type, content hash, chunk count |
-| `doc_chunks` | Chunk content linked to documents via `doc_id` foreign key, with `signal_meta` for emphasis signals |
-| `doc_chunk_vectors` | vec0 virtual table storing float32 embeddings for similarity search (dimensions determined by embedding model) |
-| `code_files` | Source files referenced in documentation |
-| `refs` | Junction table connecting documents to code files (with context) |
-| `related_docs` | Junction table connecting documents that share code references |
-
-### Key Relationships
-
-| Relationship | Mechanism |
-|-------------|-----------|
-| Document → Chunks | `doc_chunks.doc_id` FK with `ON DELETE CASCADE` |
-| Document → CodeFiles | `refs` junction table |
-| Document → Document | `related_docs` junction table |
-
-`doc_chunk_vectors` is a **vec0 virtual table** that enables vector similarity search. Embeddings are generated client-side using the configured embedding provider and stored as float32 arrays. The table is created lazily on first insert, with dimensions matching the model's output. The `MATCH` operator performs KNN search.
-
-## Data Flow
-
-When `librarian index` runs, a markdown file moves through four pipeline stages:
+Eight persistent tables plus one virtual table. Three primary entity tables (`documents`, `code_files`, `graph_nodes`) and three relational tables (`doc_chunks`, `refs`, `graph_edges`), plus the lazy-created vector table.
 
 ```
- docs/auth.md
-      │
-      ▼
- 1. Walk ──────── Find all .md/.markdown files, apply exclude patterns
-      │
-      ▼
- 2. Parse ─────── Goldmark AST walk: extract frontmatter, build section hierarchy
-      │
-      ▼
- 3. Chunk ─────── Section-aware splitting at H2 boundaries, paragraph fallback,
-      │           overlap between chunks, context header prepended for embedding
-      ▼
- 4. Store ─────── SHA-256 content hash check (skip if unchanged),
-                  generate embeddings via configured provider for each chunk,
-                  INSERT into documents + doc_chunks + doc_chunk_vectors,
-                  extract code references → INSERT into code_files + refs,
-                  build related_docs entries for docs sharing code references
+                         ┌────────────────┐
+          doc_id FK ┌───>│   doc_chunks   │ (content, signal_meta)
+                    │    └────────┬───────┘
+                    │             │ 1:1
+                    │             ▼
+                    │    ┌──────────────────────┐
+                    │    │  doc_chunk_vectors   │ vec0 virtual, float32 BLOBs
+                    │    │  (created lazily)    │
+                    │    └──────────────────────┘
+┌────────────┐──────┘    ┌────────────────┐
+│ documents  │──┐        │  code_files    │
+│ id(uuid)   │  └refs───>│  id(uuid)      │
+│ title      │           │  file_path     │
+│ doc_type   │           │  language      │
+│ headings   │           └────────┬───────┘
+│ content_   │                    │
+│   hash     │           ┌────────┴──────────┐
+│ chunk_count│           │                   ▼
+└────────────┘    ┌──────┴─────────┐  ┌──────────────┐
+                  │  graph_nodes   │  │  graph_edges │
+                  │  id (namespaced│  │  from_node   │
+                  │    "doc:…",    │  │  to_node     │
+                  │    "file:…",   │  │  kind        │
+                  │    "sym:…",    │  │  weight      │
+                  │    "key:…")    │  └──────────────┘
+                  │  kind, label   │  typed edges:
+                  │  source_path   │   mentions
+                  │  metadata      │   shared_code_ref
+                  └────────────────┘   imports, calls, …
 ```
 
-See [Indexing Pipeline](indexing.md) for full details on each stage.
+See [Storage Layer](storage.md) for full schema + operations and [Handlers](handlers.md) for how each format projects into these tables.
 
-## Key Design Decisions
+## Indexing flow
+
+```
+input file ──> walker ──> registry.HandlerFor(ext)
+                                │
+                                ▼
+                          FileHandler.Parse  ──> ParsedDoc (units, signals, refs)
+                                │
+                                ▼
+                          FileHandler.Chunk  ──> []Chunk (w/ embedding text + signal meta)
+                                │
+                                ▼
+                          embedder.Embed     ──> []float64 per chunk
+                                │
+                                ▼
+                          store.Add*         ──> documents + chunks + vectors
+                                │                + code_files + refs
+                                │                + graph_nodes per unit/doc/file
+                                ▼
+                     buildRelatedDocEdges    ──> second pass: docs that share
+                                                 code refs get a graph edge
+```
+
+Content-hash gate (SHA-256) runs before Parse, so re-indexing is fast when only a handful of files change. See [Indexing Pipeline](indexing.md) for the stage-by-stage detail.
+
+## Key design decisions
+
+### Single abstraction for every format
+
+One `FileHandler` interface; every format-specific package registers at import time. Adding a format is a self-contained subpackage plus one blank-import line in `internal/indexer/handlers/defaults`. The walker, store, signal extraction, re-ranker, and MCP server need no changes.
+
+Office formats and PDFs convert to markdown internally and delegate `Parse` + `Chunk` to the markdown handler — this keeps chunking + signal logic in one place regardless of source format. See [Handlers](handlers.md).
 
 ### Embedded SQLite + sqlite-vec
 
-SQLite with the sqlite-vec extension provides an embedded single-file database with vector search, eliminating external dependencies like Docker or separate database servers. The database file lives at `.librarian/librarian.db` and is created automatically by `librarian init`.
+Single-file database, zero external dependencies. The `vec0` virtual table is created **lazily** on first insert with dimensions derived from the live embedding model — no hardcoded dimension config, no re-index penalty for switching model families within a compatible dimension.
 
-### Section-aware chunking over fixed-window
+### Graph spine across formats
 
-Fixed-window chunking (e.g., every 512 tokens) splits text without regard for semantic boundaries, producing chunks that start mid-paragraph or mid-section. Librarian instead splits at H2 heading boundaries, keeping each section as a coherent unit. When a section exceeds `max_tokens`, it falls back to splitting at paragraph boundaries (`\n\n`). This produces chunks that align with how authors organize information.
+Every indexed thing — documents, code files, code symbols, config keys — projects into a `graph_node` with a namespaced id (`doc:…`, `file:…`, `sym:…`, `key:…`). Typed `graph_edges` (`mentions`, `shared_code_ref`, `imports`, `calls`, …) connect them. CLI commands `neighbors`, `path`, and `context` walk this graph; `report` emits topology summaries (god nodes, communities, cross-cluster bridges). See [Storage Layer](storage.md#graph-layer).
 
-### Relational tables for graph-like edges
+*Inspired by [graphify](https://github.com/graphify/graphify).*
 
-Documentation frequently references source files (e.g., `internal/store/store.go`). Rather than treating these as plain text, Librarian extracts them as structured `code_files` rows connected via `refs`. This enables the `get_context` tool to join across tables: search for chunks, find their source documents, join to `refs` to discover relevant code files, and join to `related_docs` to surface related documentation.
+### Section-aware chunking with paragraph fallback
+
+`ChunkSections` is the shared splitter: one chunk per H2 section (or code symbol, or YAML key block) until a section exceeds `max_tokens`, then splits at paragraph boundaries — never mid-paragraph. Overlap lines span chunk boundaries for retrieval continuity. A context header (doc title + section hierarchy + signal line) prefixes each chunk's embedding text so the vector captures where it lives in the document, not just what it says.
+
+### Signal-aware re-ranking
+
+Each chunk carries `signal_meta` JSON: warnings, decisions, TODO/FIXME, risk markers (deprecated, breaking-change, unsafe), code annotations (`@Deprecated`, `@Transactional`), emphasis terms. After the vector KNN fetch, a weighted re-rank (`0.90 × vector + 0.10 × metadata boost`) promotes chunks with actionable signals — so a query for "authentication" will surface the chunk that mentions a **decision** about OAuth ahead of a neutral paragraph of the same semantic distance. See [Storage Layer](storage.md#search-re-ranking).
 
 ### Pluggable embedding providers
 
-The `internal/embedding` package provides an `Embedder` interface with two implementations: `GeminiEmbedder` for Google's API and `OpenAIEmbedder` for any OpenAI-compatible endpoint (LM Studio, Ollama, vLLM). The factory function `NewEmbedder(cfg)` selects the provider based on config. The vec0 virtual table is created lazily on first insert, sized to the actual embedding dimensions, so no manual dimension configuration is needed.
+`Embedder` interface with two implementations: Gemini (Google) and OpenAI-compatible (LM Studio, Ollama, vLLM, or any `/v1/embeddings` endpoint). Selection is one config field. See [Embedding](embedding.md).
 
-### Content hashing for incremental indexing
+### Incremental indexing
 
-Each document's raw content is hashed with SHA-256. On subsequent index runs, Librarian compares the stored hash with the current file's hash and skips unchanged documents. This makes re-indexing fast for large documentation sets where only a few files change between runs. The `--force` flag bypasses this check when a full re-index is needed.
+SHA-256 content hash per file; unchanged files skip `Parse` entirely. `--force` bypasses for a full re-index. For code files, unit-level granularity is a future improvement.
 
-### MCP over stdio
+### MCP over stdio, opt-in
 
-The MCP server uses stdio transport (`server.ServeStdio`), which is the standard transport for local tool servers in Claude Code and Cursor. This avoids the complexity of HTTP servers, port management, and authentication for what is fundamentally a local development tool.
+`librarian mcp serve` is an optional subcommand. The primary UX is the CLI + file-based platform pointers (`librarian install`). MCP is there for assistants that prefer structured tool calls over shelling out to the CLI. Stdio transport keeps it trivial to launch — no ports, no auth.

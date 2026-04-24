@@ -8,113 +8,166 @@ description: How to build, test, and develop Librarian from source.
 
 ## Prerequisites
 
-- **Go 1.25+**
-- **Gemini API key** for embedding generation (set `GEMINI_API_KEY` env var)
-- **CGO enabled** — required for SQLite and sqlite-vec (CGO_ENABLED=1, the Go default)
+- **Go 1.25+** — see `go.mod`
+- **CGo enabled** — required for `mattn/go-sqlite3` and `sqlite-vec` (`CGO_ENABLED=1`, the Go default)
+- **An embedding provider** for end-to-end tests:
+  - A Gemini API key in `LIBRARIAN_EMBEDDING_API_KEY` / `GEMINI_API_KEY`, or
+  - A local OpenAI-compatible server (LM Studio, Ollama, vLLM)
 
 ## Building
 
-### From source
-
 ```sh
 git clone <repo-url> && cd librarian
-make build
+make build           # produces ./librarian
 ```
-
-This produces a `librarian` binary in the project root.
-
-### Install to GOPATH
-
-```sh
-make install
-```
-
-This runs `go install .`, placing the binary in `$GOPATH/bin`.
-
-### Clean
-
-```sh
-make clean
-```
-
-Removes the built binary.
-
-## Makefile Targets
 
 | Target | Command | Description |
-|--------|---------|-------------|
-| `build` | `go build -o librarian .` | Build binary in project root |
+|---|---|---|
+| `build` | `go build -o librarian .` | Build binary in the project root |
 | `install` | `go install .` | Install to `$GOPATH/bin` |
-| `clean` | `rm -f librarian` | Remove built binary |
+| `clean` | `rm -f librarian` | Remove the binary |
 | `test` | `go test ./...` | Run all tests |
 
-## Running Tests
+## Running tests
 
 ```sh
 make test
-```
-
-Or directly:
-
-```sh
+# or
 go test ./...
 ```
 
-### Test Coverage
+Most packages are unit-testable without network or filesystem setup. A few integration tests spin up a temp workspace; none need an embedding provider to pass.
 
-Tests currently cover the indexer package:
+### Where tests live
 
-| File | What it tests |
-|------|--------------|
-| `internal/indexer/diagrams_test.go` | Diagram detection, label extraction for Mermaid/PlantUML/ASCII |
-| `internal/indexer/emphasis_test.go` | Bold text signal extraction and classification |
-| `internal/indexer/tables_test.go` | Markdown and HTML table processing and linearization |
+| Area | Files |
+|---|---|
+| Indexer orchestration | `internal/indexer/integration_test.go`, `walker_test.go` |
+| Markdown processing | `internal/indexer/diagrams_test.go`, `emphasis_test.go`, `tables_test.go` |
+| Code grammars | `internal/indexer/handlers/code/{golang,python,java,javascript}_test.go` + `testhelpers_test.go` |
+| Config handlers | `internal/indexer/handlers/config/config_test.go` |
+| Office handlers | `internal/indexer/handlers/office/{docx,xlsx,pptx}_test.go` + `zipfixture_test.go` |
+| PDF handler | `internal/indexer/handlers/pdf/{convert,handler}_test.go` (fixtures under `testdata/`) |
+| Install | `internal/install/{install,markers,jsonhook,githook,gitignore,skill}_test.go` |
+| Store | `internal/store/graph_test.go` and friends |
 
-### Test Fixtures
+### Fixtures
 
-Test fixtures live in `testdata/docs/`:
-- `testdata/docs/auth.md` — Sample authentication guide
-- `testdata/docs/architecture.md` — Sample architecture document
+- Markdown / config tests build inputs inline.
+- Office tests build ZIP fixtures in memory via `buildZip` (`zipfixture_test.go`) — no binary fixtures committed.
+- PDF tests use small committed fixtures under `internal/indexer/handlers/pdf/testdata/` (plain, multipage, bookmarks, tagged). `testdata/generate.py` is the source of truth; re-run with reportlab.
 
-## Project Layout
+## Project layout
 
 ```
-cmd/                  CLI commands (Cobra)
+cmd/                              # Cobra CLI — 14 subcommands
+  root.go                         # flags, Viper init, workspace discovery,
+                                  # re-registers config-scoped handlers
+  init.go index.go search.go context.go doc.go list.go status.go update.go
+  neighbors.go path.go explain.go report.go   # graph surface
+  install.go                      # platform pointer installer
+  mcp.go                          # `librarian mcp serve`
+
 internal/
-  config/             Configuration struct and Viper binding
-  embedding/          Embedding generation (Gemini API)
-  indexer/            4-stage indexing pipeline
-  store/              SQLite + sqlite-vec storage layer
-  mcpserver/          MCP tool implementations (mcp-go SDK)
+  config/                         # Config struct, defaults, Viper binding
+  workspace/                      # .librarian/ discovery, path helpers
+  embedding/                      # Embedder interface + gemini + openai providers
+  indexer/
+    handler.go                    # FileHandler interface, ParsedDoc shapes
+    registry.go                   # Extension → handler dispatch
+    walker.go                     # Filesystem walk
+    chunker.go                    # Shared token-aware section chunker
+    indexer.go                    # Orchestrator: hash → parse → chunk → embed → store
+    parser.go                     # Shared Goldmark AST walk (markdown handler internals)
+    diagrams.go tables.go         # Markdown-specific embedding transforms
+    emphasis.go signals.go        # Signal extraction
+    references.go                 # Code-path regex extraction
+    handlers/
+      markdown/                   # .md, .markdown
+      code/                       # Tree-sitter grammars: go, python, java, js, ts, tsx
+      config/                     # yaml, json, toml, xml, properties, env
+      office/                     # docx, xlsx, pptx
+      pdf/                        # pdf (go-pdfium WebAssembly)
+      defaults/                   # Aggregator blank-import
+  store/                          # SQLite + sqlite-vec + graph layer
+  analytics/                      # Community detection + centrality for `report`
+  report/                         # HTML, JSON, markdown report generators
+  install/                        # `librarian install` plumbing
+  mcpserver/                      # MCP tool implementations
+
 db/
-  migrations.sql      SQLite schema (embedded at build time)
-  embed.go            go:embed directive for migrations.sql
-docs/                 Project documentation (indexed by Librarian itself)
-testdata/             Test fixtures
+  migrations.sql                  # SQLite schema, embedded via db/embed.go
+
+docs/                             # This documentation (librarian indexes itself)
 ```
 
-## Key Dependencies
+## Key dependencies
 
 | Dependency | Purpose |
-|-----------|---------|
+|---|---|
 | `github.com/spf13/cobra` | CLI framework |
-| `github.com/spf13/viper` | Configuration management |
-| `github.com/mattn/go-sqlite3` | SQLite driver (CGO) |
-| `github.com/asg017/sqlite-vec-go-bindings` | sqlite-vec extension for vector search |
-| `github.com/yuin/goldmark` | Markdown parser |
+| `github.com/spf13/viper` | Configuration + env binding |
+| `github.com/mattn/go-sqlite3` | SQLite driver (CGo) |
+| `github.com/asg017/sqlite-vec-go-bindings` | sqlite-vec extension |
+| `github.com/yuin/goldmark` + `goldmark-meta` | Markdown parsing + frontmatter |
+| `github.com/smacker/go-tree-sitter` | Tree-sitter bindings for code grammars |
+| `github.com/xuri/excelize/v2` | XLSX parser |
+| `github.com/klippa-app/go-pdfium` | PDFium binding (WebAssembly via wazero) |
+| `github.com/pelletier/go-toml/v2` | TOML parsing |
 | `github.com/mark3labs/mcp-go` | MCP server SDK |
-| `github.com/google/uuid` | UUID generation for document/code file IDs |
+| `github.com/google/uuid` | UUIDs for documents / code files |
+| `gonum.org/v1/gonum` | Graph algorithms for `librarian report` |
 
-## Local Development Workflow
+## Local development workflow
 
-1. Make changes to source files
-2. Run tests: `make test`
-3. Build: `make build`
-4. Test locally:
-   ```sh
-   ./librarian init
-   ./librarian index
-   ./librarian search "your query"
-   ./librarian status
-   ```
-5. Test MCP server: configure `.mcp.json` to point to your local binary and restart your AI coding tool
+```sh
+# 1. Make changes
+# 2. Run tests
+make test
+
+# 3. Build
+make build
+
+# 4. Exercise locally
+mkdir -p /tmp/libr-dev/docs && cd /tmp/libr-dev
+./../path/to/librarian init
+./../path/to/librarian index --dry-run
+export LIBRARIAN_EMBEDDING_API_KEY=... # or point at a local server
+./../path/to/librarian index
+./../path/to/librarian search "your query"
+./../path/to/librarian status
+./../path/to/librarian report
+open .librarian/out/graph.html
+
+# 5. MCP iteration
+./../path/to/librarian install --all
+# (Restart the assistant so it picks up the new .mcp.json)
+```
+
+## Adding a new handler
+
+See [Handlers → Where to add a new format](handlers.md#where-to-add-a-new-format). The short version:
+
+1. New subpackage under `internal/indexer/handlers/<format>/` implementing `FileHandler`.
+2. `init()` calls `indexer.RegisterDefault(NewFoo(DefaultConfig()))`.
+3. One blank-import line in `internal/indexer/handlers/defaults/defaults.go`.
+4. Optional: add a `FooConfig` in `internal/config/config.go`, wire `cmd/init.go`'s default YAML, have `cmd/root.go` re-register after `config.Load()` with the user-scoped instance.
+
+No changes to walker / registry / store / CLI / MCP needed — those pick the new handler up automatically via the shared `FileHandler` contract.
+
+## Adding a new MCP tool
+
+1. New file in `internal/mcpserver/` named for the tool.
+2. Expose a `register<ToolName>(srv, …)` function.
+3. Call it from `Serve()` in `internal/mcpserver/server.go`.
+4. Update the instruction string on the `server.NewMCPServer` call so assistants know about the new tool.
+
+## Adding a new CLI command
+
+1. New file in `cmd/` with a Cobra `*cobra.Command` and `init()` calling `rootCmd.AddCommand(…)`.
+2. Wire dependencies via the shared `config.Load()` + `store.Open()` + `embedding.NewEmbedder` pattern used by every other command.
+3. Document in [CLI Reference](cli.md).
+
+## Beads issue tracker
+
+The project uses **bd (beads)** for work tracking. `bd prime` in a fresh session prints the full command reference. Issues live in `.beads/issues.jsonl` (committed). Any new work should have a matching bd issue so the backlog stays navigable.

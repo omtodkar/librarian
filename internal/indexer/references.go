@@ -103,6 +103,21 @@ func ExtractCodeReferences(content string, patterns []string) []CodeReference {
 				continue
 			}
 
+			// Reject markdown emphasis syntax (`**bold**`, `*italic*`,
+			// `**Foo/Bar**`) that looks like a glob to the regex because
+			// of the asterisks. Legit globs starting with `**` continue
+			// with `/` (e.g. `**/*.go`); anything else after the leading
+			// asterisks is formatting, not a path.
+			if isMarkdownEmphasis(pattern) {
+				continue
+			}
+
+			// Require a known extension or a path separator so bare `*`
+			// and single-segment fragments don't land as references.
+			if !strings.Contains(pattern, "/") && !matchesPatterns(pattern, patterns) {
+				continue
+			}
+
 			seen[pattern] = true
 			refs = append(refs, CodeReference{
 				FilePath: pattern,
@@ -114,6 +129,27 @@ func ExtractCodeReferences(content string, patterns []string) []CodeReference {
 	}
 
 	return refs
+}
+
+// isMarkdownEmphasis reports whether a glob-regex match is really markdown
+// bold/italic formatting rather than a path pattern. The glob regex allows
+// `*` in both halves of its capture, so `**word**` and `*word*` look like
+// globs. Legit globs starting with `**` continue with `/` (`**/*.go`); any
+// other character immediately after the leading asterisks means the
+// asterisks are formatting runes. `*foo*` (italic) is caught the same way.
+func isMarkdownEmphasis(pattern string) bool {
+	switch {
+	case strings.HasPrefix(pattern, "**"):
+		// `**` alone, or `**word…` where the next char isn't `/`.
+		return len(pattern) < 3 || pattern[2] != '/'
+	case strings.HasPrefix(pattern, "*") && len(pattern) > 1:
+		// `*x` where x is a letter → italic prefix, not a glob.
+		// `*.go`, `*{a,b}`, `**/` are fine; a letter/digit right after
+		// the single `*` is the italic case.
+		c := pattern[1]
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	return false
 }
 
 func matchesPatterns(filePath string, patterns []string) bool {

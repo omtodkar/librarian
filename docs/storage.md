@@ -1,146 +1,149 @@
 ---
 title: Storage Layer
 type: reference
-description: How the SQLite + sqlite-vec storage layer works, covering database initialization, document and chunk operations, vector search, re-ranking, and relationship management.
+description: SQLite + sqlite-vec schema, document and chunk operations, vector search with signal-aware re-ranking, code file tracking, and the graph spine that links documents, code files, and code symbols.
 ---
 
 # Storage Layer
 
-The storage layer (`internal/store/`) manages all interactions with the SQLite database. It handles document CRUD, chunk storage with vector embeddings, code file tracking, and relationship management.
+The storage layer (`internal/store/`) manages all interactions with the SQLite database: document CRUD, chunk storage with vector embeddings, code file tracking, and the graph spine that connects documents, code files, and code symbols.
 
-## Database Initialization
+## Initialisation
 
-`store.Open(dbPath)` in `internal/store/store.go` performs three steps:
+`store.Open(dbPath)` in `internal/store/store.go`:
 
-1. Creates the parent directory if it doesn't exist
-2. Opens a SQLite connection with WAL mode and foreign keys enabled via query string: `?_journal_mode=WAL&_foreign_keys=on`
-3. Applies the schema from `db/migrations.sql` (embedded at build time via `db/embed.go`)
+1. Creates the parent directory if missing.
+2. Opens a SQLite connection with WAL + foreign keys via query string: `?_journal_mode=WAL&_foreign_keys=on`.
+3. Applies the schema from `db/migrations.sql` (embedded at build time via `db/embed.go`).
 
-The `doc_chunk_vectors` vec0 table is **not** created during `Open()`. It is created lazily on the first vector insert via `ensureVecTable()`, with dimensions derived from the actual embedding model output. This avoids hardcoding a vector size and ensures the table always matches the active model.
+The `doc_chunk_vectors` vec0 virtual table is created **lazily** on the first vector insert via `ensureVecTable()`, with dimensions derived from the actual embedding model's output. This avoids hardcoding a vector size and lets the same binary work with any embedding provider.
 
-The sqlite-vec extension is loaded automatically via `sqlite_vec.Auto()` in the package `init()` function, which registers the `vec0` virtual table type.
+The sqlite-vec extension is loaded automatically via `sqlite_vec.Auto()` in the package `init()` function.
 
 ## Schema
 
-The database has six tables. The full DDL is in `db/migrations.sql`.
+Seven persistent tables plus the lazy-created vector table. Full DDL in `db/migrations.sql`.
 
-| Table | Primary Key | Purpose |
-|-------|-------------|---------|
-| `documents` | `id` (UUID text) | Document metadata |
-| `doc_chunks` | `id` (autoincrement int) | Chunk content, linked to documents via `doc_id` FK |
-| `doc_chunk_vectors` | `chunk_id` (int) | vec0 virtual table with float embeddings (dimensions set by embedding model) |
-| `code_files` | `id` (UUID text) | Source files referenced in documentation |
-| `refs` | `(doc_id, code_file_id)` | Junction table connecting documents to code files |
-| `related_docs` | `(from_doc_id, to_doc_id)` | Junction table connecting related documents |
+| Table | Primary key | Purpose |
+|---|---|---|
+| `documents` | `id` (UUID text) | Document metadata: path, title, type, content hash, chunk count |
+| `doc_chunks` | `id` (autoincrement) | Chunk content, linked to documents via `doc_id` FK, with `signal_meta` JSON |
+| `doc_chunk_vectors` | `chunk_id` (int) | vec0 virtual table, float32 embeddings (dims set by embedding model) |
+| `code_files` | `id` (UUID text) | Source files mentioned in documentation |
+| `refs` | `(doc_id, code_file_id)` | Junction: documents → code files, with context string |
+| `graph_nodes` | `id` (namespaced text) | Generic node for every indexed entity (doc, file, symbol, config key) |
+| `graph_edges` | autoincrement | Typed edges between nodes: `mentions`, `shared_code_ref`, `imports`, `calls`, … |
 
-## Document Operations
+`related_docs` from earlier versions is **superseded** by the graph spine; the migration drops it.
 
-Implemented in `internal/store/documents.go`.
+## Document operations
 
-### AddDocument
+`internal/store/documents.go`
 
-Inserts a new document with a generated UUID. Returns the full `Document` struct read back from the database (to capture `indexed_at` default).
+| Method | Purpose |
+|---|---|
+| `AddDocument` | Insert with generated UUID; returns the struct read back from the DB |
+| `GetDocumentByPath` | Lookup by `file_path`; used by the incremental-indexing hash check |
+| `ListDocuments` | All documents ordered by path; backs `list_documents` / `librarian list` |
+| `DeleteDocument` | Cascading delete (see below) |
 
-### GetDocumentByPath
+`DeleteDocument` explicitly orders its deletes because `doc_chunk_vectors` is a virtual table and doesn't participate in SQLite's FK cascade:
 
-Looks up a document by its `file_path` column. Used during indexing to check if a document already exists for incremental indexing.
+1. Delete rows from `doc_chunk_vectors` for this doc's chunks
+2. Delete `graph_edges` incident to the doc's graph node
+3. Delete the doc's `graph_nodes` row
+4. Delete `refs`
+5. Delete `doc_chunks` (FK-cascaded but explicit for clarity)
+6. Delete the `documents` row
 
-### ListDocuments
+## Chunk operations
 
-Returns all documents ordered by `file_path`. Used by the `list_documents` MCP tool.
+`internal/store/chunks.go`
 
-### DeleteDocument
+### `AddChunk`
 
-Deletes a document and all associated data in this order:
-1. Delete vector entries from `doc_chunk_vectors` for the document's chunks
-2. Delete `related_docs` edges (both directions)
-3. Delete `refs` edges
-4. Delete `doc_chunks` rows
-5. Delete the `documents` row
+Inserts into `doc_chunks` with file path, section heading, section hierarchy, content, token count, chunk index, and `signal_meta` JSON. Calls `ensureVecTable()` to lazily create the vec0 table on the first insert, then inserts the embedding.
 
-This explicit ordering handles the vec0 virtual table, which doesn't participate in SQLite's CASCADE behavior.
+Vectors arrive as `[]float64` from the embedding provider and are converted to little-endian `[]byte` of float32 values via `float64sToFloat32Bytes` — sqlite-vec's expected binary format.
 
-## Chunk Operations
+### `GetChunksForDocument`
 
-Implemented in `internal/store/chunks.go`.
+Returns chunks ordered by `chunk_index`. Used internally.
 
-### AddChunk
+### `SearchChunks` — vector search + re-rank
 
-Inserts a chunk into `doc_chunks` with its metadata (file path, section heading, section hierarchy, content, token count, signal metadata). Calls `ensureVecTable()` to lazily create the vec0 table if it doesn't exist yet, then inserts the embedding vector.
+The core retrieval path.
 
-Vectors arrive as `[]float64` from the embedding provider and are converted to little-endian `[]byte` of float32 values via `float64sToFloat32Bytes`, as sqlite-vec expects float32 binary format.
+1. Convert query vector `[]float64` → float32 bytes.
+2. **Over-fetch**: request `limit * 3` candidates (minimum 10) from sqlite-vec via `WHERE embedding MATCH ? AND k = ? ORDER BY distance`.
+3. **Re-rank**: `rerankWithSignals` computes `finalScore = 0.90 * vectorScore + 0.10 * metadataBoost` for each candidate.
+4. Return the top `limit` by final score.
 
-### GetChunksForDocument
+Over-fetching gives the re-ranker room to promote actionable chunks (warnings, decisions, annotated code) slightly above neutral chunks at similar vector distance.
 
-Returns all chunks for a document, ordered by `chunk_index`. Used by internal operations.
+## Search re-ranking
 
-### SearchChunks
+`computeMetadataBoost` parses `signal_meta` JSON per chunk:
 
-Vector similarity search — the core of Librarian's search functionality. The process:
+| Signal | Boost |
+|---|---|
+| High-value inline labels (`warning`, `decision`, `important`) | +0.3 each |
+| Other inline labels (`note`, `example`, `todo`, …) | +0.1 each |
+| Risk markers (`deprecated`, `breaking-change`, `unsafe`, …) | +0.2 each |
+| Code annotations (`@Deprecated`, `@Transactional`, …) | +0.1 each |
 
-1. Convert the query vector from `[]float64` to float32 bytes
-2. Over-fetch candidates: request `limit * 3` results (minimum 10) from sqlite-vec
-3. Query sqlite-vec using `WHERE embedding MATCH ? AND k = ?` with `ORDER BY distance`
-4. Re-rank candidates using metadata signals
-5. Return the top `limit` results
+Boost is capped at 1.0 so no single chunk can dominate. With the metadata weight at only 10%, signals adjust ordering within similar vector distances rather than overriding semantic relevance — a keyword-matched chunk with no signals still outranks an off-topic chunk with many signals.
 
-The over-fetching allows the re-ranker to promote relevant results that sqlite-vec's pure vector distance might rank slightly lower.
+## Code file operations
 
-## Search Re-Ranking
+`internal/store/codefiles.go`
 
-After sqlite-vec returns candidates ranked by vector distance, `rerankWithSignals` applies a weighted scoring formula:
+| Method | Purpose |
+|---|---|
+| `AddCodeFile` | Insert with generated UUID, path, language, ref type (`file` / `directory` / `pattern`) |
+| `GetCodeFileByPath` | Lookup by path; used to dedupe during indexing |
+| `AddReference` | Insert/replace `refs` row linking a doc to a code file |
+| `GetReferencedCodeFiles` | Join `refs` + `code_files` to list refs out of a doc (used by `get_context`) |
 
-```
-finalScore = 0.90 * vectorScore + 0.10 * metadataBoost
-```
+## Graph layer
 
-Where `vectorScore = 1.0 - distance` (converting distance to similarity).
+`internal/store/graph.go`
 
-### Metadata Boost Calculation
+The graph spine is a generic layer: every indexed thing projects into a `graph_node` with a stable **namespaced id**, and typed `graph_edges` connect them. This lets CLI and MCP tools walk the graph uniformly — "what does `auth.py` connect to?" and "what references `validateToken`?" have the same query shape.
 
-`computeMetadataBoost` parses the `signal_meta` JSON from each chunk and computes a boost score:
+### Node id conventions
 
-| Signal Type | Boost per Signal |
-|-------------|-----------------|
-| High-value inline labels (`warning`, `decision`, `important`) | +0.3 |
-| Other inline labels (`note`, `example`, `todo`, etc.) | +0.1 |
-| Risk markers (`deprecated`, `breaking-change`, `unsafe`, etc.) | +0.2 |
+| Prefix | Produced by | Example |
+|---|---|---|
+| `doc:` | `DocNodeID(uuid)` | `doc:3b2c…` |
+| `file:` | `CodeFileNodeID(path)` | `file:internal/auth/oauth.go` |
+| `sym:` | `SymbolNodeID(fqn)` | `sym:com.acme.Auth.validate` |
+| `key:` | `ConfigKeyNodeID(path)` | `key:spring.datasource.url` |
 
-The boost is capped at 1.0.
+`NodeIDPrefixes()` is the single source of truth; CLI commands that accept user input (`librarian neighbors X`) use it to auto-expand unqualified names.
 
-This means chunks containing warnings, decisions, or deprecation notices get a ranking lift, surfacing actionable information over plain descriptions. Since the metadata weight is only 10%, it adjusts ordering within similar vector distances rather than overriding semantic relevance.
+### Edge kinds
 
-## Code File Operations
+- `mentions` — document mentions a code file
+- `shared_code_ref` — two documents reference the same code file
+- `imports` — code file imports a symbol
+- `calls` — symbol calls another symbol (future)
+- `extends` / `implements` — class inheritance (future)
 
-Implemented in `internal/store/codefiles.go`.
+### Operations
 
-### AddCodeFile
+| Method | Purpose |
+|---|---|
+| `UpsertNode`, `UpsertEdge` | Idempotent inserts (INSERT OR REPLACE) |
+| `GetNode(id)` | Exact id lookup |
+| `FindNodes(query, limit)` | Substring search on id / label / source_path (SQL LIKE with wildcard escaping) |
+| `Neighbors(id, direction)` | Edges incident to a node (`in` / `out` / both) |
+| `ShortestPath(from, to, maxDepth)` | BFS in Go code (not CTE) — avoids CTE escape hazards from ids containing `%`, `_`, `,` |
+| `ListNodes` / `ListEdges` | Full dump; used by `librarian report` for community detection + centrality |
 
-Inserts a code file reference with a UUID, file path, language, and reference type (`file`, `directory`, or `pattern`).
+## Vector format
 
-### GetCodeFileByPath
-
-Looks up a code file by its `file_path`. Used during indexing to avoid creating duplicate entries.
-
-### AddReference
-
-Inserts or replaces a row in the `refs` junction table connecting a document to a code file, with a `context` string describing where the reference appears.
-
-### GetReferencedCodeFiles
-
-Joins `refs` with `code_files` to return all code files referenced by a given document. Used by the `get_context` MCP tool.
-
-### AddRelatedDoc
-
-Inserts or replaces a row in the `related_docs` junction table. Used after indexing to connect documents that share code references.
-
-### GetRelatedDocuments
-
-Joins `related_docs` with `documents` to return all documents related to a given document. Used by the `get_context` MCP tool.
-
-## Vector Format
-
-sqlite-vec expects embeddings as binary blobs of little-endian float32 values. The embedding providers return `[]float64`, so conversion happens at the store boundary:
+sqlite-vec expects embeddings as little-endian float32 blobs. Providers return `[]float64`, so conversion happens at the store boundary:
 
 ```go
 func float64sToFloat32Bytes(vec []float64) []byte {
@@ -152,4 +155,8 @@ func float64sToFloat32Bytes(vec []float64) []byte {
 }
 ```
 
-The size per chunk depends on the embedding model (e.g., 3072 dims * 4 bytes = 12,288 bytes for Gemini, 768 dims * 4 bytes = 3,072 bytes for nomic-embed-text).
+Size per chunk = `dims × 4 bytes`. For a 3072-dim Gemini embedding that's ~12 KB per chunk; for a 768-dim nomic-embed-text it's ~3 KB.
+
+## Schema evolution
+
+`db/migrations.sql` is re-run on every `store.Open`. Each statement is idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, explicit `DROP TABLE IF EXISTS` for removals). There is no versioned migration system yet — add columns with `ALTER TABLE … ADD COLUMN` guarded by SQLite's permissive idempotency, and replace tables by combining `DROP TABLE IF EXISTS` + `CREATE TABLE IF NOT EXISTS` as `related_docs → graph_nodes/edges` did.

@@ -14,23 +14,32 @@ type Embedder interface {
 	Embed(text string) ([]float64, error)
 }
 
-// GeminiEmbedder calls the Gemini text-embedding-004 API.
+// defaultGeminiModel is the current recommended Gemini embedding model —
+// multimodal, 3072-dim by default. Used when config doesn't pin a model.
+const defaultGeminiModel = "gemini-embedding-2"
+
+// GeminiEmbedder calls the Gemini :embedContent API.
 type GeminiEmbedder struct {
 	apiKey string
+	model  string
 	client *http.Client
 }
 
-// NewGeminiEmbedder creates a GeminiEmbedder. It uses the provided apiKey,
-// falling back to the GEMINI_API_KEY environment variable.
-func NewGeminiEmbedder(apiKey string) (*GeminiEmbedder, error) {
+// NewGeminiEmbedder creates a GeminiEmbedder. Model defaults to
+// defaultGeminiModel when empty. apiKey falls back to GEMINI_API_KEY.
+func NewGeminiEmbedder(apiKey, model string) (*GeminiEmbedder, error) {
 	if apiKey == "" {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("Gemini API key is required: set embedding.api_key in .librarian.yaml or GEMINI_API_KEY env var")
+		return nil, fmt.Errorf("Gemini API key is required: set embedding.api_key in .librarian/config.yaml or GEMINI_API_KEY env var")
+	}
+	if model == "" {
+		model = defaultGeminiModel
 	}
 	return &GeminiEmbedder{
 		apiKey: apiKey,
+		model:  model,
 		client: &http.Client{},
 	}, nil
 }
@@ -62,7 +71,7 @@ type geminiError struct {
 }
 
 func (e *GeminiEmbedder) Embed(text string) ([]float64, error) {
-	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=" + e.apiKey
+	url := "https://generativelanguage.googleapis.com/v1beta/models/" + e.model + ":embedContent?key=" + e.apiKey
 
 	reqBody := geminiRequest{
 		Content: geminiContent{

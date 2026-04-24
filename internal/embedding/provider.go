@@ -10,7 +10,7 @@ import (
 func NewEmbedder(cfg config.EmbeddingConfig) (Embedder, error) {
 	switch cfg.Provider {
 	case "gemini":
-		return NewGeminiEmbedder(cfg.APIKey)
+		return NewGeminiEmbedder(cfg.APIKey, cfg.Model)
 	case "openai":
 		return NewOpenAIEmbedder(cfg.BaseURL, cfg.Model, cfg.APIKey)
 	default:

@@ -88,7 +88,7 @@ docs_dir: docs
 
 embedding:
   provider: gemini         # gemini | openai (or any OpenAI-compatible endpoint)
-  model: text-embedding-004
+  model: gemini-embedding-2   # 3072-dim multimodal; older text-embedding-004 is deprecated
   # base_url: for OpenAI-compatible endpoints (e.g. http://localhost:1234/v1)
 
 chunking:

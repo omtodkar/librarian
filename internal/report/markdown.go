@@ -9,9 +9,8 @@ import (
 
 // RenderMarkdown produces GRAPH_REPORT.md content — a summary suitable for
 // both humans scrolling the file and assistants reading it before doing
-// a grep. The shape deliberately mirrors graphify's GRAPH_REPORT.md so
-// assistant hooks that tell the LLM "read GRAPH_REPORT.md first" get
-// familiar territory.
+// a grep. The shape is stable so assistant hooks that tell the LLM
+// "read GRAPH_REPORT.md first" get familiar territory.
 func RenderMarkdown(in *Input) []byte {
 	var b strings.Builder
 	r := in.Analytics

@@ -1,334 +1,145 @@
-# Librarian
+# Librarian 📚
 
-Semantic documentation search for your project, powered by SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) and exposed to AI coding tools via [MCP](https://modelcontextprotocol.io).
+**Your project's knowledge base and code graph, in one SQLite file — for you, your CLI, and every AI assistant you use.**
 
-Librarian indexes markdown files into a searchable vector database. AI tools like Claude Code and Cursor can then search, retrieve, and update your documentation through MCP tools.
+[![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)]()
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-## Prerequisites
+<!-- Add a demo GIF here once available — show `librarian index` + `librarian search` + Claude Code picking up the /librarian skill. -->
 
-- **Go 1.25+**
-- An embedding provider — one of:
-  - **LM Studio**, **Ollama**, or any OpenAI-compatible API (local, no API key needed)
-  - **Gemini API key** for Google's embedding API
+---
+
+## The Problem
+
+Every AI coding assistant starts a session blind. It has never read your architecture doc, doesn't know which services share utilities, and hasn't seen the ADR that explains why `authenticateUser` does its weird token-rotation dance. So you paste. And paste again. And the assistant still misses the docs/code relationship a teammate would explain in 30 seconds.
+
+## What Librarian Does
+
+Librarian indexes your whole project — **markdown docs, source code, configs, Office documents, PDFs** — into a single SQLite database with two layers:
+
+1. **Semantic knowledge base.** Vector + signal-aware search over your documentation. Queries like `"authentication flow"` or `"deprecated API usage"` return the right paragraphs, not just keyword matches.
+2. **Typed code graph.** A navigable graph connecting documents → code files → symbols → imports. Ask "who references this module?" or "what sits between `AuthService` and `TokenStore`?" — get an answer in one command.
+
+Every MCP-capable AI assistant (Claude Code, Cursor, Codex, Gemini CLI, OpenCode, GitHub Copilot, Aider) plugs in via one `librarian install` command.
+
+## Why Librarian
+
+| | |
+|---|---|
+| 🗂️ **One SQLite file** | No servers, no Docker, no external vector DB. `.librarian/librarian.db` ships with your repo. |
+| 🧠 **Two-layer retrieval** | Vector search for prose, a typed graph for structure. Most tools only do one. |
+| 🔌 **Seven assistants, one command** | `librarian install --all` wires CLAUDE.md, AGENTS.md, `.cursor/rules/`, `.github/copilot-instructions.md`, and friends in one shot. |
+| 📄 **Nine file formats** | Markdown, Go/Python/Java/JS/TS/TSX via tree-sitter, YAML/JSON/TOML/XML/properties/env, DOCX/XLSX/PPTX, PDF. |
+| ⚡ **Fast re-indexes** | SHA-256 hash per file → unchanged files skip `Parse` entirely. |
+| 🔑 **Bring your own embedder** | Gemini by default; point at LM Studio / Ollama / any OpenAI-compatible endpoint to run fully local. |
+
+---
 
 ## Quick Start
 
-### 1. Install Librarian
-
 ```sh
-go install librarian@latest
-```
+# 1. Install
+go install librarian@latest                    # or: git clone … && go build -o librarian .
 
-Or build from source:
-
-```sh
-git clone <repo-url> && cd librarian
-go build -o librarian .
-```
-
-### 2. Configure your embedding provider
-
-**LM Studio** (local, recommended):
-
-```yaml
-# .librarian.yaml
-embedding:
-  provider: openai
-  base_url: http://localhost:1234/v1
-  model: text-embedding-nomic-embed-text-v1.5
-```
-
-**Ollama** (local):
-
-```yaml
-# .librarian.yaml
-embedding:
-  provider: openai
-  base_url: http://localhost:11434/v1
-  model: nomic-embed-text
-```
-
-**Gemini** (cloud):
-
-```yaml
-# .librarian.yaml
-embedding:
-  provider: gemini
-  api_key: "your-key-here"  # or set GEMINI_API_KEY env var
-```
-
-### 3. Initialize in your project
-
-```sh
+# 2. Set up in your project
 cd your-project
-librarian init
-```
+export LIBRARIAN_EMBEDDING_API_KEY=<gemini-key>  # or point at a local embedder
+librarian init                                   # creates .librarian/
+librarian index                                  # walks docs/, builds the index
+librarian install --all                          # wire every supported AI assistant
+# or pick specific ones:
+librarian install --platforms=claude,cursor,gemini
 
-This creates a `.librarian/` directory containing the SQLite database with the schema applied.
-
-### 4. Index your documentation
-
-```sh
-librarian index
-```
-
-This walks `docs/` (configurable), parses markdown files, generates embeddings via the configured provider, and stores everything in SQLite. Vector dimensions are detected automatically from the model output.
-
-### 5. Search
-
-```sh
+# 3. Use it
 librarian search "authentication flow"
+librarian context "how does indexing work"
+librarian neighbors internal/auth/oauth.go
+librarian report && open .librarian/out/graph.html
 ```
 
-### 6. Connect to your AI coding tool
+That's it. Your AI assistant now has `/librarian` available as a slash-skill and the MCP server is wired via the pointer files.
 
-Start the MCP server and configure your tool to use it.
-
-**Claude Code** -- add to `.mcp.json` in your project root:
-
-```json
-{
-  "mcpServers": {
-    "librarian": {
-      "command": "librarian",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-**Cursor** -- add to `.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "librarian": {
-      "command": "librarian",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `librarian init` | Initialize the SQLite database |
-| `librarian index [docs-dir]` | Parse and index documentation |
-| `librarian search <query>` | Search indexed documentation from the CLI |
-| `librarian status` | Show index statistics (document count, chunk count) |
-| `librarian serve` | Start the MCP stdio server |
-
-### `librarian init`
-
-Creates the `.librarian/` directory and initializes the SQLite database with the schema.
-
-```sh
-librarian init
-librarian init --db-path path/to/librarian.db  # override the default database path
-```
-
-### `librarian index`
-
-Indexes markdown files into SQLite. Unchanged files are skipped automatically via content hashing.
-
-```sh
-librarian index                  # index from configured docs_dir (default: docs/)
-librarian index path/to/docs     # index from a specific directory
-librarian index --force           # re-index all files, ignoring content hashes
-librarian index --dry-run         # show what would be indexed without making changes
-librarian index --json            # output results as JSON
-```
-
-### `librarian search`
-
-Vector similarity search from the command line.
-
-```sh
-librarian search "how does auth work"
-librarian search --limit 10 "API endpoints"
-librarian search --json "configuration"
-```
-
-### `librarian status`
-
-Shows how many documents and chunks are in the index.
-
-```sh
-librarian status
-librarian status --json
-```
-
-### `librarian serve`
-
-Starts an MCP server over stdio. This is what AI coding tools connect to.
-
-```sh
-librarian serve
-```
-
-## MCP Tools
-
-When connected via MCP, AI tools have access to 5 tools:
-
-| Tool | Description |
-|------|-------------|
-| `search_docs` | Semantic search across indexed documentation |
-| `get_document` | Read the full content of a specific document |
-| `get_context` | Deep briefing: search + related docs and code references |
-| `list_documents` | List all indexed documents with metadata |
-| `update_docs` | Write/update a markdown file and re-index it |
-
-`get_context` is the most powerful tool -- it combines vector search with relational joins to find relevant chunks, their source documents, referenced code files, and related documentation.
-
-## Configuration
-
-Librarian is configured through `.librarian.yaml`, environment variables, and CLI flags. Priority order (highest first):
-
-1. CLI flags
-2. Environment variables
-3. `.librarian.yaml`
-4. Built-in defaults
-
-### `.librarian.yaml`
-
-Place this in your project root. All fields are optional.
-
-```yaml
-# Directory containing documentation to index
-docs_dir: docs
-
-# Path to the SQLite database file
-db_path: .librarian/librarian.db
-
-# Embedding configuration
-embedding:
-  provider: openai       # "gemini" or "openai" (any OpenAI-compatible API)
-  model: ""              # Model name (required for openai provider)
-  api_key: ""            # API key (or set GEMINI_API_KEY env var for gemini)
-  base_url: ""           # Base URL for openai provider (default: http://localhost:1234/v1)
-
-# Chunking strategy
-chunking:
-  max_tokens: 512        # max tokens per chunk before splitting
-  min_tokens: 50         # chunks smaller than this are discarded
-  overlap_lines: 3       # lines from previous chunk prepended to next
-
-# File extensions recognized as code references
-code_file_patterns:
-  - "*.go"
-  - "*.ts"
-  - "*.py"
-  - "*.rs"
-  - "*.java"
-  - "*.rb"
-
-# Glob patterns for files/directories to skip
-exclude_patterns:
-  - "node_modules/**"
-  - ".git/**"
-  - "vendor/**"
-```
-
-### Configuration Reference
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `docs_dir` | `string` | `"docs"` | Path to documentation directory |
-| `db_path` | `string` | `".librarian/librarian.db"` | Path to the SQLite database file |
-| `embedding.provider` | `string` | `"gemini"` | Embedding provider: `"gemini"` or `"openai"` (any OpenAI-compatible API) |
-| `embedding.model` | `string` | `""` | Model identifier. Required for the `openai` provider |
-| `embedding.api_key` | `string` | `""` | API key. Falls back to `GEMINI_API_KEY` env var for gemini |
-| `embedding.base_url` | `string` | `""` | Base URL for `openai` provider. Defaults to `http://localhost:1234/v1` (LM Studio) |
-| `chunking.max_tokens` | `int` | `512` | Max tokens per chunk |
-| `chunking.min_tokens` | `int` | `50` | Min tokens per chunk |
-| `chunking.overlap_lines` | `int` | `3` | Overlap lines between chunks |
-| `code_file_patterns` | `[]string` | `["*.go", "*.ts", ...]` | Recognized code file extensions |
-| `exclude_patterns` | `[]string` | `["node_modules/**", ...]` | Paths to exclude from indexing |
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `GEMINI_API_KEY` | Gemini API key (fallback for `embedding.api_key`) |
-| `LIBRARIAN_DOCS_DIR` | Documentation directory |
-| `LIBRARIAN_DB_PATH` | Path to SQLite database file |
-| `LIBRARIAN_EMBEDDING_PROVIDER` | Embedding provider (`gemini` or `openai`) |
-| `LIBRARIAN_EMBEDDING_MODEL` | Model identifier |
-| `LIBRARIAN_EMBEDDING_API_KEY` | Embedding API key |
-| `LIBRARIAN_EMBEDDING_BASE_URL` | Base URL for openai provider |
-| `LIBRARIAN_CHUNKING_MAX_TOKENS` | Max tokens per chunk |
-| `LIBRARIAN_CHUNKING_MIN_TOKENS` | Min tokens per chunk |
-| `LIBRARIAN_CHUNKING_OVERLAP_LINES` | Overlap lines between chunks |
-
-### CLI Global Flags
-
-| Flag | Description |
-|------|-------------|
-| `--config <path>` | Path to config file (default: `.librarian.yaml`) |
-| `--db-path <path>` | Path to SQLite database file |
-
-## How It Works
-
-Librarian uses a 4-stage indexing pipeline:
-
-1. **Walk** -- Find all `.md`/`.markdown` files, apply exclude patterns
-2. **Parse** -- Goldmark AST walk: extract frontmatter, build section hierarchy
-3. **Chunk** -- Section-aware splitting at H2 boundaries with paragraph fallback
-4. **Store** -- Generate embeddings via configured provider, store documents + vector chunks + relationships in SQLite
-
-Data is stored across several tables:
-
-- **documents** stores metadata (title, type, content hash)
-- **doc_chunks** stores chunk content linked to documents via foreign key
-- **doc_chunk_vectors** (vec0 virtual table) stores embeddings for similarity search
-- **code_files** represents source files referenced in documentation
-- **refs** connects documents to code files they mention
-- **related_docs** connects documents that reference the same code files
-
-The `get_context` MCP tool joins across these tables to provide comprehensive briefings that include relevant chunks, source documents, referenced code, and related documentation.
-
-### Incremental Indexing
-
-Each document is hashed with SHA-256. On subsequent runs, unchanged documents are skipped. Use `--force` to re-index everything.
-
-### Frontmatter
-
-For best results, add frontmatter to your markdown files:
-
-```yaml
 ---
-title: Authentication Guide
-type: guide
-description: How authentication works in the application.
+
+## Key Features
+
+### Semantic search with metadata-aware re-ranking
+Queries get a final score of `0.90 × vector_similarity + 0.10 × metadata_boost`, where the boost promotes chunks tagged with `**Warning:**`, `**Decision:**`, `@Deprecated`, and other actionable signals extracted at index time. A query for "auth" surfaces the ADR with the decision, not the neutral description.
+
+### Typed code graph
+Every indexed entity — document, code file, code symbol, config key — projects into a `graph_node` with a namespaced id (`doc:…`, `file:…`, `sym:…`, `key:…`). Typed edges (`mentions`, `shared_code_ref`, `imports`) connect them. CLI commands `neighbors`, `path`, `explain` walk the graph; `report` writes a topology snapshot (god nodes, communities, surprising connections) as `GRAPH_REPORT.md` + an interactive `graph.html`.
+
+### Multi-format ingestion through one abstraction
+A single `FileHandler` interface powers every format. Each handler converts source to markdown and delegates chunking — same signal extraction, same chunk shape, regardless of whether the input was a DOCX, a Python file, or a YAML config. Adding a new format is a 100-line subpackage.
+
+### Incremental re-indexing
+SHA-256 content hash per file; unchanged files skip parsing entirely. Editing one markdown file and re-running `librarian index` finishes in milliseconds.
+
+### One-command assistant integration
+`librarian install` writes idempotent pointer blocks into each assistant's convention file (`CLAUDE.md`, `AGENTS.md`, `CONVENTIONS.md`, `.github/copilot-instructions.md`, `.cursor/rules/librarian.mdc`, …). Pointer blocks use `<!-- librarian:start/end -->` markers so user content around them is preserved across reinstalls.
+
+### Pure-Go PDF + Office parsers
+DOCX/PPTX via `encoding/xml` over `archive/zip` (no AGPL dependencies); PDF via `go-pdfium` running in its WebAssembly mode (wazero — no CGo). XLSX uses the BSD-3 `excelize` library. The binary is ~35 MB and needs no system libraries.
+
 ---
-```
 
-| Field | Effect |
-|-------|--------|
-| `title` | Document title in search results. Falls back to first H1 heading |
-| `type` | Stored as `doc_type`. Used for filtering in `list_documents`. Defaults to `"guide"` |
-| `description` | Stored as `summary`. Falls back to the first paragraph |
+## Supported File Formats
 
-## Project Structure
+| Category | Formats |
+|---|---|
+| Documentation | `.md`, `.markdown` |
+| Code (tree-sitter) | Go, Python, Java, JavaScript, TypeScript, TSX |
+| Config | YAML, JSON, TOML, XML, `.properties`, `.env` |
+| Office | DOCX, XLSX, PPTX |
+| PDF | `.pdf` (with cascade: tagged-structure → bookmarks → font-size heuristic → per-page fallback) |
 
-```
-cmd/
-  root.go          CLI entrypoint, global flags, Viper config
-  init.go          librarian init
-  index.go         librarian index
-  search.go        librarian search
-  status.go        librarian status
-  serve.go         librarian serve
+Full detail in [docs/handlers.md](docs/handlers.md).
 
-internal/
-  config/          Configuration struct and defaults
-  embedding/       Embedder interface, Gemini and OpenAI-compatible providers, factory
-  indexer/         Walk, parse, chunk, store pipeline
-  store/           SQLite + sqlite-vec storage layer
-  mcpserver/       MCP tool implementations
+## Supported AI Assistants
 
-db/
-  migrations.sql   SQLite schema (embedded at build time)
-```
+Wired by `librarian install`:
+
+- **Claude Code** — CLAUDE.md pointer + SessionStart hook + `/librarian` skill
+- **Codex** — AGENTS.md pointer + `.codex/hooks.json`
+- **Cursor** — `.cursor/rules/librarian.mdc`
+- **Gemini CLI** — GEMINI.md pointer
+- **OpenCode** — AGENTS.md pointer (shared with Codex)
+- **GitHub Copilot** — `.github/copilot-instructions.md`
+- **Aider** — `CONVENTIONS.md` + post-install reminder to add to `.aider.conf.yml`
+
+Any MCP-capable tool also works via `librarian mcp serve`.
+
+---
+
+## Documentation
+
+Full docs live under [`docs/`](docs/):
+
+- [Architecture](docs/architecture.md) — data model, pipeline, design decisions
+- [CLI Reference](docs/cli.md) — every subcommand with flags + examples
+- [Handlers](docs/handlers.md) — `FileHandler` abstraction, per-format behaviour
+- [Indexing Pipeline](docs/indexing.md) — walk → parse → chunk → store
+- [Storage Layer](docs/storage.md) — SQLite schema + graph spine + re-ranking
+- [Configuration](docs/configuration.md) — `.librarian/config.yaml`, env vars
+- [Embedding](docs/embedding.md) — providers + vector handling
+- [MCP Tools](docs/mcp-tools.md) — the 5 tools exposed over stdio
+- [Development Guide](docs/development.md) — build, test, extend
+
+Or let Librarian index itself and ask it: `librarian context "how does X work"`.
+
+## Contributing
+
+Contributions welcome — bug reports, platform integrations, new file handlers, grammar improvements.
+
+1. Pick an open issue from the GitHub issue tracker, or open one to propose your change.
+2. Read [docs/development.md](docs/development.md) — project layout, test setup, handler extension points.
+3. `make test` must pass; a new feature should come with regression tests.
+4. Open a PR against `main`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full flow.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
