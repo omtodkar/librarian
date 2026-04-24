@@ -54,6 +54,8 @@ func TestRun_AllPlatformsEndToEnd(t *testing.T) {
 	mustContain(t, filepath.Join(ws.Root, "AGENTS.md"), "librarian")
 	mustContain(t, filepath.Join(ws.Root, "GEMINI.md"), "librarian")
 	mustContain(t, filepath.Join(ws.Root, ".cursor", "rules", "librarian.mdc"), "Librarian")
+	mustContain(t, filepath.Join(ws.Root, ".github", "copilot-instructions.md"), "librarian")
+	mustContain(t, filepath.Join(ws.Root, "CONVENTIONS.md"), "librarian")
 
 	// JSON hook files. Gemini intentionally omitted — Gemini CLI has no
 	// SessionStart hook API, so writing .gemini/settings.json would claim
@@ -204,12 +206,109 @@ func TestRun_DryRunWritesNothing(t *testing.T) {
 
 func TestRun_UnknownPlatformErrors(t *testing.T) {
 	ws := newWS(t)
-	_, err := Run(ws, Options{Platforms: []string{"copilot"}, NoGitHook: true, Out: &bytes.Buffer{}})
+	_, err := Run(ws, Options{Platforms: []string{"nonesuch"}, NoGitHook: true, Out: &bytes.Buffer{}})
 	if err == nil {
 		t.Error("expected error for unknown platform, got nil")
 	}
-	if !strings.Contains(err.Error(), "copilot") {
+	if !strings.Contains(err.Error(), "nonesuch") {
 		t.Errorf("error should name unknown platform, got: %v", err)
+	}
+	// Updated "known" list must name the new platforms so users see them in the
+	// error message.
+	for _, want := range []string{"aider", "copilot", "opencode"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message should list %q as known; got: %v", want, err)
+		}
+	}
+}
+
+// Codex and OpenCode both point at AGENTS.md. Installing both must produce
+// exactly one librarian block, with start preceding end — the
+// upsertMarkedBlock idempotency is what makes shared pointer files safe,
+// and a regression could re-introduce duplicate or inverted blocks.
+func TestRun_OpenCodeSharesCodexAGENTS(t *testing.T) {
+	ws := newWS(t)
+	buf := &bytes.Buffer{}
+	if _, err := Run(ws, Options{Platforms: []string{"codex", "opencode"}, NoGitHook: true, Out: buf}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	body := readString(t, filepath.Join(ws.Root, "AGENTS.md"))
+	if got := strings.Count(body, "<!-- librarian:start"); got != 1 {
+		t.Errorf("expected exactly 1 librarian:start marker, got %d:\n%s", got, body)
+	}
+	if got := strings.Count(body, "<!-- librarian:end"); got != 1 {
+		t.Errorf("expected exactly 1 librarian:end marker, got %d:\n%s", got, body)
+	}
+	startIdx := strings.Index(body, "<!-- librarian:start")
+	endIdx := strings.Index(body, "<!-- librarian:end")
+	if startIdx < 0 || endIdx < 0 || startIdx >= endIdx {
+		t.Errorf("markers out of order: start=%d end=%d body=%q", startIdx, endIdx, body)
+	}
+}
+
+// Copilot's pointer lives at a nested path that doesn't exist pre-install.
+// upsertBlockInFile MkdirAlls the parent when the file is missing; regression
+// guard that Copilot benefits from it.
+func TestRun_CopilotCreatesGithubDir(t *testing.T) {
+	ws := newWS(t)
+	if _, err := Run(ws, Options{Platforms: []string{"copilot"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pointer := filepath.Join(ws.Root, ".github", "copilot-instructions.md")
+	mustExist(t, pointer)
+	mustContain(t, pointer, "librarian:start")
+}
+
+// Copilot's .github/copilot-instructions.md is more likely than CLAUDE.md to
+// contain pre-existing user content (.github/ is commonly populated with
+// workflows and other metadata). Mirrors TestRun_PreservesUserCLAUDEContent
+// to guard that the librarian block is appended rather than clobbering.
+func TestRun_PreservesUserCopilotContent(t *testing.T) {
+	ws := newWS(t)
+	pointerPath := filepath.Join(ws.Root, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(pointerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userPreface := "# Custom Copilot Rules\n\nExisting repo-specific Copilot guidance.\n\n"
+	if err := os.WriteFile(pointerPath, []byte(userPreface), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ws, Options{Platforms: []string{"copilot"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
+		t.Fatal(err)
+	}
+	content := readString(t, pointerPath)
+	if !strings.Contains(content, "Custom Copilot Rules") {
+		t.Errorf("user content lost:\n%s", content)
+	}
+	if !strings.Contains(content, "librarian:start") {
+		t.Errorf("librarian block missing:\n%s", content)
+	}
+}
+
+// Aider has no hook API AND no auto-discovery for CONVENTIONS.md; users must
+// add it to .aider.conf.yml themselves. The installer surfaces this via the
+// warn writer only when something changed — a no-op reinstall stays silent
+// so users aren't nagged every run.
+func TestRun_AiderPrintsPostInstallNote(t *testing.T) {
+	ws := newWS(t)
+
+	// First install — note must print.
+	firstBuf := &bytes.Buffer{}
+	if _, err := Run(ws, Options{Platforms: []string{"aider"}, NoGitHook: true, Out: firstBuf}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mustContain(t, filepath.Join(ws.Root, "CONVENTIONS.md"), "librarian:start")
+	if !strings.Contains(firstBuf.String(), ".aider.conf.yml") {
+		t.Errorf("first install: expected .aider.conf.yml note; got:\n%s", firstBuf.String())
+	}
+
+	// Second install — CONVENTIONS.md already up to date, note must not repeat.
+	secondBuf := &bytes.Buffer{}
+	if _, err := Run(ws, Options{Platforms: []string{"aider"}, NoGitHook: true, Out: secondBuf}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(secondBuf.String(), ".aider.conf.yml") {
+		t.Errorf("idempotent reinstall should not repeat the note; got:\n%s", secondBuf.String())
 	}
 }
 

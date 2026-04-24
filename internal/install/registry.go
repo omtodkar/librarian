@@ -1,6 +1,7 @@
 package install
 
 import (
+	"fmt"
 	"io"
 	"path/filepath"
 
@@ -19,19 +20,22 @@ type markerPlatform struct {
 	sentinels   []string // files whose presence means the platform is "detected" in this repo
 }
 
-// markerPlatforms enumerates the three platforms that share the pointer-plus-
-// hook install pattern: Claude Code, Codex, and Gemini CLI. Adding a new one
-// = adding a row here.
+// markerPlatforms enumerates the platforms that share the pointer-plus-hook
+// install pattern. Adding a new one = adding a row here.
 //
-// Gemini CLI intentionally has hookConfig="" — at the time of writing Gemini
-// does not support SessionStart hooks, so writing .gemini/settings.json would
-// claim success for a no-op. The GEMINI.md pointer is the guaranteed path.
+// hookConfig="" skips the JSON hook merge — used for platforms that don't
+// expose a SessionStart-style hook API yet (Gemini CLI, GitHub Copilot,
+// OpenCode, Aider). The pointer file is the guaranteed path in those cases.
 //
-// Claude Code needs an extra step beyond the generic pointer-plus-hook flow:
-// it also copies the skill.md into .claude/skills/librarian/SKILL.md so
-// Claude Code discovers the /librarian slash-skill. That step is inlined into
-// the claude entry's Install closure rather than generalised via a per-platform
-// hook — one platform doesn't justify the abstraction.
+// Codex and OpenCode share AGENTS.md (per each tool's own convention). The
+// block is idempotent, so installing both writes a single block; the second
+// install is a no-op.
+//
+// Two platforms have per-key specialisations inlined into the Install
+// closure (registry.go allPlatforms): Claude Code copies skill.md to
+// .claude/skills/librarian/SKILL.md, Aider prints a post-install note
+// reminding users to list CONVENTIONS.md in .aider.conf.yml (Aider doesn't
+// auto-discover pointer files).
 var markerPlatforms = []markerPlatform{
 	{
 		name:        "Claude Code",
@@ -54,11 +58,34 @@ var markerPlatforms = []markerPlatform{
 		hookConfig:  "",
 		sentinels:   []string{"GEMINI.md", ".gemini"},
 	},
+	{
+		name:        "OpenCode",
+		key:         "opencode",
+		pointerFile: "AGENTS.md", // shared with Codex; block is idempotent
+		hookConfig:  "",
+		sentinels:   []string{".opencode", "opencode.json"},
+	},
+	{
+		name:        "GitHub Copilot",
+		key:         "copilot",
+		pointerFile: ".github/copilot-instructions.md",
+		hookConfig:  "",
+		sentinels:   []string{".github/copilot-instructions.md", ".github/instructions"},
+	},
+	{
+		name:        "Aider",
+		key:         "aider",
+		pointerFile: "CONVENTIONS.md",
+		hookConfig:  "",
+		sentinels:   []string{".aider.conf.yml", ".aiderignore"},
+	},
 }
 
 // allPlatforms returns the canonical ordered list of supported assistant
-// platforms: Claude Code, Codex, Gemini CLI, and Cursor. Order is preserved
-// in the interactive prompt and summary output.
+// platforms — every entry in markerPlatforms, followed by Cursor (which has
+// custom install logic). Order is preserved in the interactive prompt and
+// summary output; PlatformKeys in install.go sorts a copy for user-visible
+// key lists.
 func allPlatforms() []*Platform {
 	out := make([]*Platform, 0, len(markerPlatforms)+1)
 	for _, mp := range markerPlatforms {
@@ -84,6 +111,14 @@ func allPlatforms() []*Platform {
 						return written, err
 					}
 					written = append(written, extra...)
+				}
+				if mp.key == "aider" && len(written) > 0 {
+					// Aider doesn't auto-discover pointer files — users must
+					// list CONVENTIONS.md under `read:` in .aider.conf.yml.
+					// We deliberately don't merge YAML into their config;
+					// users have site-specific configs we shouldn't overwrite.
+					// Gated on len(written) > 0 so a no-op reinstall stays silent.
+					fmt.Fprintln(warn, "  note: Aider — add `read: [CONVENTIONS.md]` to .aider.conf.yml to load the pointer.")
 				}
 				return written, nil
 			},

@@ -1,8 +1,10 @@
-// Package install writes assistant-platform integration pointers — CLAUDE.md,
-// AGENTS.md, GEMINI.md, and .cursor/rules/librarian.mdc at the project root —
+// Package install writes assistant-platform integration pointers — one file
+// per platform at the project root (CLAUDE.md, AGENTS.md, CONVENTIONS.md,
+// GEMINI.md, .cursor/rules/librarian.mdc, .github/copilot-instructions.md) —
 // that reference shared templates (rules.md, skill.md, hook shims) in
-// .librarian/. The installer is idempotent: re-running it refreshes librarian-
-// managed blocks without touching user content around them.
+// .librarian/. See registry.go for the full list. The installer is idempotent:
+// re-running it refreshes librarian-managed blocks without touching user
+// content around them.
 //
 // See internal/install/templates/ for the source text of every file written.
 // All filesystem mutations go through two helpers:
@@ -19,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"librarian/internal/workspace"
 )
@@ -46,6 +50,20 @@ type Options struct {
 	DryRun    bool
 	In        io.Reader
 	Out       io.Writer
+}
+
+// PlatformKeys returns the alphabetised list of supported platform keys,
+// derived from the registry. cmd/install.go uses it for the --platforms
+// flag description and the unknown-platform error surfaces it too, so
+// adding a new platform automatically updates both.
+func PlatformKeys() []string {
+	all := allPlatforms()
+	keys := make([]string, 0, len(all))
+	for _, p := range all {
+		keys = append(keys, p.Key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Run executes an install against ws according to opts. It writes the shared
@@ -121,7 +139,7 @@ func selectRequested(root string, opts Options) ([]*Platform, error) {
 		for _, key := range opts.Platforms {
 			p, ok := byKey[key]
 			if !ok {
-				return nil, fmt.Errorf("unknown platform %q (known: claude, codex, cursor, gemini)", key)
+				return nil, fmt.Errorf("unknown platform %q (known: %s)", key, strings.Join(PlatformKeys(), ", "))
 			}
 			out = append(out, p)
 		}
@@ -201,10 +219,10 @@ func writeExecutableIfChanged(path, body string, dryRun bool) (bool, error) {
 	return true, writeWithMode(path, []byte(body), 0o755)
 }
 
-// installMarkerAndHook is the generic path followed by the pointer-plus-hook
-// platforms (Claude Code, Codex, Gemini CLI). hookConfig may be "" when a
-// platform has no SessionStart hook API yet — in that case we write only the
-// pointer file and skip the JSON merge.
+// installMarkerAndHook is the generic path followed by every markerPlatform
+// (see registry.go). hookConfig may be "" when a platform has no SessionStart
+// hook API — in that case we write only the pointer file and skip the JSON
+// merge.
 func installMarkerAndHook(ws *workspace.Workspace, pointerFile, hookConfig string, warn io.Writer) ([]string, error) {
 	var written []string
 

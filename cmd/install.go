@@ -22,21 +22,25 @@ var (
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install Librarian integration for assistant platforms",
-	Long: `Writes thin pointer files that make assistant platforms (Claude Code, Codex,
-Cursor, Gemini CLI) discover Librarian automatically.
+	Long: `Writes thin pointer files that make assistant platforms discover Librarian
+automatically. Supported platforms: Aider, Claude Code, Codex, Cursor, Gemini CLI,
+GitHub Copilot, OpenCode. See --platforms for accepted keys.
 
 Pointers are written as delimited <!-- librarian:start/end --> blocks so reinstalls
 are idempotent and user content around the block is preserved. Hook entries in JSON
 configs (.claude/settings.json, .codex/hooks.json) are merged by command string so
-other hooks (bd prime, custom scripts) are left untouched. Gemini CLI has no
-SessionStart hook API at present, so only GEMINI.md is written for that platform.
+other hooks (bd prime, custom scripts) are left untouched. Platforms without a
+SessionStart hook API (Aider, Gemini CLI, GitHub Copilot, OpenCode) get only the
+pointer file. Codex and OpenCode both read AGENTS.md; the block is idempotent so
+enabling both writes once. Aider doesn't auto-discover CONVENTIONS.md; the
+installer prints a reminder to add it to .aider.conf.yml.
 
 Default behaviour when run on a TTY is an interactive checklist with detected
 platforms pre-checked. Scripted callers should pass --all or --platforms.
 
 Examples:
   librarian install                        # interactive
-  librarian install --all                  # all four platforms, no prompt
+  librarian install --all                  # every supported platform, no prompt
   librarian install --platforms=claude,cursor
   librarian install --dry-run              # show what would change
   librarian install --no-git-hook          # skip .git/hooks/post-commit`,
@@ -45,7 +49,8 @@ Examples:
 
 func init() {
 	installCmd.Flags().BoolVar(&installAll, "all", false, "Install for all supported platforms, skip prompt")
-	installCmd.Flags().StringVar(&installPlatforms, "platforms", "", "Comma-separated platform keys (claude,codex,cursor,gemini)")
+	installCmd.Flags().StringVar(&installPlatforms, "platforms", "",
+		fmt.Sprintf("Comma-separated platform keys (%s)", strings.Join(install.PlatformKeys(), ",")))
 	installCmd.Flags().BoolVar(&installNoGitHook, "no-git-hook", false, "Skip .git/hooks/post-commit auto-rebuild")
 	installCmd.Flags().BoolVar(&installDryRun, "dry-run", false, "Print planned writes without touching disk")
 	rootCmd.AddCommand(installCmd)
