@@ -4,9 +4,10 @@
 // ParsedDoc output.
 //
 // This package ships the Grammar interface + CodeHandler wiring. Concrete
-// languages live in sibling files (golang.go, python.go, java.go; typescript
-// to follow via bd issue lib-46j). Each grammar registers through the
-// package-level init() so the extension → handler mapping stays in one place.
+// languages live in sibling files (golang.go, python.go, java.go,
+// javascript.go — the last ships TypeScript, TSX, and JavaScript grammars
+// backed by a shared base). Each grammar registers through the package-level
+// init() so the extension → handler mapping stays in one place.
 package code
 
 import (
@@ -22,10 +23,13 @@ import (
 // ImportRef captures a single import declaration. Path is the module / file
 // string; Alias is the local name the import is bound to (empty when absent);
 // Static is Java's `import static` form and false for other languages.
+// Metadata carries grammar-specific tags — used by TypeScript for
+// type_only/default/namespace markers — merged into Reference.Metadata.
 type ImportRef struct {
-	Path   string
-	Alias  string
-	Static bool
+	Path     string
+	Alias    string
+	Static   bool
+	Metadata map[string]any
 }
 
 // Grammar encapsulates per-language tree-sitter knowledge. Implementations
@@ -108,6 +112,15 @@ type Grammar interface {
 // and only calls it when present.
 type annotationExtractor interface {
 	SymbolAnnotations(node *sitter.Node, source []byte) []string
+}
+
+// extraSignalsExtractor is an optional interface for grammars that emit
+// per-symbol Signals of arbitrary Kind beyond annotations — used by the
+// JS/TS grammar to flag exported / default-export symbols with label
+// signals. Returned signals are appended verbatim to Unit.Signals; the
+// walker only fills in Loc if the grammar left it zero.
+type extraSignalsExtractor interface {
+	SymbolExtraSignals(node *sitter.Node, source []byte) []indexer.Signal
 }
 
 // CodeHandler implements indexer.FileHandler for a single Grammar.
@@ -349,17 +362,29 @@ func (h *CodeHandler) buildUnit(
 			})
 		}
 	}
+	if ee, ok := h.grammar.(extraSignalsExtractor); ok {
+		for _, s := range ee.SymbolExtraSignals(n, source) {
+			if s.Loc == (indexer.Location{}) {
+				s.Loc = unit.Loc
+			}
+			unit.Signals = append(unit.Signals, s)
+		}
+	}
 	return unit
 }
 
 // extractImports runs the grammar's import extractor and appends each as a
-// ParsedDoc.Reference with Kind="import". Alias / Static metadata rides on
-// Reference.Metadata so the indexer pipeline can surface it if it wants.
+// ParsedDoc.Reference with Kind="import". Alias / Static / grammar-provided
+// Metadata all land on Reference.Metadata so the indexer pipeline can
+// surface them.
 func (h *CodeHandler) extractImports(root *sitter.Node, source []byte, doc *indexer.ParsedDoc) {
 	for _, imp := range h.grammar.Imports(root, source) {
 		ref := indexer.Reference{Kind: "import", Target: imp.Path}
-		if imp.Alias != "" || imp.Static {
+		if imp.Alias != "" || imp.Static || len(imp.Metadata) > 0 {
 			ref.Metadata = map[string]any{}
+			for k, v := range imp.Metadata {
+				ref.Metadata[k] = v
+			}
 			if imp.Alias != "" {
 				ref.Metadata["alias"] = imp.Alias
 			}
@@ -459,10 +484,17 @@ func setFromSlice(xs []string) map[string]bool {
 // adding a new grammar only requires authoring its sibling file and appending
 // its constructor to this list — no scattered per-file init()s.
 func init() {
+	// Extensions must remain disjoint across grammars. RegisterDefault
+	// replaces on collision, so a duplicate `.jsx` between JavaScript and
+	// TSX (say) would silently last-writer-win. Add new grammars with an
+	// extension set that doesn't overlap any registered above.
 	for _, g := range []Grammar{
 		NewGoGrammar(),
 		NewPythonGrammar(),
 		NewJavaGrammar(),
+		NewJavaScriptGrammar(),
+		NewTypeScriptGrammar(),
+		NewTSXGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}
