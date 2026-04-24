@@ -401,6 +401,42 @@ func TestGoGrammar_EmptyFile(t *testing.T) {
 	}
 }
 
+// TestGoGrammar_ContainerKindDoesNotRewriteMethods verifies that the walker's
+// `function → method` rewrite — introduced for Python to differentiate class
+// methods from module-level functions — does not fire for Go. Go's AST has
+// distinct `function_declaration` and `method_declaration` node types, so
+// method detection is static; a future regression that broadened the rewrite
+// condition (e.g., rewriting on any non-empty containerKind) would corrupt Go
+// kinds. type_declaration is the only Go container kind and it never maps to
+// "class", so this test pins that invariant.
+func TestGoGrammar_ContainerKindDoesNotRewriteMethods(t *testing.T) {
+	src := []byte(`package rw
+
+type Svc struct{}
+
+// Method on a Go type — AST node is method_declaration, already Kind="method".
+func (s *Svc) Do() {}
+
+// Top-level function — AST node is function_declaration, must stay "function".
+func Helper() {}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("rw.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	gotKinds := map[string]string{}
+	for _, u := range doc.Units {
+		gotKinds[u.Title] = u.Kind
+	}
+	if gotKinds["Do"] != "method" {
+		t.Errorf("Do Kind = %q, want method", gotKinds["Do"])
+	}
+	if gotKinds["Helper"] != "function" {
+		t.Errorf("Helper Kind = %q, want function (rewrite must not fire outside class containers)", gotKinds["Helper"])
+	}
+}
+
 // TestGoGrammar_StaticFlagAlwaysFalse locks in the contract that the Go
 // grammar never emits Static=true on import Refs. Java will use Static via
 // `import static`; this negative test guards the shared Reference.Metadata

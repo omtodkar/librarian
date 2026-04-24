@@ -4,8 +4,8 @@
 // ParsedDoc output.
 //
 // This package ships the Grammar interface + CodeHandler wiring. Concrete
-// languages live in sibling files (golang.go today; python/ts/java to follow
-// via bd issues lib-2e4, lib-46j, lib-x91). Each grammar registers through
+// languages live in sibling files (golang.go, python.go; typescript and java
+// to follow via bd issues lib-46j and lib-x91). Each grammar registers through
 // the package-level init() so the extension → handler mapping stays in one
 // place.
 package code
@@ -78,11 +78,18 @@ type Grammar interface {
 	// metadata stashed in Reference.Metadata.
 	Imports(root *sitter.Node, source []byte) []ImportRef
 
-	// CommentNodeTypes returns the AST node type names that represent
-	// comments in this grammar (e.g., ["comment"] for Go, ["line_comment",
-	// "block_comment"] for Java). The shared walker uses the returned set
-	// to associate preceding comments with symbol nodes and to scan every
-	// comment for rationale markers.
+	// CommentNodeTypes returns AST node type names whose content the walker
+	// should (a) buffer as "preceding context" for the next symbol's docstring
+	// and (b) scan for rationale markers (TODO/FIXME/...).
+	//
+	// Most grammars return just the grammar's comment node name — ["comment"]
+	// for Go, ["line_comment", "block_comment"] for Java. Grammars may also
+	// include genuinely-not-comment nodes that should behave like preceding
+	// context from the walker's perspective: Python adds "decorator" so
+	// `@dataclass` text lands in the following symbol's docstring and is
+	// searchable. Any node listed here is also scanned by the rationale-
+	// signal pass, so only include nodes whose text is unlikely to contain
+	// false TODO/FIXME hits.
 	CommentNodeTypes() []string
 
 	// DocstringFromNode optionally extracts a language-idiomatic docstring
@@ -126,7 +133,15 @@ func (h *CodeHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, er
 	pkg := h.grammar.PackageName(root, content)
 	title := pkg
 	if title == "" {
-		title = filepath.Base(path)
+		// Fallback for languages without an explicit package clause (Python,
+		// JS, etc.): use the file stem so Unit.Path reads as a proper dotted
+		// identifier — `service.Service.validate` rather than
+		// `service.py.Service.validate`. Only the final extension is
+		// stripped, so `foo.tar.gz.py` becomes `foo.tar.gz` — fine for search,
+		// but Unit.Paths for such files will have embedded dots that don't
+		// correspond to package boundaries.
+		base := filepath.Base(path)
+		title = strings.TrimSuffix(base, filepath.Ext(base))
 	}
 
 	doc := &indexer.ParsedDoc{
@@ -142,7 +157,9 @@ func (h *CodeHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, er
 	symbolKinds := h.grammar.SymbolKinds()
 	containerKinds := h.grammar.ContainerKinds()
 
-	h.extractUnits(root, content, pkg, symbolKinds, containerKinds, commentSet, doc, nil)
+	// pathPrefix starts at title (not pkg) so stem-based languages get the
+	// stem in every Unit.Path. For Go, title == pkg; behaviour unchanged.
+	h.extractUnits(root, content, title, "", symbolKinds, containerKinds, commentSet, doc, nil)
 	h.extractImports(root, content, doc)
 	doc.Signals = extractAllCommentSignals(root, content, commentSet)
 
@@ -167,24 +184,32 @@ func (h *CodeHandler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]i
 }
 
 // extractUnits walks the AST recursively. Top-level children are processed
-// directly; when a container node is encountered, the walker descends into
-// it and processes its nested symbols under the container's name as
-// additional hierarchy. Preceding consecutive comment siblings attach as the
-// next symbol's docstring; blank-line-separated comment groups do not merge
-// (see commentsAreConsecutive).
+// directly; container nodes are descended into so nested symbols emit under
+// the container's name as additional hierarchy. A node listed in BOTH
+// symbolKinds and containerKinds is hybrid — emit a Unit for it AND descend
+// into it (Python/Java classes need this so the class itself is a Unit and
+// its methods are separate Units).
+//
+// Preceding consecutive comment siblings attach as the next symbol's
+// docstring; blank-line-separated comment groups do not merge (see
+// commentsAreConsecutive).
 //
 // pathPrefix is the dotted context for Unit.Path. At the file root it's the
-// package name (or empty); inside a container it's "pkg.Container".
+// package name (or file stem); inside a container it's "pkg.Container".
+//
+// containerKind is the Kind of the enclosing symbol container ("" at the
+// root, "class" when inside a Python/Java class). When a function_definition
+// Kind resolves to "function" while containerKind == "class", it's rewritten
+// to "method" — the AST can't distinguish these on its own for Python.
 //
 // inheritedPending carries the preceding-comment buffer across container
-// boundaries. When the walker encounters `// doc for X\ntype X struct{}`
-// and type_declaration is a container (not a symbol), the buffered comment
-// is forwarded into the recursive call so it attaches to X — otherwise every
-// commented single-type declaration would lose its docstring.
+// boundaries, so `# doc\n@decorator\nclass X:` still attaches the comment
+// and the decorator to X's Unit.
 func (h *CodeHandler) extractUnits(
 	node *sitter.Node,
 	source []byte,
 	pathPrefix string,
+	containerKind string,
 	symbolKinds map[string]string,
 	containerKinds map[string]bool,
 	commentSet map[string]bool,
@@ -212,32 +237,47 @@ func (h *CodeHandler) extractUnits(
 			continue
 		}
 
-		if kind, isSymbol := symbolKinds[typ]; isSymbol {
+		declaredKind, isSymbol := symbolKinds[typ]
+		isContainer := containerKinds[typ]
+
+		if isSymbol {
+			// Inside a class container, what the AST calls `function_definition`
+			// is semantically a method. Rewrite the emitted kind here, but
+			// preserve declaredKind for the recursion's containerKind argument
+			// so future grammars that register a hybrid "function" container
+			// (e.g., JS class-expression-as-value) still propagate the
+			// original scope kind downstream.
+			emittedKind := declaredKind
+			if declaredKind == "function" && containerKind == "class" {
+				emittedKind = "method"
+			}
 			name := h.grammar.SymbolName(child, source)
 			if name != "" {
 				doc.Units = append(doc.Units,
-					h.buildUnit(child, source, pathPrefix, name, kind, pending))
+					h.buildUnit(child, source, pathPrefix, name, emittedKind, pending))
+			}
+			// Hybrid: a node that's also a container has its body descended
+			// into with the symbol's name extending the path. pending is not
+			// forwarded — it was consumed by the hybrid's own Unit.
+			if isContainer && name != "" {
+				h.extractUnits(child, source, joinPath(pathPrefix, name), declaredKind, symbolKinds, containerKinds, commentSet, doc, nil)
 			}
 			pending = nil
 			continue
 		}
 
-		if containerKinds[typ] {
-			// A container (e.g., a Python class or Java class body) isn't a
-			// symbol itself, but its children are. Descend with an extended
-			// path prefix so nested Unit.Paths read "pkg.Container.method".
-			// Forward `pending` so the first inner symbol claims the comments
-			// the container was about to swallow.
+		if isContainer {
+			// Pure container (no Unit for itself). Descend, forwarding `pending`
+			// so a preceding docstring-comment attaches to the first inner
+			// symbol. `containerKind` passes through unchanged — this container
+			// doesn't add a class scope of its own (e.g., decorated_definition
+			// wraps a class without changing whether we're inside a class).
 			containerName := h.grammar.SymbolName(child, source)
 			next := pathPrefix
 			if containerName != "" {
-				if next == "" {
-					next = containerName
-				} else {
-					next = next + "." + containerName
-				}
+				next = joinPath(pathPrefix, containerName)
 			}
-			h.extractUnits(child, source, next, symbolKinds, containerKinds, commentSet, doc, pending)
+			h.extractUnits(child, source, next, containerKind, symbolKinds, containerKinds, commentSet, doc, pending)
 			pending = nil
 			continue
 		}
@@ -371,6 +411,16 @@ func walk(root *sitter.Node, visit func(*sitter.Node) bool) {
 	}
 }
 
+// joinPath composes a dotted Unit.Path from a prefix and a name, handling the
+// empty-prefix case so the result never starts with '.'. Used by extractUnits
+// at two recursion points that previously open-coded the same conditional.
+func joinPath(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + "." + name
+}
+
 // setFromSlice returns a membership-test map for a slice of strings.
 func setFromSlice(xs []string) map[string]bool {
 	out := make(map[string]bool, len(xs))
@@ -387,6 +437,7 @@ func setFromSlice(xs []string) map[string]bool {
 func init() {
 	for _, g := range []Grammar{
 		NewGoGrammar(),
+		NewPythonGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}
