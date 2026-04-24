@@ -9,6 +9,7 @@ import (
 	"librarian/internal/config"
 	"librarian/internal/indexer"
 	"librarian/internal/indexer/handlers/office"
+	"librarian/internal/indexer/handlers/pdf"
 	"librarian/internal/workspace"
 )
 
@@ -77,4 +78,8 @@ func initConfig() {
 	indexer.RegisterDefault(office.NewDocx(officeCfg))
 	indexer.RegisterDefault(office.NewXlsx(officeCfg))
 	indexer.RegisterDefault(office.NewPptx(officeCfg))
+
+	// PDF handler: same pattern — init-time default gets overwritten with
+	// user-configured MaxPages cap.
+	indexer.RegisterDefault(pdf.NewPDF(pdf.Config{MaxPages: cfg.PDF.MaxPages}))
 }

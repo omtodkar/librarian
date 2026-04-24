@@ -10,6 +10,7 @@ import (
 	"librarian/internal/embedding"
 	"librarian/internal/indexer"
 	_ "librarian/internal/indexer/handlers/defaults" // register all built-in handlers
+	"librarian/internal/indexer/handlers/pdf"
 	"librarian/internal/store"
 )
 
@@ -58,6 +59,10 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("opening database: %w", err)
 	}
 	defer s.Close()
+
+	// PDF handler holds a WebAssembly runtime (~5 MB) that's cheap to
+	// reinit but wasteful to leave running after indexing completes.
+	defer pdf.Shutdown()
 
 	idx := indexer.New(s, cfg, embedder)
 

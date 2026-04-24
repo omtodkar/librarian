@@ -8,6 +8,7 @@ type Config struct {
 	Embedding        EmbeddingConfig `mapstructure:"embedding"`
 	Chunking         ChunkingConfig  `mapstructure:"chunking"`
 	Office           OfficeConfig    `mapstructure:"office"`
+	PDF              PDFConfig       `mapstructure:"pdf"`
 	CodeFilePatterns []string        `mapstructure:"code_file_patterns"`
 	ExcludePatterns  []string        `mapstructure:"exclude_patterns"`
 }
@@ -34,6 +35,13 @@ type OfficeConfig struct {
 	IncludeSpeakerNotes bool `mapstructure:"include_speaker_notes"`
 }
 
+// PDFConfig controls PDF ingestion. MaxPages bounds how many pages the
+// handler extracts from a single PDF; 0 means unlimited. Large books with
+// thousands of pages can dominate the index otherwise.
+type PDFConfig struct {
+	MaxPages int `mapstructure:"max_pages"`
+}
+
 func Load() *Config {
 	cfg := &Config{
 		DocsDir: "docs",
@@ -50,6 +58,9 @@ func Load() *Config {
 			XLSXMaxRows:         100,
 			XLSXMaxCols:         50,
 			IncludeSpeakerNotes: true,
+		},
+		PDF: PDFConfig{
+			MaxPages: 0,
 		},
 		CodeFilePatterns: []string{"*.go", "*.ts", "*.py", "*.rs", "*.java", "*.rb"},
 		ExcludePatterns:  []string{"node_modules/**", ".git/**", "vendor/**"},

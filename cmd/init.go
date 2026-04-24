@@ -105,6 +105,12 @@ office:
   # Include PowerPoint speaker notes as "### Notes" sections per slide.
   include_speaker_notes: true
 
+pdf:
+  # Cap on pages indexed per PDF. 0 = unlimited.
+  # Large books produce proportional chunks, which can dominate
+  # the index if left unbounded.
+  max_pages: 0
+
 code_file_patterns:
   - "*.go"
   - "*.ts"
