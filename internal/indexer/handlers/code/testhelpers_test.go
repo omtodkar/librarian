@@ -27,3 +27,15 @@ func importTargets(doc *indexer.ParsedDoc) map[string]bool {
 	}
 	return out
 }
+
+// hasSignal reports whether signals contains an entry matching kind + value.
+// Used by grammar tests asserting that annotation/rationale signals surfaced
+// on a specific Unit.
+func hasSignal(signals []indexer.Signal, kind, value string) bool {
+	for _, s := range signals {
+		if s.Kind == kind && s.Value == value {
+			return true
+		}
+	}
+	return false
+}

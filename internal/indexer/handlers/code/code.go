@@ -4,10 +4,9 @@
 // ParsedDoc output.
 //
 // This package ships the Grammar interface + CodeHandler wiring. Concrete
-// languages live in sibling files (golang.go, python.go; typescript and java
-// to follow via bd issues lib-46j and lib-x91). Each grammar registers through
-// the package-level init() so the extension → handler mapping stays in one
-// place.
+// languages live in sibling files (golang.go, python.go, java.go; typescript
+// to follow via bd issue lib-46j). Each grammar registers through the
+// package-level init() so the extension → handler mapping stays in one place.
 package code
 
 import (
@@ -97,6 +96,18 @@ type Grammar interface {
 	// first statement of a function body). Returning "" falls back to the
 	// preceding-sibling-comments path the walker maintains. Go returns "".
 	DocstringFromNode(node *sitter.Node, source []byte) string
+}
+
+// annotationExtractor is an optional interface a Grammar may implement to
+// emit annotation-kind signals for a symbol (Java @Deprecated, C# attributes,
+// etc.). Values are annotation names WITHOUT the leading `@` — the walker
+// wraps each in a Signal{Kind: "annotation", Value: <name>} and merges it
+// into the symbol's Unit.Signals alongside rationale markers.
+//
+// Grammars that don't implement this are unaffected; the walker type-asserts
+// and only calls it when present.
+type annotationExtractor interface {
+	SymbolAnnotations(node *sitter.Node, source []byte) []string
 }
 
 // CodeHandler implements indexer.FileHandler for a single Grammar.
@@ -298,10 +309,7 @@ func (h *CodeHandler) buildUnit(
 	pathPrefix, name, kind string,
 	pendingComments []*sitter.Node,
 ) indexer.Unit {
-	path := name
-	if pathPrefix != "" {
-		path = pathPrefix + "." + name
-	}
+	path := joinPath(pathPrefix, name)
 
 	var docLines []string
 	for _, c := range pendingComments {
@@ -331,6 +339,15 @@ func (h *CodeHandler) buildUnit(
 	}
 	if docstring != "" {
 		unit.Signals = indexer.ExtractRationaleSignals(docstring)
+	}
+	if ae, ok := h.grammar.(annotationExtractor); ok {
+		for _, a := range ae.SymbolAnnotations(n, source) {
+			unit.Signals = append(unit.Signals, indexer.Signal{
+				Kind:  "annotation",
+				Value: a,
+				Loc:   unit.Loc,
+			})
+		}
 	}
 	return unit
 }
@@ -411,9 +428,16 @@ func walk(root *sitter.Node, visit func(*sitter.Node) bool) {
 	}
 }
 
-// joinPath composes a dotted Unit.Path from a prefix and a name, handling the
-// empty-prefix case so the result never starts with '.'. Used by extractUnits
-// at two recursion points that previously open-coded the same conditional.
+// joinPath composes a dotted Unit.Path from a prefix and a name, handling
+// the empty-prefix case so the result never starts with '.'. Used by
+// extractUnits at the recursion points that previously open-coded the same
+// conditional, and by buildUnit for the leaf Unit emission.
+//
+// No collision-collapse here: for Java files in the default package the
+// stem equals the class name and paths look like `Orphan.Orphan.x` — mildly
+// redundant but unambiguous, and the alternative (silently dropping a
+// duplicate segment) broke Go `package foo` + `type foo`, Python
+// `service.py` + `class service`, and nested same-name classes.
 func joinPath(prefix, name string) string {
 	if prefix == "" {
 		return name
@@ -438,6 +462,7 @@ func init() {
 	for _, g := range []Grammar{
 		NewGoGrammar(),
 		NewPythonGrammar(),
+		NewJavaGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}

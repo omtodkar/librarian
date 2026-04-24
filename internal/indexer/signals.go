@@ -93,6 +93,7 @@ func SignalsToJSON(sigs []Signal) string {
 		LabelValues   map[string]string `json:"label_values,omitempty"`
 		Todos         []string          `json:"todos,omitempty"`
 		Rationale     []string          `json:"rationale,omitempty"`
+		Annotations   []string          `json:"annotations,omitempty"`
 		HasWarning    bool              `json:"has_warning,omitempty"`
 		HasDecision   bool              `json:"has_decision,omitempty"`
 	}
@@ -120,11 +121,17 @@ func SignalsToJSON(sigs []Signal) string {
 			out.Todos = append(out.Todos, formatSignalEntry(s))
 		case "rationale":
 			out.Rationale = append(out.Rationale, formatSignalEntry(s))
+		case "annotation":
+			// Code annotations (@Deprecated, @Transactional) land in their own
+			// bucket so downstream re-rankers can boost by specific markers
+			// without entangling with rationale/todo semantics.
+			out.Annotations = append(out.Annotations, s.Value)
 		}
 	}
 	if len(out.InlineLabels) == 0 && len(out.RiskMarkers) == 0 &&
 		len(out.EmphasisTerms) == 0 && len(out.LabelValues) == 0 &&
-		len(out.Todos) == 0 && len(out.Rationale) == 0 {
+		len(out.Todos) == 0 && len(out.Rationale) == 0 &&
+		len(out.Annotations) == 0 {
 		return "{}"
 	}
 	b, err := json.Marshal(out)
