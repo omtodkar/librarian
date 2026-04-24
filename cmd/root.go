@@ -7,6 +7,8 @@ import (
 	"github.com/spf13/viper"
 
 	"librarian/internal/config"
+	"librarian/internal/indexer"
+	"librarian/internal/indexer/handlers/office"
 	"librarian/internal/workspace"
 )
 
@@ -59,4 +61,20 @@ func initConfig() {
 	if ws != nil && !rootCmd.PersistentFlags().Changed("db-path") && !viper.IsSet("db_path") {
 		cfg.DBPath = ws.DBPath()
 	}
+
+	// Propagate Office-handler config so the DOCX/XLSX/PPTX handlers pick up
+	// user-specified row/col caps and speaker-notes preferences. The office
+	// package auto-registers its handlers at init with DefaultConfig; we
+	// replace each registration with a fresh handler whose Config reflects
+	// the loaded workspace config. Registry.Register is last-writer-wins by
+	// extension, so overwriting is safe. Runs inside cobra.OnInitialize so
+	// every subcommand (index, mcp serve, report, …) sees the user config.
+	officeCfg := office.Config{
+		XLSXMaxRows:         cfg.Office.XLSXMaxRows,
+		XLSXMaxCols:         cfg.Office.XLSXMaxCols,
+		IncludeSpeakerNotes: cfg.Office.IncludeSpeakerNotes,
+	}
+	indexer.RegisterDefault(office.NewDocx(officeCfg))
+	indexer.RegisterDefault(office.NewXlsx(officeCfg))
+	indexer.RegisterDefault(office.NewPptx(officeCfg))
 }

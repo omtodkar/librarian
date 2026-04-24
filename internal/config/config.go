@@ -7,6 +7,7 @@ type Config struct {
 	DBPath           string          `mapstructure:"db_path"`
 	Embedding        EmbeddingConfig `mapstructure:"embedding"`
 	Chunking         ChunkingConfig  `mapstructure:"chunking"`
+	Office           OfficeConfig    `mapstructure:"office"`
 	CodeFilePatterns []string        `mapstructure:"code_file_patterns"`
 	ExcludePatterns  []string        `mapstructure:"exclude_patterns"`
 }
@@ -24,6 +25,15 @@ type ChunkingConfig struct {
 	MinTokens    int `mapstructure:"min_tokens"`
 }
 
+// OfficeConfig controls DOCX/XLSX/PPTX conversion. XLSXMaxRows / XLSXMaxCols
+// bound huge spreadsheet-as-database sheets; IncludeSpeakerNotes toggles
+// whether PPTX notes-slide text lands in the generated markdown.
+type OfficeConfig struct {
+	XLSXMaxRows         int  `mapstructure:"xlsx_max_rows"`
+	XLSXMaxCols         int  `mapstructure:"xlsx_max_cols"`
+	IncludeSpeakerNotes bool `mapstructure:"include_speaker_notes"`
+}
+
 func Load() *Config {
 	cfg := &Config{
 		DocsDir: "docs",
@@ -35,6 +45,11 @@ func Load() *Config {
 			MaxTokens:    512,
 			OverlapLines: 3,
 			MinTokens:    50,
+		},
+		Office: OfficeConfig{
+			XLSXMaxRows:         100,
+			XLSXMaxCols:         50,
+			IncludeSpeakerNotes: true,
 		},
 		CodeFilePatterns: []string{"*.go", "*.ts", "*.py", "*.rs", "*.java", "*.rb"},
 		ExcludePatterns:  []string{"node_modules/**", ".git/**", "vendor/**"},

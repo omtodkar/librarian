@@ -96,6 +96,15 @@ chunking:
   min_tokens: 50
   overlap_lines: 3
 
+office:
+  # Per-sheet cell caps for .xlsx — prevents a spreadsheets-as-database
+  # file from ballooning the index. Truncation is noted inline in the
+  # generated markdown.
+  xlsx_max_rows: 100
+  xlsx_max_cols: 50
+  # Include PowerPoint speaker notes as "### Notes" sections per slide.
+  include_speaker_notes: true
+
 code_file_patterns:
   - "*.go"
   - "*.ts"
