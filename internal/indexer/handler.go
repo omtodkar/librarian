@@ -96,15 +96,21 @@ type ParsedDoc struct {
 //
 // Kind defines the unit's shape:
 //
-//	"section"    — markdown H1-H6 section
-//	"paragraph"  — standalone paragraph in formats without sections
-//	"class"      — class/struct/interface/enum declaration
-//	"method"     — method/function declaration
-//	"field"      — class field / top-level variable
-//	"key-path"   — YAML/JSON/TOML/properties key path
-//	"page"       — PDF page or slide
-//	"row"        — CSV row (opt-in, rare)
-//	"table"      — tabular data summary
+//	"section"     — markdown H1-H6 section
+//	"paragraph"   — standalone paragraph in formats without sections
+//	"class"       — class/struct declaration
+//	"interface"   — interface declaration (Java, TypeScript)
+//	"enum"        — enumeration declaration (Java, TypeScript)
+//	"record"      — Java record
+//	"function"    — standalone function/procedure declaration
+//	"method"      — method declaration (function inside a class)
+//	"constructor" — Java constructor
+//	"field"       — class field / top-level variable
+//	"type"        — type alias / type definition (Go, Python, TypeScript)
+//	"key-path"    — YAML/JSON/TOML/properties key path
+//	"page"        — PDF page or slide
+//	"row"         — CSV row (opt-in, rare)
+//	"table"       — tabular data summary
 type Unit struct {
 	// Kind categorizes the unit (see type doc).
 	Kind string

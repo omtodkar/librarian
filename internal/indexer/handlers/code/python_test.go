@@ -13,8 +13,13 @@ const pySample = `"""Module docstring for service."""
 import os
 import foo.bar as fb
 from collections import deque, OrderedDict
+from typing import TypeAlias
 from . import utils
 from ..pkg import Thing as T
+
+# Type aliases surface as Kind="type" Units via PEP 695 + PEP 613
+type UserID = int
+LegacyUserID: TypeAlias = int
 
 # module-level TODO: refactor this file
 def top_level(x):
@@ -386,6 +391,61 @@ def h():
 		// the def line, not with the bytes text.
 		if !strings.HasPrefix(strings.TrimSpace(u.Content), "def") {
 			t.Errorf("%s Unit Content appears to include bytes-literal as docstring:\n%s", name, u.Content)
+		}
+	}
+}
+
+// Type aliases come in two flavors: PEP 695's `type X = ...` dedicated
+// syntax, and PEP 613's `X: TypeAlias = ...` annotated-assignment form.
+// Both emit Kind="type" Units. Regular annotated assignments (`x: int = 5`)
+// must NOT become Units — the heuristic keys on the annotation being
+// literally TypeAlias / *.TypeAlias so unrelated statements are skipped,
+// including class attributes (regression guard against the walker
+// accidentally emitting a "type" Unit for every typed class field).
+func TestPythonGrammar_TypeAliases(t *testing.T) {
+	src := []byte(`from typing import TypeAlias
+
+# PEP 695 (Python 3.12+)
+type Matrix = list[list[float]]
+type Vec[T] = list[T]
+
+# PEP 613 (legacy)
+Vector: TypeAlias = list[float]
+Path: "typing.TypeAlias" = str
+
+# Module-level annotated assignment — must not become a Unit
+counter: int = 0
+
+class Metrics:
+    # Class-body typed attributes — must not become type-alias Units
+    count: int = 0
+    name: str = "default"
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("types.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	byTitle := map[string]indexer.Unit{}
+	for _, u := range doc.Units {
+		byTitle[u.Title] = u
+	}
+	for _, want := range []string{"Matrix", "Vec", "Vector", "Path"} {
+		u, ok := byTitle[want]
+		if !ok {
+			t.Errorf("missing type alias Unit %q (got %d Units)", want, len(byTitle))
+			continue
+		}
+		if u.Kind != "type" {
+			t.Errorf("%s Kind = %q, want %q", want, u.Kind, "type")
+		}
+		if u.Path != "types."+want {
+			t.Errorf("%s Path = %q, want %q", want, u.Path, "types."+want)
+		}
+	}
+	for _, shouldSkip := range []string{"counter", "count", "name"} {
+		if _, ok := byTitle[shouldSkip]; ok {
+			t.Errorf("non-TypeAlias annotated assignment %q leaked into Units", shouldSkip)
 		}
 	}
 }

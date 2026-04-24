@@ -47,10 +47,18 @@ func (*PythonGrammar) CommentNodeTypes() []string { return []string{"comment", "
 // that function_definition resolves to "function" here but the walker rewrites
 // it to "method" when descending into a class container — the AST doesn't
 // distinguish methods from standalone functions.
+//
+// Type aliases come from two syntaxes: PEP 695's `type Matrix = ...` has a
+// dedicated `type_alias_statement` node (Python 3.12+), while the older PEP
+// 613 form `X: TypeAlias = ...` is a generic `expression_statement`. Both
+// emit Kind="type" — SymbolName's expression_statement branch filters for
+// the TypeAlias annotation so unrelated assignments don't produce Units.
 func (*PythonGrammar) SymbolKinds() map[string]string {
 	return map[string]string{
-		"function_definition": "function",
-		"class_definition":    "class",
+		"function_definition":  "function",
+		"class_definition":     "class",
+		"type_alias_statement": "type",
+		"expression_statement": "type",
 	}
 }
 
@@ -73,15 +81,84 @@ func (*PythonGrammar) ContainerKinds() map[string]bool {
 }
 
 // SymbolName returns the identifier for function_definition / class_definition
-// nodes. Every other node type (including `block` and `decorated_definition`,
-// which are containers but not symbols) returns "" so the walker doesn't
-// inject spurious segments into Unit.Path when descending through them.
+// / type_alias_statement nodes, plus PEP-613 `X: TypeAlias = ...` expression
+// statements. Every other node type (including `block` and
+// `decorated_definition`, which are containers but not symbols) returns "" so
+// the walker doesn't inject spurious segments into Unit.Path when descending
+// through them.
 func (*PythonGrammar) SymbolName(n *sitter.Node, source []byte) string {
 	switch n.Type() {
 	case "function_definition", "class_definition":
 		if name := n.ChildByFieldName("name"); name != nil {
 			return name.Content(source)
 		}
+	case "type_alias_statement":
+		// tree-sitter-python models this as two unnamed `type` children: the
+		// first is the alias LHS, the second the RHS. The LHS wraps either
+		// an identifier (`type Matrix = ...`) or a generic_type
+		// (`type Vec[T] = ...`). Guard the `type` wrapper so a future
+		// grammar change that inserts a new first named child doesn't get
+		// mis-interpreted as the LHS.
+		lhs := n.NamedChild(0)
+		if lhs == nil || lhs.Type() != "type" {
+			return ""
+		}
+		return aliasIdentifier(lhs, source)
+	case "expression_statement":
+		// PEP 613 `X: TypeAlias = ...` — accept only when the annotation is
+		// literally TypeAlias (or a dotted form ending in .TypeAlias,
+		// including the string-forward-reference variant `"typing.TypeAlias"`).
+		// Aliased imports (`from typing import TypeAlias as TA; X: TA = ...`)
+		// are not detected because the annotation text is "TA" — acceptable
+		// best-effort since PEP 613 is being phased out in favor of PEP 695.
+		return pep613AliasName(n, source)
+	}
+	return ""
+}
+
+// pep613AliasName detects the `X: TypeAlias = VALUE` / `X: "typing.TypeAlias"
+// = VALUE` form and returns X. Returns "" for any other expression_statement
+// so the walker skips it. LHS must be a plain identifier — pattern_list or
+// subscript LHSes (pathological for a type alias) would corrupt Unit.Path
+// with embedded punctuation.
+func pep613AliasName(n *sitter.Node, source []byte) string {
+	if n.NamedChildCount() == 0 {
+		return ""
+	}
+	assign := n.NamedChild(0)
+	if assign == nil || assign.Type() != "assignment" {
+		return ""
+	}
+	ann := assign.ChildByFieldName("type")
+	left := assign.ChildByFieldName("left")
+	if ann == nil || left == nil || left.Type() != "identifier" {
+		return ""
+	}
+	annText := strings.Trim(ann.Content(source), `"' `)
+	if annText != "TypeAlias" && !strings.HasSuffix(annText, ".TypeAlias") {
+		return ""
+	}
+	return left.Content(source)
+}
+
+// aliasIdentifier returns the identifier buried inside a PEP 695 alias LHS.
+// The LHS is either a bare identifier or a generic_type whose first named
+// child is the identifier — so one hop max. Avoids an unbounded DFS that
+// could surface a nested identifier (e.g. a type-parameter name) if the
+// grammar ever adds children before the name slot.
+func aliasIdentifier(lhs *sitter.Node, source []byte) string {
+	if lhs == nil {
+		return ""
+	}
+	inner := lhs.NamedChild(0)
+	if inner == nil {
+		return ""
+	}
+	if inner.Type() == "identifier" {
+		return inner.Content(source)
+	}
+	if name := inner.NamedChild(0); name != nil && name.Type() == "identifier" {
+		return name.Content(source)
 	}
 	return ""
 }
