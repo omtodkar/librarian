@@ -9,9 +9,13 @@ import (
 	"os"
 )
 
-// Embedder generates vector embeddings from text.
+// Embedder generates vector embeddings from text. Model() returns the
+// resolved model identifier (after any default fallback) so the store layer
+// can detect config-level model swaps that would otherwise corrupt the vec0
+// index — see internal/store/store.go's ensureVecTable.
 type Embedder interface {
 	Embed(text string) ([]float64, error)
+	Model() string
 }
 
 // defaultGeminiModel is the current recommended Gemini embedding model —
@@ -69,6 +73,10 @@ type geminiError struct {
 	Message string `json:"message"`
 	Code    int    `json:"code"`
 }
+
+// Model returns the resolved model string (after the defaultGeminiModel
+// fallback applied in the constructor).
+func (e *GeminiEmbedder) Model() string { return e.model }
 
 func (e *GeminiEmbedder) Embed(text string) ([]float64, error) {
 	url := "https://generativelanguage.googleapis.com/v1beta/models/" + e.model + ":embedContent?key=" + e.apiKey

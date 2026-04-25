@@ -34,6 +34,7 @@ Seven persistent tables plus the lazy-created vector table, plus goose's own `go
 | `refs` | `(doc_id, code_file_id)` | Junction: documents → code files, with context string |
 | `graph_nodes` | `id` (namespaced text) | Generic node for every indexed entity (doc, file, symbol, config key) |
 | `graph_edges` | autoincrement | Typed edges between nodes: `mentions`, `shared_code_ref`, `imports`, `calls`, … |
+| `embedding_meta` | `key` (text) | Two rows — `model` and `dimension` — recorded on first vec0 write; checked on every `AddChunk` to detect config-level embedding model swaps |
 
 `related_docs` from earlier versions is **superseded** by the graph spine. It isn't in the current baseline migration — users coming from the pre-goose era are asked to re-index from scratch (see "Schema evolution" below).
 

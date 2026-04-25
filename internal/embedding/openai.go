@@ -55,6 +55,9 @@ type openAIError struct {
 	Type    string `json:"type"`
 }
 
+// Model returns the configured model string (constructor required non-empty).
+func (e *OpenAIEmbedder) Model() string { return e.model }
+
 func (e *OpenAIEmbedder) Embed(text string) ([]float64, error) {
 	url := e.baseURL + "/embeddings"
 

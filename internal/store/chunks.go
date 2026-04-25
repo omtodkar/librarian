@@ -30,8 +30,11 @@ func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
 		return nil, fmt.Errorf("add_chunk last_insert_id: %w", err)
 	}
 
-	// Lazily create vec0 table sized to the actual embedding dimensions
-	if err := s.ensureVecTable(len(input.Vector)); err != nil {
+	// Lazily create vec0 table sized to the actual embedding dimensions, and
+	// verify the active (model, dim) pair matches what was first recorded.
+	// A mismatch here is the sentinel for "user swapped embedding.model in
+	// config.yaml" — ensureVecTable returns the actionable recovery message.
+	if err := s.ensureVecTable(input.Model, len(input.Vector)); err != nil {
 		return nil, fmt.Errorf("add_chunk ensure_vec_table: %w", err)
 	}
 

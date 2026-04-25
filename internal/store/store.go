@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
@@ -24,6 +25,17 @@ func init() {
 type Store struct {
 	db            *sql.DB
 	vecTableReady bool
+	// embedMeta caches the (model, dim) recorded in embedding_meta. Populated
+	// once per Open by loadEmbeddingMeta; ensureVecTable compares against it
+	// on every chunk insert. A zero-value cache means "never recorded" — the
+	// first successful insert writes the meta to lock it in.
+	embedMeta embedMetaCache
+}
+
+type embedMetaCache struct {
+	loaded bool
+	model  string
+	dim    int
 }
 
 // Open opens (or creates) a SQLite database at dbPath, loads the sqlite-vec
@@ -61,6 +73,15 @@ func Open(dbPath string) (*Store, error) {
 		`SELECT name FROM sqlite_master WHERE type='table' AND name='doc_chunk_vectors'`,
 	).Scan(&name); err == nil {
 		s.vecTableReady = true
+	}
+
+	// Load embedding_meta into the in-memory cache so ensureVecTable can
+	// compare on every chunk insert without a round-trip. A fresh DB has
+	// no rows — the cache stays zero-valued and the first insert writes
+	// the meta.
+	if err := s.loadEmbeddingMeta(); err != nil {
+		sqlDB.Close()
+		return nil, err
 	}
 
 	return s, nil
@@ -114,22 +135,130 @@ func detectLegacyPreGooseDB(sqlDB *sql.DB) error {
 			"(your source files are untouched)")
 }
 
-// ensureVecTable creates the doc_chunk_vectors virtual table sized to the
-// given vector dimensions. Called lazily on first vector insert so the
-// dimension is always derived from the actual embedding model output.
-func (s *Store) ensureVecTable(dimensions int) error {
-	if s.vecTableReady {
-		return nil
+// ensureVecTable verifies the active (model, dim) pair against what was
+// recorded on the first index run, creates the doc_chunk_vectors vec0 table
+// if it doesn't exist, and records the meta on first-ever insert. Called
+// from AddChunk; the three concerns are co-located because they share the
+// "first chunk ever" fast path — a split-out verifier would run the same
+// meta query twice.
+//
+// The mismatch error is the single user-facing surface for "you swapped the
+// embedding model in config.yaml"; its wording must point at the recovery
+// command so users don't have to guess.
+func (s *Store) ensureVecTable(model string, dim int) error {
+	if s.embedMeta.model != "" && s.embedMeta.model != model {
+		return embeddingMismatchError(s.embedMeta.model, s.embedMeta.dim, model, dim)
 	}
-	vecSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunk_vectors USING vec0(
+	if s.embedMeta.dim != 0 && s.embedMeta.dim != dim {
+		return embeddingMismatchError(s.embedMeta.model, s.embedMeta.dim, model, dim)
+	}
+
+	if !s.vecTableReady {
+		vecSQL := fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunk_vectors USING vec0(
     chunk_id INTEGER PRIMARY KEY,
     embedding float[%d]
-)`, dimensions)
-	if _, err := s.db.Exec(vecSQL); err != nil {
-		return fmt.Errorf("creating vector table: %w", err)
+)`, dim)
+		if _, err := s.db.Exec(vecSQL); err != nil {
+			return fmt.Errorf("creating vector table: %w", err)
+		}
+		s.vecTableReady = true
 	}
-	s.vecTableReady = true
+
+	if s.embedMeta.model == "" && s.embedMeta.dim == 0 {
+		if err := s.writeEmbeddingMeta(model, dim); err != nil {
+			return err
+		}
+		s.embedMeta.model = model
+		s.embedMeta.dim = dim
+		s.embedMeta.loaded = true
+	}
 	return nil
+}
+
+// loadEmbeddingMeta pulls the two rows from embedding_meta into the cache.
+// Missing rows leave the cache zero-valued, which ensureVecTable interprets
+// as "first-ever insert — safe to record on write".
+func (s *Store) loadEmbeddingMeta() error {
+	rows, err := s.db.Query(`SELECT key, value FROM embedding_meta`)
+	if err != nil {
+		return fmt.Errorf("reading embedding_meta: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return fmt.Errorf("scanning embedding_meta: %w", err)
+		}
+		switch k {
+		case "model":
+			s.embedMeta.model = v
+		case "dimension":
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("parsing embedding_meta.dimension %q: %w", v, err)
+			}
+			s.embedMeta.dim = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating embedding_meta: %w", err)
+	}
+	s.embedMeta.loaded = true
+	return nil
+}
+
+// writeEmbeddingMeta upserts the model + dimension rows. Uses ON CONFLICT so
+// ClearVectorState followed by a reindex can overwrite cleanly, even though
+// the normal first-insert path writes into an empty table.
+func (s *Store) writeEmbeddingMeta(model string, dim int) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO embedding_meta(key, value) VALUES (?, ?), (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		"model", model, "dimension", strconv.Itoa(dim),
+	); err != nil {
+		return fmt.Errorf("writing embedding_meta: %w", err)
+	}
+	return nil
+}
+
+// ClearVectorState drops every trace of the current embedding model so a
+// reindex can repopulate with a different one. Transactional: either every
+// piece is gone (vec0, embedding_meta rows, doc_chunks rows) or nothing is,
+// so a crash mid-reindex leaves a recoverable state. documents and code_files
+// are preserved — re-indexing rewrites their chunks.
+func (s *Store) ClearVectorState() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DROP TABLE IF EXISTS doc_chunk_vectors`); err != nil {
+		return fmt.Errorf("dropping vec table: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM embedding_meta`); err != nil {
+		return fmt.Errorf("clearing embedding_meta: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM doc_chunks`); err != nil {
+		return fmt.Errorf("clearing doc_chunks: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	s.vecTableReady = false
+	s.embedMeta = embedMetaCache{loaded: true}
+	return nil
+}
+
+// embeddingMismatchError produces the single user-facing message for model
+// or dimension swaps. Kept as a helper so tests can match on substrings
+// without coupling to the exact format.
+func embeddingMismatchError(storedModel string, storedDim int, activeModel string, activeDim int) error {
+	return fmt.Errorf(
+		"embedding model/dimension mismatch: index was built with %q (%d-dim), "+
+			"config now specifies %q (%d-dim); "+
+			"run 'librarian reindex --rebuild-vectors' to drop the vector table "+
+			"and re-embed every chunk",
+		storedModel, storedDim, activeModel, activeDim)
 }
 
 func (s *Store) Close() error {

@@ -144,6 +144,19 @@ Writes content to a file (under `docs_dir`) and re-indexes it. Convenient for pr
 | `--reindex <scope>` | `file` | `file` to re-index only this file; `full` to re-index the whole `docs_dir` |
 | `--json` | `false` | Emit the write + re-index summary as JSON |
 
+### `librarian reindex --rebuild-vectors`
+
+Drops `doc_chunk_vectors`, `doc_chunks`, and `embedding_meta`, then re-runs the docs indexing pass with `--force`. The supported recovery path when `librarian index` refuses to run with an `embedding model/dimension mismatch` after you change the embedding model or provider in `.librarian/config.yaml`.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--rebuild-vectors` | `false` | Required today. Future reindex modes (e.g. selective-file) will add their own flags. |
+| `--json` | `false` | Emit the reindex summary as JSON |
+
+**Cost note**: every chunk gets re-embedded. On paid providers this is billable for every chunk in `docs_dir`. A local LM Studio / Ollama endpoint is free.
+
+**Scope note**: the code-graph pass is not re-run — the graph doesn't use embeddings and is unaffected by model changes. Run `librarian index --skip-docs` separately if the graph also needs refreshing.
+
 ## Retrieval commands
 
 ### `librarian search <query> [--limit=N]`

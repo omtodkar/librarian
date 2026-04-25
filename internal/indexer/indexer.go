@@ -622,6 +622,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 			TokenCount:       chunk.TokenCount,
 			DocID:            doc.ID,
 			SignalMeta:       chunk.SignalMeta,
+			Model:            idx.embedder.Model(),
 		})
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("chunk %d: %s", chunk.ChunkIndex, err))

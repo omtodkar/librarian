@@ -14,11 +14,24 @@ import (
 // fakeEmbedder returns a fixed-dimension zero vector for every input. Good
 // enough for integration tests that care about whether the pipeline wires
 // end-to-end, not about vector similarity.
-type fakeEmbedder struct{ dim int }
+type fakeEmbedder struct {
+	dim   int
+	model string
+}
 
 func (f fakeEmbedder) Embed(text string) ([]float64, error) {
 	_ = text
 	return make([]float64, f.dim), nil
+}
+
+// Model satisfies the Embedder interface. Defaults to "fake-embedder" when
+// the test didn't set a specific name, so every caller that doesn't care
+// about mismatch detection still compiles.
+func (f fakeEmbedder) Model() string {
+	if f.model == "" {
+		return "fake-embedder"
+	}
+	return f.model
 }
 
 // TestIntegration_IndexGoFile exercises the full walker → code handler →

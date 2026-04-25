@@ -13,10 +13,11 @@ The embedding layer (`internal/embedding/`) generates vector embeddings from tex
 ```go
 type Embedder interface {
     Embed(text string) ([]float64, error)
+    Model() string
 }
 ```
 
-One method. Takes a string, returns a float64 vector. Used by the indexer (to embed chunks) and by the MCP server + CLI (to embed search queries).
+`Embed` takes a string and returns a float64 vector — used by the indexer (embedding chunks) and by the MCP server + CLI (embedding search queries). `Model()` returns the resolved model identifier (after any default fallback) so the store layer can detect config-level model swaps that would otherwise corrupt the vec0 index.
 
 ## Provider factory
 
@@ -102,7 +103,19 @@ All errors wrap the underlying cause via `fmt.Errorf("%w")` so callers can `erro
 
 Dimensions are discovered at runtime: the first call to `AddChunk` creates the `doc_chunk_vectors` vec0 virtual table sized to whatever the embedder returned. There's no dimensions config field.
 
-Switching model families (e.g. 768 → 1536 dims) requires deleting the database (`.librarian/librarian.db`) and re-indexing. Dropping just the vec0 table via SQL would also work but isn't exposed as a command today.
+### Detecting model changes
+
+The `(model, dimension)` pair used on first index is recorded in the `embedding_meta` table and checked on every subsequent `AddChunk`. If you change `embedding.model` or `embedding.provider` in `.librarian/config.yaml`, the next indexing run fails with:
+
+```
+embedding model/dimension mismatch: index was built with "gemini-embedding-2" (768-dim),
+config now specifies "text-embedding-3-large" (3072-dim);
+run 'librarian reindex --rebuild-vectors' to drop the vector table and re-embed every chunk
+```
+
+Recover with `librarian reindex --rebuild-vectors`, which drops `doc_chunk_vectors` + `embedding_meta` + `doc_chunks` and re-runs the docs indexing pass with the currently configured embedder. `documents` and `code_files` are preserved. The graph pass isn't re-run (it doesn't embed) — run `librarian index --skip-docs` after `reindex` if you also want to refresh the graph.
+
+Known limitation: if two runs use the same model name against different OpenAI-compatible endpoints (e.g. LM Studio vs. Ollama serving different underlying weights under the same `model:` name), the mismatch can't be detected — the model identifier is all we have.
 
 ## Pipeline flow
 

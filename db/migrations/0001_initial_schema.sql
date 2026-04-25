@@ -71,10 +71,20 @@ CREATE TABLE IF NOT EXISTS graph_edges (
 
 CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_node, kind);
 CREATE INDEX IF NOT EXISTS idx_graph_edges_to   ON graph_edges(to_node, kind);
+
+-- embedding_meta records the (model, dimension) pair used to populate the
+-- doc_chunk_vectors vec0 table. It's checked on every insert so a silent
+-- config-level model swap (e.g. 768-dim -> 3072-dim) fails with a clear
+-- error rather than corrupting the index.
+CREATE TABLE IF NOT EXISTS embedding_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
+DROP TABLE IF EXISTS embedding_meta;
 DROP INDEX IF EXISTS idx_graph_edges_to;
 DROP INDEX IF EXISTS idx_graph_edges_from;
 DROP TABLE IF EXISTS graph_edges;

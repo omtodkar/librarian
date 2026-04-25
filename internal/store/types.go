@@ -56,4 +56,8 @@ type AddChunkInput struct {
 	TokenCount       uint32    `json:"token_count"`
 	DocID            string    `json:"doc_id"`
 	SignalMeta       string    `json:"signal_meta"`
+	// Model is the embedding model identifier that produced Vector. Threaded
+	// through from the indexer so the store can detect config-level model
+	// swaps that would otherwise silently corrupt the vec0 index.
+	Model string `json:"model"`
 }
