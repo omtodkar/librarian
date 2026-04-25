@@ -2,10 +2,13 @@ package indexer
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -588,26 +591,44 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 	}
 
 	// Project outbound references. graphTargetID / graphNodeKindFromRef are
-	// reused from the docs pass and handle import/call/extends/implements
-	// via SymbolNodeID, code-file via CodeFileNodeID, config-key via
-	// ConfigKeyNodeID — unsupported ref kinds skip silently.
+	// reused from the docs pass and handle import/call/inherits (+ legacy
+	// extends/implements) via SymbolNodeID, code-file via CodeFileNodeID,
+	// config-key via ConfigKeyNodeID — unsupported ref kinds skip silently.
+	//
+	// Edge From is ref.Source (via refEdgeSource) when the grammar emitted a
+	// symbol-scoped reference — today that's inherits edges anchored at the
+	// child class's sym: node. File-scoped refs (imports etc.) keep
+	// fileNodeID as From.
+	//
+	// Target-node creation uses UpsertPlaceholderNode (ON CONFLICT DO NOTHING)
+	// rather than UpsertNode (ON CONFLICT DO UPDATE). Rationale: when the
+	// target already exists as a real indexed symbol (its defining file's
+	// symbol-projection loop ran first), the ref-loop MUST NOT overwrite
+	// that row's label/source_path/metadata with placeholder values, which
+	// would happen under file-walker ordering where Child.java is processed
+	// before Base.java (lexicographic) or the reverse for mixed-case
+	// filenames. UpsertPlaceholderNode leaves existing rows untouched so
+	// a Reference.Metadata with unresolved=true can't poison a resolved
+	// node's metadata downstream.
 	for _, ref := range parsed.Refs {
 		targetID := graphTargetID(ref)
 		if targetID == "" {
 			continue
 		}
-		if err := idx.store.UpsertNode(store.Node{
+		if err := idx.store.UpsertPlaceholderNode(store.Node{
 			ID:         targetID,
 			Kind:       graphNodeKindFromRef(ref),
 			Label:      ref.Target,
 			SourcePath: ref.Target,
+			Metadata:   targetNodeMetadataJSON(ref),
 		}); err != nil {
 			continue
 		}
 		if err := idx.store.UpsertEdge(store.Edge{
-			From: fileNodeID,
-			To:   targetID,
-			Kind: ref.Kind,
+			From:     refEdgeSource(ref, fileNodeID),
+			To:       targetID,
+			Kind:     ref.Kind,
+			Metadata: refMetadataJSON(ref),
 		}); err != nil {
 			continue
 		}
@@ -777,26 +798,119 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	// fit that file-centric schema. For a markdown file where the handler only
 	// populates codeRefs via the regex pass above, parsed.Refs is empty and
 	// this loop is a no-op.
+	//
+	// Symbol-scoped refs (ref.Source populated) would anchor at sym:<Source>
+	// instead of the doc node — not expected from the docs-pass handlers
+	// today (markdown/office/pdf don't emit inherits), but the same
+	// refEdgeSource helper keeps the semantics consistent if that changes.
+	//
+	// Target nodes use UpsertPlaceholderNode (see graph pass comment for the
+	// same call — doesn't clobber resolved symbols' metadata on ordering).
 	for _, ref := range parsed.Refs {
 		targetID := graphTargetID(ref)
 		if targetID == "" {
 			continue
 		}
-		idx.store.UpsertNode(store.Node{
+		idx.store.UpsertPlaceholderNode(store.Node{
 			ID:         targetID,
 			Kind:       graphNodeKindFromRef(ref),
 			Label:      ref.Target,
 			SourcePath: ref.Target,
+			Metadata:   targetNodeMetadataJSON(ref),
 		})
 		idx.store.UpsertEdge(store.Edge{
-			From: store.DocNodeID(doc.ID),
-			To:   targetID,
-			Kind: ref.Kind,
+			From:     refEdgeSource(ref, store.DocNodeID(doc.ID)),
+			To:       targetID,
+			Kind:     ref.Kind,
+			Metadata: refMetadataJSON(ref),
 		})
 	}
 
 	result.DocumentsIndexed++
 	return nil
+}
+
+// refEdgeSource returns the graph node ID that should be the `from_node` of
+// the edge materialised from this Reference. Symbol-scoped refs (Source
+// populated by a grammar's inheritanceExtractor/…) anchor at sym:<Source>.
+// File-scoped refs (the long-standing shape for imports / mentions / code-file
+// / config-key / doc-link) fall back to defaultNodeID, preserving existing
+// behaviour end-to-end.
+func refEdgeSource(ref Reference, defaultNodeID string) string {
+	if ref.Source != "" {
+		return store.SymbolNodeID(ref.Source)
+	}
+	return defaultNodeID
+}
+
+// refMetadataJSON serialises Reference.Metadata to a JSON string suitable for
+// Edge.Metadata / Node.Metadata. Returns "" (which UpsertEdge/UpsertNode
+// interpret as "{}") when the metadata is empty, so zero-value refs continue
+// to produce unchanged on-disk edge rows. Keys whose values don't survive
+// json.Marshal (channels, functions) drop from the result — none of the
+// conventional keys (relation, type_args, unresolved, alias, static,
+// node_kind) hit that case.
+//
+// Keys are emitted in sorted order because json.Marshal on map[string]any is
+// non-deterministic, and graph_edges uses INSERT OR REPLACE — non-deterministic
+// serialisation would cause the same logical metadata to produce a different
+// row byte-for-byte on every reindex, churning the SQLite WAL and anything
+// downstream that watches edge rows. Sorted order costs a keys-slice sort per
+// edge; negligible vs the Marshal itself.
+func refMetadataJSON(ref Reference) string {
+	if len(ref.Metadata) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(ref.Metadata))
+	for k := range ref.Metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	first := true
+	for _, k := range keys {
+		// Skip any key whose value can't be marshalled (channel / function /
+		// cyclic map). Don't abort the whole map — losing one key is
+		// recoverable, but returning "" drops every key including
+		// "relation", which is the primary discriminator for inherits-edge
+		// flavor. No current grammar produces un-marshallable values; this
+		// is defensive against future additions.
+		vb, err := json.Marshal(ref.Metadata[k])
+		if err != nil {
+			continue
+		}
+		kb, err := json.Marshal(k)
+		if err != nil {
+			continue
+		}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		b.Write(kb)
+		b.WriteByte(':')
+		b.Write(vb)
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// targetNodeMetadataJSON returns the JSON metadata for the target node of a
+// Reference — currently only the `unresolved=true` marker bubbles up, so
+// downstream queries / orphan sweeps can tell placeholder nodes (bare Java
+// class names without a matching import, Python expression bases) apart from
+// real symbols. Other Reference.Metadata keys are edge-level, not node-level,
+// and stay on the edge.
+func targetNodeMetadataJSON(ref Reference) string {
+	if ref.Metadata == nil {
+		return ""
+	}
+	if v, ok := ref.Metadata["unresolved"].(bool); ok && v {
+		return `{"unresolved":true}`
+	}
+	return ""
 }
 
 // graphTargetID maps a Reference to a namespaced graph node id via the store's
@@ -808,6 +922,12 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 // relative specifiers onto file: nodes (matching CodeFileNodeID) and bare
 // specifiers onto ext: nodes (npm packages that aren't in-project). Refs
 // without the tag continue to land on sym:, preserving the lib-o8m behaviour.
+//
+// "inherits" is the canonical new kind for class/interface/protocol parent
+// relationships (lib-wji.1). "extends" and "implements" are retained as
+// legacy aliases routing identically to sym: nodes so existing hand-authored
+// fixtures and pre-lib-wji.1 data in on-disk DBs keep working. New grammars
+// emit "inherits" with Metadata["relation"] instead.
 func graphTargetID(ref Reference) string {
 	switch ref.Kind {
 	case "code-file":
@@ -820,7 +940,7 @@ func graphTargetID(ref Reference) string {
 			return store.ExternalPackageNodeID(ref.Target)
 		}
 		return store.SymbolNodeID(ref.Target)
-	case "call", "extends", "implements":
+	case "call", "inherits", "extends", "implements":
 		return store.SymbolNodeID(ref.Target)
 	case "config-key":
 		return store.ConfigKeyNodeID(ref.Target)
@@ -839,7 +959,7 @@ func graphNodeKindFromRef(ref Reference) string {
 			return k
 		}
 		return store.NodeKindSymbol
-	case "call", "extends", "implements":
+	case "call", "inherits", "extends", "implements":
 		return store.NodeKindSymbol
 	case "config-key":
 		return store.NodeKindConfigKey

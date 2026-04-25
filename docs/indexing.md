@@ -9,7 +9,7 @@ description: How the indexing pipeline walks the filesystem, dispatches files to
 `librarian index` turns a project's documentation + source into a searchable SQLite index. It runs **two passes** inside one invocation, each scoped to a different root:
 
 - **Docs pass** over `docs_dir` — produces chunks + vectors for the knowledge base (`search_docs`, `get_context`). Unchanged from earlier versions.
-- **Graph pass** over the project root — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes`, and emits `contains` / `imports` / `calls` / `extends` / `implements` edges. No chunks or vectors — structural only.
+- **Graph pass** over the project root — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes`, and emits `contains` / `import` / `call` / `inherits` edges. The `inherits` edge covers every class-family parent relationship — Java `extends`/`implements`, Python class bases, JS/TS class and interface heritage, Go interface embedding — with the flavor carried in `Edge.Metadata.relation` (`extends`, `implements`, `mixes`, `conforms`, `embeds`). No chunks or vectors — structural only.
 
 The pipeline is format-agnostic: the walker doesn't know what a `.pdf` or `.py` file is — it dispatches to a handler registered for each extension (see [Handlers](handlers.md)).
 
@@ -191,8 +191,9 @@ The graph pass is the second half of `librarian index`. It walks the **workspace
 | Edge kind | From | To | Meaning |
 |---|---|---|---|
 | `contains` | `file:<path>` | `sym:<fqn>` | Symbol lives in this file |
-| `import` | `file:<path>` | `sym:<target>` | File imports the target (per-language semantics) |
-| `call`, `extends`, `implements` | `file:<path>` | `sym:<target>` | Extracted by handlers that emit those ref kinds |
+| `import` | `file:<path>` | `sym:<target>` / `file:<target>` / `ext:<pkg>` | File imports the target (resolver sets `Metadata["node_kind"]` to pick the namespace) |
+| `inherits` | `sym:<child>` | `sym:<parent>` | Class/interface/protocol parent relationship. Source is the child **symbol** (not the file) — `Reference.Source` is populated by the grammar's `inheritanceExtractor`. `Edge.Metadata.relation` ∈ {`extends`, `implements`, `mixes`, `conforms`, `embeds`}. `extends` / `implements` Kind values remain backward-compat aliases in the graph-pass switches but are not emitted by new code. |
+| `call` | `file:<path>` | `sym:<target>` | Reserved; no grammar emits `call` Refs today |
 
 ### Walker filtering
 

@@ -570,3 +570,202 @@ func TestPythonGrammar_MultiNameFromImport(t *testing.T) {
 	}
 }
 
+// --- lib-wji.1: inheritance extraction ---
+
+func TestPythonGrammar_SingleBareBaseFlaggedUnresolved(t *testing.T) {
+	src := []byte(`class Foo(Base):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("t.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"t.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	r := refs[0]
+	if r.Target != "Base" {
+		t.Errorf("Target = %q, want Base", r.Target)
+	}
+	if r.Metadata["relation"] != "extends" {
+		t.Errorf("relation = %v, want extends", r.Metadata["relation"])
+	}
+	if v, _ := r.Metadata["unresolved"].(bool); !v {
+		t.Errorf("expected unresolved=true on bare base; got %+v", r.Metadata)
+	}
+}
+
+func TestPythonGrammar_MultipleInheritance(t *testing.T) {
+	src := []byte(`class Foo(A, B, C):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("multi.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"multi.Foo")
+	if len(refs) != 3 {
+		t.Fatalf("expected 3 bases, got %d (%+v)", len(refs), refs)
+	}
+	seen := map[string]bool{}
+	for _, r := range refs {
+		seen[r.Target] = true
+	}
+	for _, want := range []string{"A", "B", "C"} {
+		if !seen[want] {
+			t.Errorf("missing base %q (got %v)", want, seen)
+		}
+	}
+}
+
+func TestPythonGrammar_KeywordArgumentsAreNotParents(t *testing.T) {
+	src := []byte(`class Meta(Base, metaclass=ABCMeta, total=False):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("meta.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"meta.Meta")
+	if len(refs) != 1 {
+		t.Fatalf("expected only Base as parent (1 ref), got %d: %+v", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base (metaclass/total kwargs filtered)", refs[0].Target)
+	}
+}
+
+func TestPythonGrammar_SubscriptBaseExtractsGeneric(t *testing.T) {
+	src := []byte(`class Stack(Generic[T]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("stack.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"stack.Stack")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Generic" {
+		t.Errorf("Target = %q, want Generic", refs[0].Target)
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 1 || args[0] != "T" {
+		t.Errorf("type_args = %v, want [T]", args)
+	}
+}
+
+func TestPythonGrammar_CallBaseMarkedUnresolvedExpression(t *testing.T) {
+	src := []byte(`class Foo(factory()):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("f.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"f.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref (call fallback), got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "factory" {
+		t.Errorf("Target = %q, want factory (callee identifier fallback)", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved_expression"].(bool); !v {
+		t.Errorf("expected unresolved_expression=true; got metadata %+v", refs[0].Metadata)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("call base should not carry unresolved=true: %+v", refs[0].Metadata)
+	}
+}
+
+func TestPythonGrammar_AttributeBaseDottedAndResolved(t *testing.T) {
+	src := []byte(`class Foo(pkg.subpkg.Base):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("a.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"a.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "pkg.subpkg.Base" {
+		t.Errorf("Target = %q, want pkg.subpkg.Base", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("dotted target should not be marked unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+func TestPythonGrammar_ResolvesBareBaseViaFromImport(t *testing.T) {
+	src := []byte(`from mypkg.bases import Base
+class Foo(Base):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("foo.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"foo.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "mypkg.bases.Base" {
+		t.Errorf("Target = %q, want mypkg.bases.Base (resolved via from-import)", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("resolved ref should not be marked unresolved")
+	}
+}
+
+func TestPythonGrammar_ResolvesAliasedFromImport(t *testing.T) {
+	src := []byte(`from pkg.bases import RealBase as B
+class Foo(B):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("aliased.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"aliased.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "pkg.bases.RealBase" {
+		t.Errorf("Target = %q, want pkg.bases.RealBase (alias B → RealBase)", refs[0].Target)
+	}
+}
+
+func TestPythonGrammar_WildcardImportDoesNotResolveBareParent(t *testing.T) {
+	src := []byte(`from mypkg.bases import *
+class Foo(UnknownBase):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("star.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"star.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "UnknownBase" {
+		t.Errorf("Target = %q, want UnknownBase (wildcard does not bind names)", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); !v {
+		t.Errorf("expected unresolved=true; got %+v", refs[0].Metadata)
+	}
+}
+

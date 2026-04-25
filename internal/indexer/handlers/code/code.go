@@ -32,6 +32,60 @@ type ImportRef struct {
 	Metadata map[string]any
 }
 
+// ParentRef captures one inheritance relationship declared on a class-family
+// symbol (Java class extends/implements, Python class bases, TS class/interface
+// heritage, Go interface embedding). One symbol with multiple parents emits
+// multiple ParentRefs.
+//
+// Name is the parent identifier as it appears in source, post-generic-stripping
+// (e.g., `Map<K,V>` → "Map", with ["K","V"] stashed in Metadata["type_args"]).
+//
+// Relation carries the semantic flavor of the inheritance edge. Reserved
+// values: "extends" (single-parent class / interface-extends-interface),
+// "implements" (Java-style interface conformance), "mixes" (Dart `with`
+// mixins — reserved for lib-wji.3), "conforms" (Swift protocol conformance —
+// reserved for lib-wji.4), "embeds" (Go interface embedding; Go struct
+// embedding deferred to a separate bead).
+//
+// Loc points at the parent identifier within the source, not the class header
+// — so multiple parents on separate lines each carry their own line number.
+//
+// Metadata conventions (optional): "type_args" ([]string of generic parameters),
+// "unresolved" (bool — parent name could not be mapped to a canonical form by
+// same-file import lookup), "unresolved_expression" (bool — base was a call /
+// non-identifier expression, like Python `class Foo(factory()):` or JS
+// `class Foo extends Mixin(Base)`; identifier-only fallback captured).
+type ParentRef struct {
+	Name     string
+	Relation string
+	Loc      indexer.Location
+	Metadata map[string]any
+}
+
+// classFamilyUnitKinds gates the inheritanceExtractor hook: parent extraction
+// is only meaningful for these Unit.Kind values, and skipping the rest saves
+// a tree-sitter subtree walk per method / field / function in the file. Kept
+// here because the walker is the sole invocation site.
+//
+// "type" is included because Go's Unit.Kind for `type X interface {...}` /
+// `type X struct {...}` is "type" (type_spec), and interface embedding is a
+// real inheritance-adjacent construct. Non-interface Go type_specs return nil
+// from GoGrammar.SymbolParents, and other grammars' type-kind aliases
+// (TS type_alias_declaration, Python TypeAlias) also return nil — so the
+// extra gate opens cost nothing for them.
+var classFamilyUnitKinds = map[string]bool{
+	"class":          true,
+	"interface":      true,
+	"abstract_class": true, // reserved — TS abstract_class_declaration currently maps to Unit.Kind="class" via tsOnlySymbolKinds, so this entry doesn't fire today. Kept so a future grammar can emit the distinct kind without gate changes.
+	"enum":           true, // Java enum implements, and future languages
+	"record":         true, // Java records can implement
+	"protocol":       true, // reserved for lib-wji.4 Swift protocols
+	"mixin":          true, // reserved for lib-wji.3 Dart mixins
+	"struct":         true, // reserved for lib-wji.4 Swift structs / future others
+	"object":         true, // reserved for lib-wji.2 Kotlin objects
+	"type":           true, // Go type_spec wrapping interface_type (embedding)
+}
+
 // Grammar encapsulates per-language tree-sitter knowledge. Implementations
 // provide enough information for the shared walker to extract symbols,
 // imports, and their docstrings without the walker knowing anything
@@ -133,6 +187,31 @@ type importResolver interface {
 	ResolveImports(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
 }
 
+// inheritanceExtractor is an optional interface a Grammar implements to
+// surface parent-type relationships declared on a class-family symbol. The
+// walker invokes SymbolParents in buildUnit whenever the symbol's Kind is in
+// classFamilyUnitKinds (class / interface / abstract_class / enum / record /
+// protocol / mixin / struct / object). Each returned ParentRef becomes a
+// ParsedDoc.Reference with Kind="inherits", Source=<containing Unit.Path>,
+// Target=<ParentRef.Name>, and Metadata carrying relation + any
+// grammar-provided keys (type_args, unresolved, unresolved_expression).
+//
+// Grammars that don't implement this are unaffected; the walker type-asserts
+// and only calls it when present.
+type inheritanceExtractor interface {
+	SymbolParents(node *sitter.Node, source []byte) []ParentRef
+}
+
+// inheritanceResolver is an optional interface a Grammar implements when its
+// extracted inherits References need a post-parse rewrite informed by file
+// location or in-file imports. Mirrors importResolver. ParseCtx invokes it
+// after grammar-level inheritance extraction and after ResolveImports (so
+// resolvers can cross-reference the file's import list when available).
+// Grammars that don't implement it are unaffected.
+type inheritanceResolver interface {
+	ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
+}
+
 // CodeHandler implements indexer.FileHandler for a single Grammar.
 type CodeHandler struct {
 	grammar Grammar
@@ -212,6 +291,13 @@ func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseCon
 	h.extractImports(root, content, doc)
 	if r, ok := h.grammar.(importResolver); ok {
 		doc.Refs = r.ResolveImports(doc.Refs, path, ctx)
+	}
+	// ResolveParents runs after ResolveImports so grammars that resolve
+	// inheritance targets by cross-referencing the file's imports
+	// (Java/JS/TS same-file import lookup landing in lib-wji.1 Phase 3-5)
+	// can read canonicalised import targets rather than raw specifiers.
+	if r, ok := h.grammar.(inheritanceResolver); ok {
+		doc.Refs = r.ResolveParents(doc.Refs, path, ctx)
 	}
 	doc.Signals = extractAllCommentSignals(root, content, commentSet)
 
@@ -305,8 +391,9 @@ func (h *CodeHandler) extractUnits(
 			}
 			name := h.grammar.SymbolName(child, source)
 			if name != "" {
-				doc.Units = append(doc.Units,
-					h.buildUnit(child, source, pathPrefix, name, emittedKind, pending))
+				unit := h.buildUnit(child, source, pathPrefix, name, emittedKind, pending)
+				doc.Units = append(doc.Units, unit)
+				h.extractParentRefs(child, source, unit.Path, unit.Kind, doc)
 			}
 			// Hybrid: a node that's also a container has its body descended
 			// into with the symbol's name extending the path. pending is not
@@ -399,6 +486,45 @@ func (h *CodeHandler) buildUnit(
 		}
 	}
 	return unit
+}
+
+// extractParentRefs invokes the grammar's inheritanceExtractor (if any) for a
+// just-emitted class-family symbol and appends one Reference per returned
+// ParentRef to doc.Refs. Kind is "inherits"; Source is the symbol's Unit.Path
+// so the graph pass can anchor the edge at sym:<Source>. Relation + any
+// grammar-provided metadata land on Reference.Metadata.
+//
+// The kind-gate protects the walker from calling into grammars for symbol
+// types where inheritance is meaningless (methods, fields, functions). The
+// allowlist is classFamilyUnitKinds; grammars that need a new kind should add
+// it there rather than overloading SymbolParents with filtering logic.
+func (h *CodeHandler) extractParentRefs(n *sitter.Node, source []byte, unitPath, unitKind string, doc *indexer.ParsedDoc) {
+	if !classFamilyUnitKinds[unitKind] {
+		return
+	}
+	ie, ok := h.grammar.(inheritanceExtractor)
+	if !ok {
+		return
+	}
+	for _, p := range ie.SymbolParents(n, source) {
+		if p.Name == "" {
+			continue
+		}
+		meta := map[string]any{}
+		for k, v := range p.Metadata {
+			meta[k] = v
+		}
+		if p.Relation != "" {
+			meta["relation"] = p.Relation
+		}
+		doc.Refs = append(doc.Refs, indexer.Reference{
+			Kind:     "inherits",
+			Source:   unitPath,
+			Target:   p.Name,
+			Loc:      p.Loc,
+			Metadata: meta,
+		})
+	}
 }
 
 // extractImports runs the grammar's import extractor and appends each as a

@@ -5,6 +5,8 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/java"
+
+	"librarian/internal/indexer"
 )
 
 // JavaGrammar indexes .java source files.
@@ -208,6 +210,202 @@ func (*JavaGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string {
 			if name := javaAnnotationName(c, source); name != "" {
 				out = append(out, name)
 			}
+		}
+	}
+	return out
+}
+
+// SymbolParents implements inheritanceExtractor. It surfaces the inheritance
+// relationships declared on a Java class-family symbol:
+//
+//   - class X extends Y               → Relation="extends" for Y
+//   - class X implements A, B         → Relation="implements" for A, B
+//   - interface I extends J, K        → Relation="extends" for J, K
+//   - record R(...) implements I, J   → Relation="implements" for I, J
+//   - enum  E implements I            → Relation="implements" for I
+//
+// Generics are stripped: `Map<K, V>` lands as Name="Map" with
+// Metadata["type_args"]=["K", "V"]. Nested generics collapse to their outer
+// text ("List<Map<K, V>>" → type_arg "Map<K, V>"); later passes can normalise
+// further if needed.
+//
+// Resolution of bare type names to fully-qualified form (`Base` →
+// `com.example.Base` via the same-file import list) happens in
+// ResolveParents, not here — SymbolParents returns what the source literally
+// declares.
+func (*JavaGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
+	var out []ParentRef
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "superclass":
+			out = append(out, javaParentsFromTypeContainer(c, "extends", source)...)
+		case "super_interfaces":
+			out = append(out, javaParentsFromTypeContainer(c, "implements", source)...)
+		case "extends_interfaces":
+			// interface_declaration's extends clause — interface A extends B
+			// is semantically inheritance ("extends" relation), not
+			// implements.
+			out = append(out, javaParentsFromTypeContainer(c, "extends", source)...)
+		}
+	}
+	return out
+}
+
+// javaParentsFromTypeContainer walks a node that wraps one or more parent
+// types (superclass holds a single _type; super_interfaces /
+// extends_interfaces hold a type_list) and emits one ParentRef per type.
+func javaParentsFromTypeContainer(container *sitter.Node, relation string, source []byte) []ParentRef {
+	var out []ParentRef
+	add := func(t *sitter.Node) {
+		name, args := extractJavaTypeName(t, source)
+		if name == "" {
+			return
+		}
+		meta := map[string]any{}
+		if len(args) > 0 {
+			meta["type_args"] = args
+		}
+		out = append(out, ParentRef{
+			Name:     name,
+			Relation: relation,
+			Loc: indexer.Location{
+				Line:       int(t.StartPoint().Row) + 1,
+				Column:     int(t.StartPoint().Column) + 1,
+				ByteOffset: int(t.StartByte()),
+			},
+			Metadata: meta,
+		})
+	}
+	for i := 0; i < int(container.NamedChildCount()); i++ {
+		c := container.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if c.Type() == "type_list" {
+			for j := 0; j < int(c.NamedChildCount()); j++ {
+				if cc := c.NamedChild(j); cc != nil {
+					add(cc)
+				}
+			}
+			continue
+		}
+		add(c)
+	}
+	return out
+}
+
+// extractJavaTypeName teases a type-name node into (bareName, typeArgs),
+// handling the three shapes tree-sitter-java produces for a type reference:
+//   - type_identifier         → `Foo`
+//   - scoped_type_identifier  → `pkg.Foo` (possibly multi-segment)
+//   - generic_type            → `Foo<T>` wrapping one of the above + type_arguments
+//
+// Other shapes (array_type, primitive_type) are valid _type positions in
+// general Java syntax but never legal in an extends/implements list, so
+// returning "" there silently skips them.
+func extractJavaTypeName(n *sitter.Node, source []byte) (string, []string) {
+	switch n.Type() {
+	case "type_identifier", "scoped_type_identifier":
+		return strings.TrimSpace(n.Content(source)), nil
+	case "generic_type":
+		var name string
+		var args []string
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c == nil {
+				continue
+			}
+			switch c.Type() {
+			case "type_identifier", "scoped_type_identifier":
+				if name == "" {
+					name = strings.TrimSpace(c.Content(source))
+				}
+			case "type_arguments":
+				for j := 0; j < int(c.NamedChildCount()); j++ {
+					cc := c.NamedChild(j)
+					if cc == nil {
+						continue
+					}
+					if t := strings.TrimSpace(cc.Content(source)); t != "" {
+						args = append(args, t)
+					}
+				}
+			}
+		}
+		return name, args
+	}
+	return "", nil
+}
+
+// ResolveParents implements inheritanceResolver. Java parent references that
+// appear as bare class names (`extends BaseService`) are rewritten to their
+// fully-qualified form using the file's own import list — the one that
+// Imports() already populated and extractImports() appended to doc.Refs.
+// Bare names that aren't matched by any single-class import land with
+// Metadata["unresolved"]=true so downstream consumers can tell best-effort
+// edges apart from confident ones.
+//
+// Limitations scoped to lib-wji.1:
+//   - Wildcard imports (`import com.example.*;`) offer no binding for bare
+//     names and are ignored. A later resolver pass across grammars (see the
+//     filed follow-up bead) will use the workspace symbol index for this.
+//   - Same-package siblings (no import needed in Java) are not resolved —
+//     same follow-up.
+//   - Static imports bind methods, not types; they cannot satisfy an
+//     inheritance target and are skipped.
+//
+// Parent targets that already contain '.' are treated as fully-qualified and
+// left alone (the source wrote `extends com.lib.Base` directly).
+func (*JavaGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
+	local := javaLocalTypeImports(refs)
+	for i, r := range refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if strings.Contains(r.Target, ".") {
+			// Already dotted — either an explicit FQN in source or an
+			// earlier pass resolved it.
+			continue
+		}
+		if full, ok := local[r.Target]; ok {
+			refs[i].Target = full
+			continue
+		}
+		if refs[i].Metadata == nil {
+			refs[i].Metadata = map[string]any{}
+		}
+		refs[i].Metadata["unresolved"] = true
+	}
+	return refs
+}
+
+// javaLocalTypeImports builds a shortName → FQN map from Java import
+// references. Static imports and wildcards are excluded: neither binds a
+// bare type identifier to an importable class.
+func javaLocalTypeImports(refs []indexer.Reference) map[string]string {
+	out := map[string]string{}
+	for _, r := range refs {
+		if r.Kind != "import" || r.Target == "" {
+			continue
+		}
+		if strings.HasSuffix(r.Target, ".*") {
+			continue
+		}
+		if r.Metadata != nil {
+			if v, ok := r.Metadata["static"].(bool); ok && v {
+				continue
+			}
+		}
+		// Leaf name — last path segment.
+		if dot := strings.LastIndex(r.Target, "."); dot >= 0 && dot < len(r.Target)-1 {
+			short := r.Target[dot+1:]
+			out[short] = r.Target
+		} else {
+			out[r.Target] = r.Target
 		}
 	}
 	return out

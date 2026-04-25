@@ -5,6 +5,8 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
+
+	"librarian/internal/indexer"
 )
 
 // GoGrammar indexes .go source files.
@@ -77,6 +79,91 @@ func (*GoGrammar) PackageName(root *sitter.Node, source []byte) string {
 		}
 	}
 	return ""
+}
+
+// SymbolParents implements inheritanceExtractor for Go. Scope is deliberately
+// narrow: interface embedding only — `type Reader interface { io.Reader }`
+// produces an `inherits` edge with Relation="embeds" from Reader to io.Reader.
+//
+// Go struct embedding (anonymous fields like `type Service struct { *Handler }`)
+// is composition, not inheritance; it's deferred to lib-ek3 which will decide
+// whether to share `relation=embeds` under the inherits edge kind or to
+// introduce a dedicated `composes` kind.
+//
+// Type aliases and other type_spec shapes return nil — this hook fires for
+// any Unit with Kind="type" (per classFamilyUnitKinds gating) but only
+// interface embedding yields parents.
+func (*GoGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
+	if n.Type() != "type_spec" {
+		return nil
+	}
+	typeField := n.ChildByFieldName("type")
+	if typeField == nil || typeField.Type() != "interface_type" {
+		return nil
+	}
+	return goInterfaceEmbeddings(typeField, source)
+}
+
+// goInterfaceEmbeddings walks an interface_type node's named children and
+// emits one ParentRef per embedded interface. Method specs / method_elem
+// nodes are skipped (those are the interface's own method set, not
+// embeddings). Generic type-set / union constraints (Go 1.18+ `type_elem`
+// with multiple types) are NOT inheritance and are ignored — a `type_elem`
+// that happens to wrap a single bare embedded type is recognised, anything
+// more complex gets skipped.
+func goInterfaceEmbeddings(n *sitter.Node, source []byte) []ParentRef {
+	var out []ParentRef
+	add := func(name string, loc indexer.Location) {
+		if name == "" {
+			return
+		}
+		out = append(out, ParentRef{
+			Name:     strings.TrimSpace(name),
+			Relation: "embeds",
+			Loc:      loc,
+		})
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		loc := indexer.Location{
+			Line:       int(c.StartPoint().Row) + 1,
+			Column:     int(c.StartPoint().Column) + 1,
+			ByteOffset: int(c.StartByte()),
+		}
+		switch c.Type() {
+		case "method_elem", "method_spec":
+			// Interface's own method set — not embedding.
+		case "type_identifier":
+			add(c.Content(source), loc)
+		case "qualified_type":
+			add(c.Content(source), loc)
+		case "type_elem":
+			// Go 1.18+ grammar variant: a type_elem wraps the embedded
+			// type. Only treat it as embedding when it wraps exactly one
+			// identifier/qualified_type child (i.e., not a union like
+			// `int | float64`).
+			if c.NamedChildCount() != 1 {
+				continue
+			}
+			inner := c.NamedChild(0)
+			if inner == nil {
+				continue
+			}
+			innerLoc := indexer.Location{
+				Line:       int(inner.StartPoint().Row) + 1,
+				Column:     int(inner.StartPoint().Column) + 1,
+				ByteOffset: int(inner.StartByte()),
+			}
+			switch inner.Type() {
+			case "type_identifier", "qualified_type":
+				add(inner.Content(source), innerLoc)
+			}
+		}
+	}
+	return out
 }
 
 // Imports returns ImportRefs for every import declaration in the file. Both

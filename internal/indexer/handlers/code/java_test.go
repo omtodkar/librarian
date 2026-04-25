@@ -343,6 +343,228 @@ func TestJavaGrammar_DefaultPackageUsesStem(t *testing.T) {
 	}
 }
 
+// --- lib-wji.1: inheritance extraction ---
+
+// inheritsRefs filters a doc's References down to Kind="inherits" and indexes
+// them by (Source, Target) for precise assertion in the presence of multiple
+// parents per class.
+func inheritsRefs(doc *indexer.ParsedDoc) map[[2]string]indexer.Reference {
+	out := map[[2]string]indexer.Reference{}
+	for _, r := range doc.Refs {
+		if r.Kind == "inherits" {
+			out[[2]string{r.Source, r.Target}] = r
+		}
+	}
+	return out
+}
+
+func TestJavaGrammar_ClassExtendsAndImplements(t *testing.T) {
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("src/AuthService.java", []byte(javaSample))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefs(doc)
+
+	authService := "com.example.auth.AuthService"
+	extendsBase, ok := refs[[2]string{authService, "BaseService"}]
+	if !ok {
+		t.Fatalf("expected inherits ref %s → BaseService; got %+v", authService, refs)
+	}
+	if extendsBase.Metadata["relation"] != "extends" {
+		t.Errorf("extends relation = %v, want \"extends\"", extendsBase.Metadata["relation"])
+	}
+
+	implAuth, ok := refs[[2]string{authService, "Authenticator"}]
+	if !ok {
+		t.Fatalf("expected inherits ref %s → Authenticator; got %+v", authService, refs)
+	}
+	if implAuth.Metadata["relation"] != "implements" {
+		t.Errorf("implements relation = %v, want \"implements\"", implAuth.Metadata["relation"])
+	}
+}
+
+func TestJavaGrammar_SourceIsContainingSymbolPath(t *testing.T) {
+	// The ref.Source field is what lets the graph pass anchor inherits edges
+	// at sym:<Source> — if it drifts from the Unit.Path, edges point at
+	// phantom nodes. AssertGrammarInvariants already enforces this, but the
+	// dedicated test documents the contract.
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("t.java", []byte(javaSample))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	unitPaths := map[string]bool{}
+	for _, u := range doc.Units {
+		unitPaths[u.Path] = true
+	}
+	for _, r := range doc.Refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if r.Source == "" {
+			t.Errorf("inherits ref has empty Source: %+v", r)
+			continue
+		}
+		if !unitPaths[r.Source] {
+			t.Errorf("inherits ref Source %q does not match any Unit.Path", r.Source)
+		}
+	}
+}
+
+func TestJavaGrammar_InterfaceExtendsMultiple(t *testing.T) {
+	src := []byte(`package com.example;
+
+interface Login { void login(); }
+interface Logout { void logout(); }
+interface Auth extends Login, Logout { boolean ok(); }
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("Auth.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefs(doc)
+	auth := "com.example.Auth"
+	for _, want := range []string{"Login", "Logout"} {
+		r, ok := refs[[2]string{auth, want}]
+		if !ok {
+			t.Errorf("missing inherits ref %s → %s (got %+v)", auth, want, refs)
+			continue
+		}
+		if r.Metadata["relation"] != "extends" {
+			t.Errorf("%s → %s relation = %v, want \"extends\" (interface-extends-interface)", auth, want, r.Metadata["relation"])
+		}
+	}
+}
+
+func TestJavaGrammar_RecordAndEnumImplements(t *testing.T) {
+	src := []byte(`package com.example;
+
+import java.io.Serializable;
+
+record Pair(String a, int b) implements Comparable, Serializable {}
+enum Status implements Displayable { ACTIVE, INACTIVE; }
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("Types.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefs(doc)
+
+	for _, want := range []string{"Comparable", "java.io.Serializable"} {
+		r, ok := refs[[2]string{"com.example.Pair", want}]
+		if !ok {
+			t.Errorf("missing record implements %q (got %+v)", want, refs)
+			continue
+		}
+		if r.Metadata["relation"] != "implements" {
+			t.Errorf("record implements relation = %v", r.Metadata["relation"])
+		}
+	}
+	if _, ok := refs[[2]string{"com.example.Status", "Displayable"}]; !ok {
+		t.Errorf("missing enum implements Displayable (got %+v)", refs)
+	}
+}
+
+func TestJavaGrammar_StripsGenericsAndCapturesTypeArgs(t *testing.T) {
+	src := []byte(`package com.example;
+
+import java.util.HashMap;
+
+public class Cache<K, V> extends HashMap<K, V> {}
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("Cache.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefs(doc)
+	r, ok := refs[[2]string{"com.example.Cache", "java.util.HashMap"}]
+	if !ok {
+		t.Fatalf("expected resolved HashMap parent (got %+v)", refs)
+	}
+	args, _ := r.Metadata["type_args"].([]string)
+	if len(args) != 2 || args[0] != "K" || args[1] != "V" {
+		t.Errorf("type_args = %v, want [K V]", args)
+	}
+}
+
+// Same-file import lookup: `class X extends BaseService` + `import
+// com.acme.BaseService;` → inherits target is the FQN, not the bare name.
+func TestJavaGrammar_ResolvesBareNameViaSameFileImport(t *testing.T) {
+	src := []byte(`package com.example;
+
+import com.acme.auth.BaseService;
+
+public class AuthService extends BaseService {}
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("AuthService.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefs(doc)
+	if _, ok := refs[[2]string{"com.example.AuthService", "com.acme.auth.BaseService"}]; !ok {
+		t.Errorf("expected bare `BaseService` resolved to com.acme.auth.BaseService; got %+v", refs)
+	}
+	// And the raw "BaseService" Target must not survive.
+	for key, r := range refs {
+		if r.Source == "com.example.AuthService" && r.Target == "BaseService" {
+			t.Errorf("unresolved bare ref should have been rewritten: %v", key)
+		}
+	}
+}
+
+// Wildcard + static imports do NOT provide a bare-name binding — bare
+// parents with no matching single-class import land as unresolved.
+func TestJavaGrammar_UnresolvedBareNameFlagged(t *testing.T) {
+	src := []byte(`package com.example;
+
+import com.acme.util.*;
+import static java.util.Collections.emptyList;
+
+public class Unknown extends MystificationBase {}
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("Unknown.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefs(doc)
+	r, ok := refs[[2]string{"com.example.Unknown", "MystificationBase"}]
+	if !ok {
+		t.Fatalf("expected bare MystificationBase target (got %+v)", refs)
+	}
+	v, _ := r.Metadata["unresolved"].(bool)
+	if !v {
+		t.Errorf("expected unresolved=true on bare-target ref with no matching import; got metadata %+v", r.Metadata)
+	}
+}
+
+// Explicit FQN in source: the Target already contains '.' so resolution is
+// a no-op and `unresolved` must NOT be set.
+func TestJavaGrammar_ExplicitFQNNotMarkedUnresolved(t *testing.T) {
+	src := []byte(`package com.example;
+
+public class Anchored extends com.other.Library.Base {}
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("Anchored.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefs(doc)
+	r, ok := refs[[2]string{"com.example.Anchored", "com.other.Library.Base"}]
+	if !ok {
+		t.Fatalf("expected explicit FQN target (got %+v)", refs)
+	}
+	if v, _ := r.Metadata["unresolved"].(bool); v {
+		t.Errorf("explicit FQN should not be marked unresolved: %+v", r.Metadata)
+	}
+}
+
 // Empty file must parse cleanly (no panic, no Units, no chunks).
 func TestJavaGrammar_EmptyFile(t *testing.T) {
 	h := code.New(code.NewJavaGrammar())

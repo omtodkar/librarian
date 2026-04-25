@@ -469,3 +469,139 @@ func X() {}
 		}
 	}
 }
+
+// --- lib-wji.1: interface embedding ---
+
+// Single embedded interface: `type Reader interface { io.Reader }`.
+// Relation is "embeds" — distinct from Java/TS "extends" so struct embedding
+// (lib-ek3) can reuse the same relation vocabulary cleanly.
+func TestGoGrammar_SingleInterfaceEmbedding(t *testing.T) {
+	src := []byte(`package s
+
+type Reader interface {
+	io.Reader
+	ReadOne() (byte, error)
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"s.Reader")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 embedded interface, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "io.Reader" {
+		t.Errorf("Target = %q, want io.Reader", refs[0].Target)
+	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
+	}
+}
+
+// Multiple embedded interfaces mixed with method specs. Method specs must
+// not leak into inherits refs.
+func TestGoGrammar_MultipleInterfaceEmbeddings(t *testing.T) {
+	src := []byte(`package s
+
+type ReadWriter interface {
+	io.Reader
+	io.Writer
+	Close() error
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"s.ReadWriter")
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 embeddings, got %d (%+v)", len(refs), refs)
+	}
+	seen := map[string]bool{}
+	for _, r := range refs {
+		seen[r.Target] = true
+	}
+	for _, want := range []string{"io.Reader", "io.Writer"} {
+		if !seen[want] {
+			t.Errorf("missing embedded interface %q (got %v)", want, seen)
+		}
+	}
+}
+
+// Bare-name embedding (same-package interface): `type X interface { Base }`.
+func TestGoGrammar_BareInterfaceEmbedding(t *testing.T) {
+	src := []byte(`package s
+
+type Base interface {
+	Do()
+}
+
+type X interface {
+	Base
+	Extra()
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"s.X")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 embedded interface, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+}
+
+// Struct definitions produce Kind="type" Units but must NOT emit inherits
+// edges — struct embedding is deferred to lib-ek3.
+func TestGoGrammar_StructEmbeddingNotEmittedYet(t *testing.T) {
+	src := []byte(`package s
+
+type Base struct{}
+
+type Service struct {
+	Base
+	db *DB
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"s.Service")
+	if len(refs) != 0 {
+		t.Fatalf("struct embedding should not emit inherits refs in lib-wji.1 (deferred to lib-ek3); got %+v", refs)
+	}
+}
+
+// Type aliases: `type Foo = int` (type_alias) and `type Bar int` (type_spec
+// with a non-interface type) both produce Kind="type" Units but no parents.
+func TestGoGrammar_NonInterfaceTypeSpecsYieldNoParents(t *testing.T) {
+	src := []byte(`package s
+
+type MyInt int
+type MyString = string
+type MyFn func(int) int
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, u := range doc.Units {
+		if u.Kind != "type" {
+			continue
+		}
+		refs := inheritsRefsBySource(doc,u.Path)
+		if len(refs) != 0 {
+			t.Errorf("non-interface type %q produced inherits refs: %+v", u.Path, refs)
+		}
+	}
+}

@@ -190,3 +190,130 @@ func TestGraph_FindNodes(t *testing.T) {
 		t.Errorf("exact id lookup failed: %+v", exact)
 	}
 }
+
+func TestGraph_UpsertPlaceholderNode_DoesNotOverwrite(t *testing.T) {
+	// Regression test for the ordering bug described in
+	// UpsertPlaceholderNode's godoc: a later UpsertPlaceholderNode call for
+	// an already-indexed real symbol must not overwrite the real row with
+	// placeholder values (including metadata={"unresolved":true}).
+	s := newTestStore(t)
+	real := Node{
+		ID:         "sym:com.example.Base",
+		Kind:       NodeKindSymbol,
+		Label:      "Base",
+		SourcePath: "src/Base.java",
+		Metadata:   "{}",
+	}
+	if err := s.UpsertNode(real); err != nil {
+		t.Fatalf("UpsertNode (real): %v", err)
+	}
+
+	placeholder := Node{
+		ID:         "sym:com.example.Base",
+		Kind:       NodeKindSymbol,
+		Label:      "Base", // raw target name, not the qualified label
+		SourcePath: "Base",
+		Metadata:   `{"unresolved":true}`,
+	}
+	if err := s.UpsertPlaceholderNode(placeholder); err != nil {
+		t.Fatalf("UpsertPlaceholderNode: %v", err)
+	}
+
+	got, err := s.GetNode("sym:com.example.Base")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected node, got nil")
+	}
+	if got.SourcePath != "src/Base.java" {
+		t.Errorf("SourcePath overwritten: got %q, want %q (placeholder must not clobber real row)", got.SourcePath, "src/Base.java")
+	}
+	if got.Metadata != "{}" {
+		t.Errorf("Metadata overwritten: got %q, want %q (placeholder must not poison real node with unresolved=true)", got.Metadata, "{}")
+	}
+}
+
+func TestGraph_UpsertPlaceholderNode_InsertsWhenAbsent(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.UpsertPlaceholderNode(Node{
+		ID:         "sym:unresolved.Parent",
+		Kind:       NodeKindSymbol,
+		Label:      "Parent",
+		SourcePath: "Parent",
+		Metadata:   `{"unresolved":true}`,
+	}); err != nil {
+		t.Fatalf("UpsertPlaceholderNode: %v", err)
+	}
+
+	got, err := s.GetNode("sym:unresolved.Parent")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected node after placeholder insert")
+	}
+	if got.Metadata != `{"unresolved":true}` {
+		t.Errorf("placeholder metadata = %q, want %q", got.Metadata, `{"unresolved":true}`)
+	}
+}
+
+func TestGraph_Neighbors_KindFilter(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []string{"sym:Child", "sym:Base", "sym:Iface"} {
+		s.UpsertNode(Node{ID: id, Kind: NodeKindSymbol})
+	}
+	s.UpsertEdge(Edge{From: "sym:Child", To: "sym:Base", Kind: EdgeKindInherits, Metadata: `{"relation":"extends"}`})
+	s.UpsertEdge(Edge{From: "sym:Child", To: "sym:Iface", Kind: EdgeKindInherits, Metadata: `{"relation":"implements"}`})
+	s.UpsertEdge(Edge{From: "sym:Child", To: "sym:Base", Kind: "call"})
+
+	// No filter: all three edges.
+	all, err := s.Neighbors("sym:Child", "out")
+	if err != nil {
+		t.Fatalf("Neighbors (no filter): %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("no-filter edges = %d, want 3", len(all))
+	}
+
+	// Single kind filter.
+	only, err := s.Neighbors("sym:Child", "out", EdgeKindInherits)
+	if err != nil {
+		t.Fatalf("Neighbors (inherits): %v", err)
+	}
+	if len(only) != 2 {
+		t.Errorf("inherits-only edges = %d, want 2", len(only))
+	}
+	for _, e := range only {
+		if e.Kind != EdgeKindInherits {
+			t.Errorf("unexpected kind in filtered result: %q", e.Kind)
+		}
+	}
+
+	// Multi-kind filter.
+	multi, err := s.Neighbors("sym:Child", "out", EdgeKindInherits, "call")
+	if err != nil {
+		t.Fatalf("Neighbors (inherits+call): %v", err)
+	}
+	if len(multi) != 3 {
+		t.Errorf("multi-kind edges = %d, want 3", len(multi))
+	}
+
+	// Empty-string kinds are stripped (CLI-flag-safe).
+	empty, err := s.Neighbors("sym:Child", "out", "")
+	if err != nil {
+		t.Fatalf("Neighbors (empty kind): %v", err)
+	}
+	if len(empty) != 3 {
+		t.Errorf("empty-kind filter edges = %d, want 3 (empty strings should be stripped, not used as a filter)", len(empty))
+	}
+
+	// Unknown kind returns nothing without error.
+	none, err := s.Neighbors("sym:Child", "out", "unknown_kind")
+	if err != nil {
+		t.Fatalf("Neighbors (unknown): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("unknown-kind filter edges = %d, want 0", len(none))
+	}
+}

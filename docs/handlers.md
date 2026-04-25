@@ -30,7 +30,7 @@ The four shapes every handler produces:
 | `ParsedDoc` | Document-level: title, format, doc type, headings list, frontmatter, units, references, signals |
 | `Unit` | Hierarchical content node: kind, title, path, content, signals, children. Kinds are listed below |
 | `Signal` | Typed marker on a doc or unit: warnings, decisions, TODOs, rationale, code annotations, emphasis |
-| `Reference` | Outbound link from this doc: `import`, `code-file`, `call`, `extends`, `doc-link`, `config-key` |
+| `Reference` | Outbound link from this doc: `import`, `code-file`, `call`, `inherits`, `doc-link`, `config-key`. `inherits` carries `Metadata.relation ∈ {extends, implements, mixes, conforms, embeds}` and a populated `Source` field so the graph pass anchors the edge at `sym:<Source>` rather than the file. Legacy `extends`/`implements` Kind values remain backward-compatible aliases in the graph-pass switches |
 
 ### Unit kinds
 
@@ -79,14 +79,22 @@ Tree-sitter powered. Six languages share one `CodeHandler` wrapping per-language
 
 | Grammar | Extensions | Emits |
 |---|---|---|
-| Go | `.go` | function, method, type, const/var decl, package, imports |
-| Python | `.py` | function, method (incl. async), class, type (PEP 695 + PEP 613), decorator signals |
-| Java | `.java` | class, interface, enum, record, method, constructor, field, `@annotation` signals |
-| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | function, arrow-fn, class, method, export |
-| TypeScript | `.ts` | everything above + interface, enum, type, abstract class, method signature |
+| Go | `.go` | function, method, type, const/var decl, package, imports, **interface embedding** (`inherits` with `relation=embeds`) |
+| Python | `.py` | function, method (incl. async), class, type (PEP 695 + PEP 613), decorator signals, **class bases** (`inherits` with `relation=extends`; metaclass/total kwargs filtered; dot-relative resolver) |
+| Java | `.java` | class, interface, enum, record, method, constructor, field, `@annotation` signals, **extends/implements** (`inherits`; same-file-import bare-name resolution) |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | function, arrow-fn, class, method, export, **class extends** (`inherits`; call-expression mixin fallback with `unresolved_expression=true`) |
+| TypeScript | `.ts` | everything above + interface, enum, type, abstract class, method signature, **class/interface extends + implements** |
 | TSX | `.tsx` | TypeScript + JSX |
 
 Each grammar implements the `Grammar` interface: AST node kinds mapped to Unit kinds, symbol name extraction, docstring extraction, import shapes, optional annotation + extra-signal extractors. The shared walker handles comment buffering (docstrings), container descent (class bodies), and rationale signal extraction (TODO/FIXME/HACK/XXX).
+
+Optional extractor interfaces a grammar may satisfy (type-asserted by the walker; grammars that don't implement them are unaffected):
+
+- `annotationExtractor` — surfaces Java `@Deprecated`, TS decorators, etc. as `Signal{Kind="annotation"}`.
+- `extraSignalsExtractor` — adds per-symbol signals of any Kind (JS/TS uses this for `exported` / `default-export` labels).
+- `importResolver` — post-parse rewrite of import References (Python relative-import resolution, JS/TS module path resolution).
+- `inheritanceExtractor` — surfaces class-family parent relationships; the walker converts returned `ParentRef`s into `Reference{Kind="inherits"}` with `Source=<child Unit.Path>`, `Target=<parent name>`, and `Metadata.relation`.
+- `inheritanceResolver` — post-parse rewrite of inherits References (Java/JS/TS same-file-import bare-name lookup; Python dot-relative + from-import binding lookup). Runs AFTER `importResolver` so import targets are already in canonical form.
 
 #### Python relative-import resolver
 

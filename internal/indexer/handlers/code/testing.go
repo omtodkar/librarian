@@ -34,6 +34,12 @@ import (
 //   - For Python grammar: Reference.Target never starts with '.' or contains
 //     '..' (relative-import form). Grammar-gated because JS/TS legitimately
 //     emits leading-dot module specifiers today; widen as resolvers land.
+//   - Every Reference with a populated Source has Source matching the Path of
+//     some Unit in the same ParsedDoc — grammars that implement
+//     inheritanceExtractor (lib-wji.1+) use Source to anchor graph edges at
+//     sym:<Source>, and a mismatched Source would produce an edge whose
+//     from_node points at a phantom symbol. joinPath bugs in per-language
+//     grammar implementations are caught here cheaply.
 //   - Chunk returns without error and produces chunks whose SectionHeading
 //     is non-empty.
 //   - Grammar.CommentNodeTypes returns at least one entry (otherwise the
@@ -85,7 +91,15 @@ func AssertGrammarInvariants(t *testing.T, h *CodeHandler, path string, src []by
 		}
 	}
 
+	unitPaths := make(map[string]bool, len(doc.Units))
+	for _, u := range doc.Units {
+		unitPaths[u.Path] = true
+	}
 	for _, r := range doc.Refs {
+		if r.Source != "" && !unitPaths[r.Source] {
+			t.Errorf("Reference %+v: Source %q does not match any Unit.Path in the doc (possible joinPath bug in grammar)",
+				r, r.Source)
+		}
 		if r.Kind != "import" {
 			continue
 		}

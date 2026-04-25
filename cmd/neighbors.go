@@ -12,6 +12,7 @@ import (
 var (
 	neighborsDirection string
 	neighborsJSON      bool
+	neighborsEdgeKinds []string
 )
 
 var neighborsCmd = &cobra.Command{
@@ -19,7 +20,11 @@ var neighborsCmd = &cobra.Command{
 	Short: "Show immediate graph neighbors of a node",
 	Long: `Prints nodes one edge away from the given node. Accepts an exact node id
 (e.g. "doc:abc-123", "file:internal/auth/service.go") or any substring of a
-label or source path; ambiguous matches are listed for disambiguation.`,
+label or source path; ambiguous matches are listed for disambiguation.
+
+--edge-kind filters the result to the given edge kind(s). Repeat the flag to
+accept multiple kinds (e.g. --edge-kind=inherits --edge-kind=contains). When
+omitted, every incident edge is returned.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runNeighbors,
 }
@@ -27,6 +32,7 @@ label or source path; ambiguous matches are listed for disambiguation.`,
 func init() {
 	neighborsCmd.Flags().StringVar(&neighborsDirection, "direction", "both", "Edge direction: 'out', 'in', or 'both'")
 	neighborsCmd.Flags().BoolVar(&neighborsJSON, "json", false, "Output as JSON")
+	neighborsCmd.Flags().StringSliceVar(&neighborsEdgeKinds, "edge-kind", nil, "Filter to edges of the given kind (repeatable): inherits, contains, import, mentions, shared_code_ref, call")
 	rootCmd.AddCommand(neighborsCmd)
 }
 
@@ -50,7 +56,7 @@ func runNeighbors(cmd *cobra.Command, args []string) error {
 		dir = ""
 	}
 
-	edges, err := s.Neighbors(node.ID, dir)
+	edges, err := s.Neighbors(node.ID, dir, neighborsEdgeKinds...)
 	if err != nil {
 		return fmt.Errorf("neighbors: %w", err)
 	}
@@ -60,6 +66,9 @@ func runNeighbors(cmd *cobra.Command, args []string) error {
 			"node":      node,
 			"direction": neighborsDirection,
 			"edges":     edges,
+		}
+		if len(neighborsEdgeKinds) > 0 {
+			out["edge_kinds"] = neighborsEdgeKinds
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))

@@ -1,6 +1,9 @@
 package code
 
 import (
+	"path/filepath"
+	"strings"
+
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/javascript"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
@@ -303,6 +306,296 @@ func extractJSImports(n *sitter.Node, source []byte) []ImportRef {
 		}
 	}
 	return out
+}
+
+// SymbolParents implements inheritanceExtractor. Covers:
+//   - JS class_declaration:       `extends` (class_heritage node)
+//   - TS class_declaration:       `extends` + `implements` (implements_clause)
+//   - TS abstract_class_declaration: same shape as TS class_declaration
+//   - TS interface_declaration:   `extends` (extends_type_clause)
+//
+// In JS, `class_heritage` wraps a single _expression child — the parent can
+// be an identifier, a member_expression (`pkg.Foo`), a call_expression
+// (mixin-application like `Mixin(Base)`), or a generic_type instantiation in
+// TS. The helper jsExtractParent handles each shape, falling back to the
+// callee identifier with unresolved_expression=true when the parent is a
+// call (full mixin handling is deferred to lib-ap8).
+func (g *jsLikeGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
+	switch n.Type() {
+	case "class_declaration", "abstract_class_declaration":
+		return jsClassParents(n, source)
+	case "interface_declaration":
+		if !g.supportsTypes {
+			return nil
+		}
+		return jsInterfaceParents(n, source)
+	}
+	return nil
+}
+
+// jsClassParents walks a class_declaration / abstract_class_declaration for
+// inheritance information. Shape differs between JS and TS:
+//
+//   - tree-sitter-javascript: class_declaration has a class_heritage child
+//     whose named children are the `extends` expressions directly.
+//   - tree-sitter-typescript: class_declaration has a class_heritage child
+//     that WRAPS an extends_clause and/or implements_clause. The actual
+//     parent types live inside those clauses.
+//
+// Unified walker: descend one level into class_heritage; for each child,
+// either recognise extends_clause / implements_clause (TS case) or treat
+// the child itself as an extends parent (JS case).
+func jsClassParents(n *sitter.Node, source []byte) []ParentRef {
+	var out []ParentRef
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "class_heritage":
+			for j := 0; j < int(c.NamedChildCount()); j++ {
+				inner := c.NamedChild(j)
+				if inner == nil {
+					continue
+				}
+				switch inner.Type() {
+				case "extends_clause":
+					for k := 0; k < int(inner.NamedChildCount()); k++ {
+						if p := jsMakeParent(inner.NamedChild(k), "extends", source); p != nil {
+							out = append(out, *p)
+						}
+					}
+				case "implements_clause":
+					for k := 0; k < int(inner.NamedChildCount()); k++ {
+						if p := jsMakeParent(inner.NamedChild(k), "implements", source); p != nil {
+							out = append(out, *p)
+						}
+					}
+				default:
+					// JS: class_heritage's named child is the extends
+					// expression directly (identifier / member_expression /
+					// call_expression).
+					if p := jsMakeParent(inner, "extends", source); p != nil {
+						out = append(out, *p)
+					}
+				}
+			}
+		case "implements_clause":
+			// Defensive: some grammar variants expose implements_clause as
+			// a sibling of class_heritage rather than a child. Handling both
+			// shapes keeps us robust across tree-sitter-typescript versions.
+			for j := 0; j < int(c.NamedChildCount()); j++ {
+				if p := jsMakeParent(c.NamedChild(j), "implements", source); p != nil {
+					out = append(out, *p)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// jsInterfaceParents walks a TS interface_declaration for its extends clause
+// (`interface Foo extends A, B`). The container node type is
+// extends_type_clause in the tree-sitter-typescript grammar.
+func jsInterfaceParents(n *sitter.Node, source []byte) []ParentRef {
+	var out []ParentRef
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if c.Type() != "extends_type_clause" && c.Type() != "extends_clause" {
+			continue
+		}
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			if p := jsMakeParent(c.NamedChild(j), "extends", source); p != nil {
+				out = append(out, *p)
+			}
+		}
+	}
+	return out
+}
+
+// jsMakeParent turns a single parent-type node into a ParentRef. Returns nil
+// when the node's shape doesn't yield a usable name (e.g., a bare `extends`
+// keyword child picked up by NamedChild, or an unsupported expression form).
+func jsMakeParent(c *sitter.Node, relation string, source []byte) *ParentRef {
+	if c == nil {
+		return nil
+	}
+	name, typeArgs, unresolvedExpr := jsExtractParent(c, source)
+	if name == "" {
+		return nil
+	}
+	loc := indexer.Location{
+		Line:       int(c.StartPoint().Row) + 1,
+		Column:     int(c.StartPoint().Column) + 1,
+		ByteOffset: int(c.StartByte()),
+	}
+	meta := map[string]any{}
+	if len(typeArgs) > 0 {
+		meta["type_args"] = typeArgs
+	}
+	if unresolvedExpr {
+		meta["unresolved_expression"] = true
+	}
+	return &ParentRef{Name: name, Relation: relation, Loc: loc, Metadata: meta}
+}
+
+// jsExtractParent teases a JS/TS parent-type node into (name, typeArgs,
+// unresolvedExpr). Recognises identifier / member_expression for JS class
+// extends; type_identifier / nested_type_identifier / generic_type for TS
+// implements / interface-extends clauses; and call_expression for the
+// mixin-application fallback.
+func jsExtractParent(n *sitter.Node, source []byte) (string, []string, bool) {
+	switch n.Type() {
+	case "identifier", "type_identifier", "nested_type_identifier":
+		return strings.TrimSpace(n.Content(source)), nil, false
+	case "member_expression":
+		// JS `extends pkg.Foo` — dotted identifier chain. Content includes
+		// the full chain; consumers treat dotted targets as already-qualified.
+		return strings.TrimSpace(n.Content(source)), nil, false
+	case "generic_type":
+		// TS `Foo<T, U>` — named "name" field carries the type identifier,
+		// and type_arguments hold the args.
+		var name string
+		var args []string
+		if nm := n.ChildByFieldName("name"); nm != nil {
+			name = strings.TrimSpace(nm.Content(source))
+		}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c == nil || c.Type() != "type_arguments" {
+				continue
+			}
+			for j := 0; j < int(c.NamedChildCount()); j++ {
+				if a := c.NamedChild(j); a != nil {
+					if t := strings.TrimSpace(a.Content(source)); t != "" {
+						args = append(args, t)
+					}
+				}
+			}
+		}
+		if name == "" {
+			// Grammar variant: name may not be a field. Fall back to first
+			// type_identifier / nested_type_identifier child.
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if c == nil {
+					continue
+				}
+				if c.Type() == "type_identifier" || c.Type() == "nested_type_identifier" {
+					name = strings.TrimSpace(c.Content(source))
+					break
+				}
+			}
+		}
+		return name, args, false
+	case "call_expression":
+		// Mixin-application pattern: `class Foo extends Mixin(Base)`. Full
+		// handling lives in lib-ap8; here we fall back to the callee
+		// identifier so SOMETHING lands in the graph with a clear marker.
+		fn := n.ChildByFieldName("function")
+		if fn == nil {
+			return "", nil, true
+		}
+		return strings.TrimSpace(fn.Content(source)), nil, true
+	}
+	return "", nil, false
+}
+
+// ResolveParents implements inheritanceResolver for JS/TS. Mirrors the Java
+// same-file-import strategy: bare parent names get rewritten to
+// `<module_stem>.<member>` when the file imports the matching symbol, and
+// otherwise land with Metadata["unresolved"]=true.
+//
+// JS imports are varied; this resolver handles the common cases:
+//   - Named import  (`import { Foo } from './utils'`)        → local "Foo"  → canonical "utils.Foo"
+//   - Named aliased (`import { Foo as F } from './utils'`)   → local "F"    → canonical "utils.Foo"
+//   - Default       (`import foo from './utils'`)            → left unresolved (the default export's real name is unknown at parse time — lib-38i will handle this).
+//   - Namespace     (`import * as ns from './utils'`)        → reference would be `ns.Foo` (dotted, skipped).
+//
+// npm packages (external node_kind) don't participate: the imported symbol
+// lives outside the workspace and has no sym: node to point at.
+func (*jsLikeGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
+	local := jsLocalNamedBindings(refs)
+	for i, r := range refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if r.Metadata != nil {
+			if v, _ := r.Metadata["unresolved_expression"].(bool); v {
+				continue
+			}
+		}
+		if strings.Contains(r.Target, ".") {
+			continue
+		}
+		if full, ok := local[r.Target]; ok {
+			refs[i].Target = full
+			continue
+		}
+		if refs[i].Metadata == nil {
+			refs[i].Metadata = map[string]any{}
+		}
+		refs[i].Metadata["unresolved"] = true
+	}
+	return refs
+}
+
+// jsLocalNamedBindings builds the local-name → canonical-symbol map from JS
+// import Refs. Only named imports participate (default/namespace/external
+// bindings don't map cleanly to sym: ids — see ResolveParents godoc).
+//
+// For a ref with Metadata["member"]="Foo" and Path="src/utils.ts":
+//   - local name = alias (if set) else member ("Foo" or "F" for `Foo as F`)
+//   - canonical  = stem("src/utils.ts") + "." + member = "utils.Foo"
+//
+// The stem comes from the final path segment minus its extension, matching
+// the Unit.Path prefix the stem-fallback path uses for files without a
+// package clause (see code.go ParseCtx).
+func jsLocalNamedBindings(refs []indexer.Reference) map[string]string {
+	out := map[string]string{}
+	for _, r := range refs {
+		if r.Kind != "import" || r.Target == "" || r.Metadata == nil {
+			continue
+		}
+		member, ok := r.Metadata["member"].(string)
+		if !ok || member == "" {
+			continue
+		}
+		// Skip npm-external named imports — canonical target for those is
+		// ext:<pkg>, not a sym: path, so a bare parent reference to them
+		// should stay unresolved anyway.
+		if k, _ := r.Metadata["node_kind"].(string); k == "external" {
+			continue
+		}
+		local := member
+		if alias, _ := r.Metadata["alias"].(string); alias != "" {
+			local = alias
+		}
+		stem := jsModuleStem(r.Target)
+		if stem == "" {
+			continue
+		}
+		if _, seen := out[local]; seen {
+			continue
+		}
+		out[local] = stem + "." + member
+	}
+	return out
+}
+
+// jsModuleStem returns the basename-without-extension of a resolved module
+// path: "src/utils.ts" → "utils", "index.ts" → "index",
+// "./foo/bar.tsx" → "bar". Empty input returns empty.
+func jsModuleStem(modulePath string) string {
+	if modulePath == "" {
+		return ""
+	}
+	base := filepath.Base(modulePath)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // SymbolExtraSignals emits label signals for exported symbols. Top-level

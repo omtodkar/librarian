@@ -19,6 +19,7 @@ const (
 	EdgeKindMentions      = "mentions"        // document → code_file
 	EdgeKindSharedCodeRef = "shared_code_ref" // document → document (both mention same code file)
 	EdgeKindContains      = "contains"        // code_file → symbol (graph pass projects each parsed Unit into a symbol node tied to its file via this edge)
+	EdgeKindInherits      = "inherits"        // symbol → symbol (class/interface/protocol parent; Edge.Metadata carries a "relation" of extends/implements/mixes/conforms/embeds)
 )
 
 // Graph node kinds. Additional kinds will land as new handlers emit richer
@@ -115,6 +116,42 @@ func (s *Store) UpsertNode(n Node) error {
 		n.ID, n.Kind, n.Label, nullString(n.SourcePath), n.Metadata)
 	if err != nil {
 		return fmt.Errorf("upsert_node: %w", err)
+	}
+	return nil
+}
+
+// UpsertPlaceholderNode inserts a node row IF AND ONLY IF no row with the
+// same id already exists. Unlike UpsertNode (which rewrites label / source_path /
+// metadata on conflict via ON CONFLICT DO UPDATE), a conflict here is a no-op —
+// the existing row's data is preserved in full.
+//
+// Intended for the graph pass's reference-projection loop, where an outbound
+// Reference.Target may or may not correspond to a real, already-indexed symbol:
+//
+//   - If the target is known (its own file's symbol-projection pass already ran
+//     UpsertNode with kind=symbol and source_path=<file>), this call leaves the
+//     real node's metadata intact. Avoids the "unresolved=true flag silently
+//     poisons a resolved symbol's node" ordering bug: a Reference.Metadata with
+//     unresolved=true would otherwise overwrite the real node's clean metadata
+//     whenever the referencing file is walked after the defining file.
+//   - If the target is unknown, the placeholder row is written with whatever
+//     label / source_path / metadata the caller supplies, and a later
+//     symbol-projection pass on the defining file can upgrade it via UpsertNode.
+//
+// The ON CONFLICT DO NOTHING form is SQLite-native (≥ 3.24) and keeps the row's
+// identity stable — FK-dependent graph_edges remain intact, same guarantee
+// UpsertNode's godoc describes.
+func (s *Store) UpsertPlaceholderNode(n Node) error {
+	if n.Metadata == "" {
+		n.Metadata = "{}"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO graph_nodes (id, kind, label, source_path, metadata)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO NOTHING`,
+		n.ID, n.Kind, n.Label, nullString(n.SourcePath), n.Metadata)
+	if err != nil {
+		return fmt.Errorf("upsert_placeholder_node: %w", err)
 	}
 	return nil
 }
@@ -237,19 +274,49 @@ func (s *Store) ListEdges() ([]Edge, error) {
 
 // Neighbors returns edges incident to nodeID.
 // direction: "out" (outgoing only), "in" (incoming only), "" or "both" (both directions).
-func (s *Store) Neighbors(nodeID, direction string) ([]Edge, error) {
-	var query string
+// kinds: optional variadic edge-kind filter. Zero kinds = no filter (returns every
+// edge, backwards-compat with the original two-arg call site). Multiple kinds use
+// SQL `kind IN (...)`. Empty strings in the filter are ignored.
+func (s *Store) Neighbors(nodeID, direction string, kinds ...string) ([]Edge, error) {
+	var base string
 	var args []any
 	switch direction {
 	case "out":
-		query = `SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE from_node = ?`
+		base = `SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE from_node = ?`
 		args = []any{nodeID}
 	case "in":
-		query = `SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE to_node = ?`
+		base = `SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE to_node = ?`
 		args = []any{nodeID}
 	default:
-		query = `SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE from_node = ? OR to_node = ?`
+		base = `SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE from_node = ? OR to_node = ?`
 		args = []any{nodeID, nodeID}
+	}
+
+	// Strip empty strings so callers can pass a flag value unchecked (e.g.,
+	// `Neighbors(id, dir, "")` — a pattern the CLI ends up doing when its
+	// flag slice is empty). Empty kinds in the IN list would match no rows,
+	// which is worse than being ignored.
+	var filtered []string
+	for _, k := range kinds {
+		if k != "" {
+			filtered = append(filtered, k)
+		}
+	}
+
+	query := base
+	if len(filtered) > 0 {
+		var b strings.Builder
+		b.WriteString(query)
+		b.WriteString(" AND kind IN (")
+		for i, k := range filtered {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString("?")
+			args = append(args, k)
+		}
+		b.WriteString(")")
+		query = b.String()
 	}
 
 	rows, err := s.db.Query(query, args...)

@@ -5,6 +5,8 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/python"
+
+	"librarian/internal/indexer"
 )
 
 // PythonGrammar indexes .py source files.
@@ -386,6 +388,212 @@ func extractFromImports(n *sitter.Node, source []byte) []ImportRef {
 			Path:  buildFromPath(module, dots, isRelative, nm.name),
 			Alias: nm.alias,
 		})
+	}
+	return out
+}
+
+// SymbolParents implements inheritanceExtractor. Python `class Foo(Base1, Base2, metaclass=Meta):`
+// stores its bases in the `superclasses` field (an argument_list). Positional
+// arguments are treated as parents; keyword arguments (metaclass, total, etc.)
+// are filtered out — they configure class creation but are not inheritance.
+//
+// Four argument shapes are handled:
+//   - identifier (`Base`)            → Name="Base", no metadata
+//   - attribute (`pkg.Base`)         → Name="pkg.Base" (dotted)
+//   - subscript (`Generic[T, U]`)    → Name="Generic", Metadata["type_args"]=["T","U"]
+//   - call      (`factory()`)        → Name=<callee identifier best-effort>,
+//                                      Metadata["unresolved_expression"]=true
+//
+// Every parent gets Relation="extends" — Python has no implements/conforms
+// distinction; `typing.Protocol` is syntactically just another base.
+//
+// Fuller handling of call-expression bases (e.g., `namedtuple(...)`) is
+// deferred to lib-3xh per the plan's "don't silently skip; file a bead"
+// directive; the best-effort identifier fallback here keeps something in the
+// graph without pretending the resolution is complete.
+func (*PythonGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
+	if n.Type() != "class_definition" {
+		return nil
+	}
+	supers := n.ChildByFieldName("superclasses")
+	if supers == nil {
+		return nil
+	}
+	var out []ParentRef
+	for i := 0; i < int(supers.NamedChildCount()); i++ {
+		c := supers.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		// Keyword arguments (metaclass=, total=) are not parents.
+		if c.Type() == "keyword_argument" {
+			continue
+		}
+		ref := extractPythonBase(c, source)
+		if ref != nil {
+			out = append(out, *ref)
+		}
+	}
+	return out
+}
+
+// extractPythonBase converts a single argument_list child into a ParentRef,
+// returning nil to skip shapes that aren't meaningful parents
+// (dictionary_splat, list_splat, etc.).
+func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
+	loc := indexer.Location{
+		Line:       int(c.StartPoint().Row) + 1,
+		Column:     int(c.StartPoint().Column) + 1,
+		ByteOffset: int(c.StartByte()),
+	}
+	switch c.Type() {
+	case "identifier", "attribute":
+		return &ParentRef{
+			Name:     strings.TrimSpace(c.Content(source)),
+			Relation: "extends",
+			Loc:      loc,
+		}
+	case "subscript":
+		// `Generic[T, U]` — base name is the subscripted value; slice entries
+		// are the type arguments.
+		value := c.ChildByFieldName("value")
+		if value == nil {
+			return nil
+		}
+		name := strings.TrimSpace(value.Content(source))
+		if name == "" {
+			return nil
+		}
+		meta := map[string]any{}
+		var args []string
+		for i := 0; i < int(c.NamedChildCount()); i++ {
+			cc := c.NamedChild(i)
+			if cc == nil || cc == value {
+				continue
+			}
+			if t := strings.TrimSpace(cc.Content(source)); t != "" {
+				args = append(args, t)
+			}
+		}
+		if len(args) > 0 {
+			meta["type_args"] = args
+		}
+		return &ParentRef{
+			Name:     name,
+			Relation: "extends",
+			Loc:      loc,
+			Metadata: meta,
+		}
+	case "call":
+		// `factory()` / `namedtuple(...)` — best-effort identifier fallback.
+		// Full handling of call-expression bases lives in lib-3xh.
+		fn := c.ChildByFieldName("function")
+		if fn == nil {
+			return nil
+		}
+		name := strings.TrimSpace(fn.Content(source))
+		if name == "" {
+			return nil
+		}
+		return &ParentRef{
+			Name:     name,
+			Relation: "extends",
+			Loc:      loc,
+			Metadata: map[string]any{"unresolved_expression": true},
+		}
+	}
+	return nil
+}
+
+// ResolveParents implements inheritanceResolver for Python. Runs AFTER
+// ResolveImports (per the ParseCtx ordering) so the imports list in refs is
+// already in canonicalised absolute form — same-file bare-name parents can
+// resolve against that canonical form directly.
+//
+// Resolution rules, in order:
+//  1. Target already dotted (attribute / FQN in source) → leave alone.
+//  2. Metadata.unresolved_expression=true (call-expression base) → leave
+//     alone; lib-3xh will tackle these.
+//  3. Bare name matches a local binding from the file's imports → rewrite
+//     Target to the full path.
+//  4. Otherwise → mark Metadata.unresolved=true.
+//
+// Import forms that contribute a local binding:
+//   - `import pkg`          → local "pkg"    → target "pkg"
+//   - `import pkg as p`     → local "p"      → target "pkg"
+//   - `from m import N`     → local "N"      → target (absolute post-resolve)
+//   - `from m import N as A`→ local "A"      → target (absolute post-resolve)
+//
+// Wildcard `from m import *` has no local name binding and is skipped.
+func (*PythonGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
+	local := pythonLocalBindings(refs)
+	for i, r := range refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if r.Metadata != nil {
+			if v, _ := r.Metadata["unresolved_expression"].(bool); v {
+				continue
+			}
+		}
+		if strings.Contains(r.Target, ".") {
+			continue
+		}
+		if full, ok := local[r.Target]; ok {
+			refs[i].Target = full
+			continue
+		}
+		if refs[i].Metadata == nil {
+			refs[i].Metadata = map[string]any{}
+		}
+		refs[i].Metadata["unresolved"] = true
+	}
+	return refs
+}
+
+// pythonLocalBindings builds a local-name → canonical-target map from the
+// file's import Refs. Alias-aware: `import numpy as np` binds "np".
+// Wildcard imports (path ending in ".*") contribute no bindings. A name
+// that appears twice keeps the first binding (Python's later rebinding
+// would shadow, but the AST order matches source order, and the shadowed
+// case is vanishingly rare for type imports).
+//
+// Leaf-name extraction note: `import pkg.subpkg` (no alias) produces a
+// Target of "pkg.subpkg" after ResolveImports. The leaf here is "subpkg",
+// matching Python's own scoping rule: a plain dotted import binds ONLY
+// the leaf name (`subpkg`) in the local scope, not the root (`pkg`). So
+// `local["subpkg"] = "pkg.subpkg"` is correct for the user's perspective
+// even though the `class Foo(subpkg):` form of literal-parent reference
+// is uncommon — more typical is `class Foo(pkg.subpkg.Base):` which
+// arrives already-dotted and is skipped by the resolver's early return.
+func pythonLocalBindings(refs []indexer.Reference) map[string]string {
+	out := map[string]string{}
+	for _, r := range refs {
+		if r.Kind != "import" || r.Target == "" {
+			continue
+		}
+		if strings.HasSuffix(r.Target, ".*") {
+			continue
+		}
+		var alias string
+		if r.Metadata != nil {
+			alias, _ = r.Metadata["alias"].(string)
+		}
+		local := alias
+		if local == "" {
+			// Leaf name from the Target path. `from m import N` has
+			// Target="m.N" (post-ResolveImports) → leaf "N". `import pkg`
+			// has Target="pkg" → leaf "pkg".
+			if dot := strings.LastIndex(r.Target, "."); dot >= 0 && dot < len(r.Target)-1 {
+				local = r.Target[dot+1:]
+			} else {
+				local = r.Target
+			}
+		}
+		if _, seen := out[local]; seen {
+			continue
+		}
+		out[local] = r.Target
 	}
 	return out
 }

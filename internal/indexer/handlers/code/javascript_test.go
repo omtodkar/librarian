@@ -574,6 +574,247 @@ export default function App() {
 	}
 }
 
+// --- lib-wji.1: inheritance extraction ---
+
+func TestJavaScriptGrammar_ClassExtendsBareUnresolved(t *testing.T) {
+	// JS: `class X extends Base` with no import for Base. ParseCtx with a
+	// non-zero ctx is used so ResolveParents runs end-to-end (the legacy
+	// Parse path no-ops all resolvers). Note that ResolveImports's
+	// file-existence probe won't find "/tmp/x.js" on disk, which is fine —
+	// there are no imports in the fixture, so ResolveImports has nothing
+	// to resolve. ResolveParents then iterates the (empty) import bindings,
+	// finds no match for bare "Base", and marks unresolved=true. The
+	// resolver pathway IS exercised — this isn't a Parse-path surrogate.
+	src := `class X extends Base {}`
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("x.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/x.js", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"x.X")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	r := refs[0]
+	if r.Target != "Base" {
+		t.Errorf("Target = %q, want Base", r.Target)
+	}
+	if r.Metadata["relation"] != "extends" {
+		t.Errorf("relation = %v, want extends", r.Metadata["relation"])
+	}
+	if v, _ := r.Metadata["unresolved"].(bool); !v {
+		t.Errorf("expected unresolved=true; got %+v", r.Metadata)
+	}
+}
+
+func TestTypeScriptGrammar_ClassExtendsAndImplements(t *testing.T) {
+	src := `class X extends Base implements IFoo, IBar {}`
+	h := code.New(code.NewTypeScriptGrammar())
+	doc, err := h.ParseCtx("x.ts", []byte(src), indexer.ParseContext{AbsPath: "/tmp/x.ts", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"x.X")
+	byTargetRel := map[string]string{}
+	for _, r := range refs {
+		byTargetRel[r.Target] = r.Metadata["relation"].(string)
+	}
+	if byTargetRel["Base"] != "extends" {
+		t.Errorf("Base relation = %q, want extends", byTargetRel["Base"])
+	}
+	if byTargetRel["IFoo"] != "implements" {
+		t.Errorf("IFoo relation = %q, want implements", byTargetRel["IFoo"])
+	}
+	if byTargetRel["IBar"] != "implements" {
+		t.Errorf("IBar relation = %q, want implements", byTargetRel["IBar"])
+	}
+}
+
+func TestTypeScriptGrammar_InterfaceExtendsMultiple(t *testing.T) {
+	src := `interface Auth extends Login, Logout { ok(): boolean; }`
+	h := code.New(code.NewTypeScriptGrammar())
+	doc, err := h.ParseCtx("auth.ts", []byte(src), indexer.ParseContext{AbsPath: "/tmp/auth.ts", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"auth.Auth")
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 parents, got %d (%+v)", len(refs), refs)
+	}
+	for _, r := range refs {
+		if r.Metadata["relation"] != "extends" {
+			t.Errorf("interface-extends-interface relation for %q = %v, want extends", r.Target, r.Metadata["relation"])
+		}
+	}
+}
+
+func TestTypeScriptGrammar_AbstractClassInheritance(t *testing.T) {
+	src := `abstract class BaseService extends Resource implements Lifecycle {}`
+	h := code.New(code.NewTypeScriptGrammar())
+	doc, err := h.ParseCtx("svc.ts", []byte(src), indexer.ParseContext{AbsPath: "/tmp/svc.ts", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"svc.BaseService")
+	// Both extends + implements should land.
+	seen := map[string]string{}
+	for _, r := range refs {
+		seen[r.Target] = r.Metadata["relation"].(string)
+	}
+	if seen["Resource"] != "extends" {
+		t.Errorf("Resource relation = %q, want extends", seen["Resource"])
+	}
+	if seen["Lifecycle"] != "implements" {
+		t.Errorf("Lifecycle relation = %q, want implements", seen["Lifecycle"])
+	}
+}
+
+// Mixin-application: the parent is a call_expression; we fall back to the
+// callee identifier with unresolved_expression=true. Full handling lives
+// in lib-ap8.
+func TestJavaScriptGrammar_MixinCallFallback(t *testing.T) {
+	src := `class Foo extends Mixin(Base) {}`
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("m.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/m.js", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 fallback ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Mixin" {
+		t.Errorf("Target = %q, want Mixin (callee fallback)", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved_expression"].(bool); !v {
+		t.Errorf("expected unresolved_expression=true; got %+v", refs[0].Metadata)
+	}
+	// And the full-name "unresolved" flag must NOT be set — that's reserved
+	// for identifier bases that couldn't match any import.
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("call-base should not carry unresolved=true: %+v", refs[0].Metadata)
+	}
+}
+
+func TestJavaScriptGrammar_MemberExpressionExtendsLeftAlone(t *testing.T) {
+	// JS `class X extends pkg.Base` — dotted identifier; resolver skips it
+	// (dotted Target is considered already-qualified).
+	src := `class X extends ns.pkg.Base {}`
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("x.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/x.js", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"x.X")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ns.pkg.Base" {
+		t.Errorf("Target = %q, want ns.pkg.Base", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("dotted target must not be marked unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// Named import resolution: `import { Foo } from './utils'` + `class X
+// extends Foo` → Target resolves to "utils.Foo" (stem of the resolved module
+// path dot the member). Full ParseCtx with real temp files, mirroring the
+// existing TypeScript resolver test.
+func TestTypeScriptGrammar_NamedImportResolvesBareParent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "utils.ts"), []byte("export class Foo {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(root, "src", "child.ts")
+	childSrc := `import { Foo } from "./utils";
+class Child extends Foo {}
+`
+	if err := os.WriteFile(childPath, []byte(childSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := code.New(code.NewTypeScriptGrammar())
+	doc, err := h.ParseCtx("src/child.ts", []byte(childSrc), indexer.ParseContext{AbsPath: childPath, ProjectRoot: root})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"child.Child")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "utils.Foo" {
+		t.Errorf("Target = %q, want utils.Foo", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("resolved named-import target should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// Aliased named import: `import { Foo as F } from './utils'` + `class X
+// extends F` → resolver remaps local "F" to "utils.Foo".
+func TestTypeScriptGrammar_AliasedNamedImportResolvesBareParent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "bases.ts"), []byte("export class RealBase {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(root, "src", "c.ts")
+	childSrc := `import { RealBase as B } from "./bases";
+class Child extends B {}
+`
+	if err := os.WriteFile(childPath, []byte(childSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := code.New(code.NewTypeScriptGrammar())
+	doc, err := h.ParseCtx("src/c.ts", []byte(childSrc), indexer.ParseContext{AbsPath: childPath, ProjectRoot: root})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"c.Child")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "bases.RealBase" {
+		t.Errorf("Target = %q, want bases.RealBase (alias B → RealBase)", refs[0].Target)
+	}
+}
+
+// Default imports are left unresolved — the default export's actual symbol
+// name isn't inferable at parse time and lib-38i will handle this.
+func TestJavaScriptGrammar_DefaultImportLeftUnresolved(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "foo.js"), []byte("export default class {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(root, "src", "c.js")
+	childSrc := `import foo from "./foo";
+class Child extends foo {}
+`
+	if err := os.WriteFile(childPath, []byte(childSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("src/c.js", []byte(childSrc), indexer.ParseContext{AbsPath: childPath, ProjectRoot: root})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc,"c.Child")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); !v {
+		t.Errorf("default-import parent should be unresolved (deferred to lib-38i); got %+v", refs[0].Metadata)
+	}
+}
+
 // Empty file must parse cleanly.
 func TestJSFamily_EmptyFile(t *testing.T) {
 	for _, g := range []code.Grammar{

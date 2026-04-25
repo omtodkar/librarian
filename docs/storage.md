@@ -121,16 +121,18 @@ The graph spine is a generic layer: every indexed thing projects into a `graph_n
 | `file:` | `CodeFileNodeID(path)` | `file:internal/auth/oauth.go` |
 | `sym:` | `SymbolNodeID(fqn)` | `sym:com.acme.Auth.validate` |
 | `key:` | `ConfigKeyNodeID(path)` | `key:spring.datasource.url` |
+| `ext:` | `ExternalPackageNodeID(spec)` | `ext:lodash`, `ext:@scope/pkg` |
 
 `NodeIDPrefixes()` is the single source of truth; CLI commands that accept user input (`librarian neighbors X`) use it to auto-expand unqualified names.
 
 ### Edge kinds
 
-- `mentions` — document mentions a code file
-- `shared_code_ref` — two documents reference the same code file
-- `imports` — code file imports a symbol
-- `calls` — symbol calls another symbol (future)
-- `extends` / `implements` — class inheritance (future)
+- `mentions` — document → code_file (docs-pass emits from prose that names a source file)
+- `shared_code_ref` — document → document (both reference the same code_file)
+- `contains` — code_file → symbol (graph-pass emits one per parsed Unit)
+- `import` — code_file → symbol / code_file / external_package (depending on resolver output)
+- `call` — symbol → symbol (reserved; not emitted by any grammar today)
+- `inherits` — symbol → symbol (class / interface / protocol parent relationship). `Edge.Metadata.relation` carries the flavor: `extends`, `implements`, `mixes` (Dart mixins), `conforms` (Swift protocols), `embeds` (Go interface embedding). `extends` and `implements` remain backward-compatible aliases in `graphTargetID` / `graphNodeKindFromRef` for hand-authored edges and pre-lib-wji.1 data, but new extraction emits `inherits`.
 
 ### Operations
 

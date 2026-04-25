@@ -223,19 +223,39 @@ type Signal struct {
 //	"code-file"   — markdown/doc mentioning a source file path
 //	"import"      — code file importing another package or module
 //	"call"        — code calling another function or method
-//	"extends"     — class extending another class
-//	"implements"  — class implementing an interface
+//	"inherits"    — class/interface/protocol parent relationship; Metadata["relation"]
+//	                carries the flavor ("extends", "implements", "mixes", "conforms",
+//	                "embeds"). Source is populated with the containing symbol's Path.
 //	"config-key"  — document or config referencing another config key
 //	"doc-link"    — markdown linking to another document
+//
+// "extends" and "implements" are retained as legacy aliases in graph-pass switches
+// (see graphTargetID / graphNodeKindFromRef in internal/indexer/indexer.go) but are
+// no longer emitted by new code — emit Kind="inherits" with Metadata["relation"] instead.
 type Reference struct {
 	// Kind categorizes the reference (see type doc).
 	Kind string
+
+	// Source identifies the originating entity WITHIN the file, when the reference
+	// is symbol-scoped rather than file-scoped. Populated by grammars that emit
+	// per-symbol references (inheritance parents, per-method calls) so the graph
+	// pass can anchor the edge at sym:<Source> instead of the file node. Shape is
+	// a Unit.Path (fully-qualified dotted identifier). Empty string = file-scoped
+	// (default — preserves the long-standing shape for imports / code-file /
+	// config-key / doc-link / mentions).
+	//
+	// Invariant: when populated, Source MUST equal a Unit.Path in the same
+	// ParsedDoc. The grammar-layer walker enforces this because it populates
+	// Source from the enclosing Unit as each Reference is emitted.
+	Source string
 
 	// Target identifies the referenced entity. Shape depends on Kind:
 	//
 	//	"code-file":  file path (e.g., "internal/auth/service.go")
 	//	"import":     fully-qualified symbol (e.g., "com.acme.util.Logger")
 	//	"call":       symbol name
+	//	"inherits":   fully-qualified parent symbol name (generics stripped;
+	//	              originals in Metadata["type_args"])
 	//	"config-key": dotted key path
 	Target string
 
@@ -245,7 +265,22 @@ type Reference struct {
 	// Loc is where the reference appears.
 	Loc Location
 
-	// Metadata is reference-specific extras (call arguments, import alias).
+	// Metadata is reference-specific extras. Conventional keys:
+	//
+	//	"alias"                 — import alias (string)
+	//	"static"                — Java "import static" (bool)
+	//	"node_kind"             — resolver-set target namespace override (string,
+	//	                          see nodeKindFromMetadata)
+	//	"relation"              — inheritance flavor for Kind="inherits"
+	//	                          ("extends" | "implements" | "mixes" | "conforms" | "embeds")
+	//	"type_args"             — generic type arguments stripped from Target
+	//	                          (e.g., ["K", "V"] for Map<K, V>)
+	//	"unresolved"            — bool, set true when a target name could not be
+	//	                          mapped to a canonical form (e.g., bare Java class
+	//	                          name with no matching import)
+	//	"unresolved_expression" — bool, set true when the source expression was
+	//	                          not an identifier (Python factory()-bases, JS
+	//	                          mixin-application in extends clause)
 	Metadata map[string]any
 }
 

@@ -24,6 +24,44 @@ Librarian indexes your whole project — **markdown docs, source code, configs, 
 
 Every MCP-capable AI assistant (Claude Code, Cursor, Codex, Gemini CLI, OpenCode, GitHub Copilot, Aider) plugs in via one `librarian install` command.
 
+## The Core Idea: retrieve, don't read
+
+A typical codebase is 100k–10M+ tokens. A Claude context window is 200k. Dumping everything in is either impossible or drowns the model in irrelevant noise. Librarian turns the codebase into a **searchable, graph-linked index** so the AI pulls only the chunks it needs for each question — not whole files, not whole directories.
+
+Every indexed file is split into section-aware chunks (~512 tokens each), embedded, and stored alongside a typed graph of `imports` / `contains` / `mentions` / `extends` / `implements` edges. The AI queries by intent (`"how does auth token rotation work?"`) and gets the top-ranked chunks that actually answer the question.
+
+## How Librarian Helps AI Assistants
+
+Once `librarian install` wires up your tools, the assistant gains five MCP tools — each tuned for a different phase of the read-think-write loop:
+
+| Tool | Use when | Typical tokens |
+|---|---|---|
+| `search_docs` | "Where's X?" / "how does Y work?" | ~2.5k |
+| `get_context` | "What's related to this file/symbol?" | ~5–8k |
+| `get_document` | You actually need the full doc | full file |
+| `list_documents` | Enumerate without content | tiny |
+| `update_docs` | Distill findings back into the KB | write, not read |
+
+**Token efficiency compounds across four mechanisms:**
+
+- **Chunking** — retrieval unit is a 512-token chunk, not a 5000-token file. A `search_docs` top-5 is ~2.5k tokens; the equivalent "dump the docs folder" is often 50k+. **~20× compression** on the common case.
+- **Signal-weighted re-ranking** — chunks tagged with `**Decision:**`, `@Deprecated`, `TODO`, or Javadoc signals get boosted. The ADR explaining *why* auth works this way surfaces before the neutral prose describing *what* it does — AI finds intent first and stops reading when the answer appears.
+- **Typed graph** — `"who imports `auth.Service.validate`?"` is an incoming-edge lookup on a single node, not a grep across the codebase. `"what sits between `AuthService` and `TokenStore`?"` is a shortest-path query. Answers in hops, not file reads.
+- **`update_docs` feedback loop** — the AI can write a distilled summary back to `docs/` where the next session finds it via one `search_docs` call. Tokens spent once, saved forever.
+
+**A concrete before/after.**
+
+Debugging "why does auth fail on rotated tokens?" *without* Librarian: AI grep-reads `internal/auth/*.go`, skims `docs/auth.md`, inspects callers, chases tests — **~30k tokens** of raw source before it can reason.
+
+*With* Librarian:
+```
+search_docs "token rotation"              → top 5 chunks, ~2.5k tokens
+get_context sym:auth.Service.Validate     → related files + callers, ~6k tokens
+```
+**~8.5k tokens of precise context instead of 30k of raw text** — more room for reasoning, tool use, and multi-turn iteration. Skipping generated files, vendored deps, and unchanged-hash files happens automatically.
+
+**Plays well with Claude's prompt cache.** Smaller, deterministically-ordered contexts hit the 5-minute TTL cache more often — repeated queries in a session reuse the cached prefix instead of paying full prefix-evaluation cost.
+
 ## Why Librarian
 
 | | |
