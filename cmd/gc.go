@@ -26,9 +26,9 @@ Useful after schema-changing updates (e.g. lib-o8m renamed Python relative
 imports to absolute dotted form) that leave stale nodes behind. By default
 only symbol-kind nodes are swept; pass --kinds to widen.
 
-Safe to run alongside 'librarian index' — the sweep uses an immediate
-transaction so a concurrent indexer write either commits first or blocks
-briefly until the sweep completes.
+Prefer running gc on an idle database. Running concurrently with
+'librarian index' may return a SQLITE_BUSY error — SQLite serialises
+writes and no retry timeout is configured. Let index finish first.
 `,
 	RunE: runGC,
 }

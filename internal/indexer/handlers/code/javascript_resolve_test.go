@@ -86,14 +86,39 @@ func TestResolveJSImport_NoCandidateReturnsFalse(t *testing.T) {
 	}
 }
 
-// TestResolveJSImport_DirectoryNotFileRejected pins that resolveJSImport
-// does not mistake a directory for a match — statFn returns false for dirs
-// in production (statIsFile uses !info.IsDir()).
 func TestResolveJSImport_MJSResolvesToMTS(t *testing.T) {
 	got, ok := resolveJSImport("./utils.mjs", "/proj/src/a.ts",
 		fakeFS("/proj/src/utils.mts"))
 	if !ok || got != "/proj/src/utils.mts" {
 		t.Errorf("got (%q, %v), want .mts rewrite for .mjs import", got, ok)
+	}
+}
+
+// TestResolveJSImport_DirectoryCandidateRejectedByStatFn pins that the
+// production statFn (statIsFile) filters out directories — if a bare
+// `./utils` on disk is a directory, Tier 2 (append extension) and Tier 3
+// (index fallback) should be responsible for picking the right file, not
+// the directory itself. The fake statFn here simulates a directory by
+// returning false for the exact candidate path but true for an index file.
+func TestResolveJSImport_DirectoryCandidateRejectedByStatFn(t *testing.T) {
+	// Fake: no ./utils.* file exists, but ./utils/ is a directory with
+	// index.ts. The directory-as-file probe must fail; index.ts must win.
+	stat := func(p string) bool {
+		return p == "/proj/src/utils/index.ts"
+	}
+	got, ok := resolveJSImport("./utils", "/proj/src/a.ts", stat)
+	if !ok || got != "/proj/src/utils/index.ts" {
+		t.Errorf("got (%q, %v); directory candidate must not match as a file, index.ts should win", got, ok)
+	}
+}
+
+// TestStatIsFile_RejectsDirectories pins the production statFn semantics:
+// !info.IsDir() must hold for the probe to succeed. Guards against a
+// future refactor that forgets the directory check.
+func TestStatIsFile_RejectsDirectories(t *testing.T) {
+	dir := t.TempDir()
+	if statIsFile(dir) {
+		t.Errorf("statIsFile returned true for a directory %q", dir)
 	}
 }
 

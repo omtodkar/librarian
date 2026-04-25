@@ -148,9 +148,14 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	// Orphan sweep on --force: a forced re-index is the user saying "I want
 	// fresh state" — the moment to reap nodes left behind by prior schema
 	// churn (e.g. lib-o8m's renamed Python import targets). Scoped to symbol
-	// kind by default; matches `librarian gc` without flags. Intentionally
-	// skipped on incremental runs because those can briefly orphan a node
-	// between DeleteSymbolsForFile and the subsequent re-projection.
+	// kind by default; matches `librarian gc` without flags. External nodes
+	// (ext:<pkg>) are intentionally excluded — stale import edges are NOT
+	// cleaned between the doc delete and re-projection, so a freshly re-
+	// indexed ext: node usually still has an edge and wouldn't be flagged
+	// orphan anyway. Users who want to reap external orphans should run
+	// `librarian gc --kinds=external` explicitly. Incremental runs also
+	// skip the sweep because they can briefly orphan a node between
+	// DeleteSymbolsForFile and the subsequent re-projection.
 	var orphanSwept []string
 	if indexForce && !indexSkipGraph && graphRes != nil {
 		orphanSwept, err = s.DeleteOrphanNodes([]string{store.NodeKindSymbol})
