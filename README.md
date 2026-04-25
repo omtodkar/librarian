@@ -52,6 +52,10 @@ librarian install --all                          # wire every supported AI assis
 # or pick specific ones:
 librarian install --platforms=claude,cursor,gemini
 
+# To reverse everything:
+# librarian uninstall --all              # unwire pointers, keep .librarian/
+# librarian uninstall --full --yes       # also remove .librarian/
+
 # 3. Use it
 librarian search "authentication flow"
 librarian context "how does indexing work"

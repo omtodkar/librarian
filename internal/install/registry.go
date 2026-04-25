@@ -122,6 +122,25 @@ func allPlatforms() []*Platform {
 				}
 				return written, nil
 			},
+			Uninstall: func(ws *workspace.Workspace, warn io.Writer) ([]string, error) {
+				removed, err := uninstallMarkerAndHook(ws, mp.pointerFile, mp.hookConfig, warn)
+				if err != nil {
+					return removed, err
+				}
+				if mp.key == "claude" {
+					extra, err := uninstallClaudeSkill(ws)
+					if err != nil {
+						return removed, err
+					}
+					removed = append(removed, extra...)
+				}
+				if mp.key == "aider" && len(removed) > 0 {
+					// Symmetric to the install note. Gated on len(removed) > 0
+					// so repeat uninstalls stay silent.
+					fmt.Fprintln(warn, "  note: Aider — remove `read: [CONVENTIONS.md]` from .aider.conf.yml if you added it.")
+				}
+				return removed, nil
+			},
 		})
 	}
 	out = append(out, cursorPlatform())

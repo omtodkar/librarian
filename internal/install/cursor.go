@@ -21,7 +21,8 @@ func cursorPlatform() *Platform {
 		Detected: func(root string) bool {
 			return fileExists(filepath.Join(root, ".cursor"))
 		},
-		Install: installCursor,
+		Install:   installCursor,
+		Uninstall: uninstallCursor,
 	}
 }
 
@@ -40,5 +41,24 @@ func installCursor(ws *workspace.Workspace, _ io.Writer) ([]string, error) {
 	if err := os.WriteFile(path, []byte(tmplCursorPointer), 0o644); err != nil {
 		return nil, fmt.Errorf("writing %s: %w", path, err)
 	}
+	return []string{path}, nil
+}
+
+// uninstallCursor is the inverse of installCursor. The Cursor rule file is
+// librarian-owned in its entirety (no user content to preserve), so we
+// just delete it. Best-effort rmdir on .cursor/rules and .cursor — leaves
+// either alone if the user has other rules or state there.
+func uninstallCursor(ws *workspace.Workspace, _ io.Writer) ([]string, error) {
+	path := filepath.Join(ws.Root, ".cursor", "rules", "librarian.mdc")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil {
+		return nil, fmt.Errorf("removing %s: %w", path, err)
+	}
+	removeEmptyDir(filepath.Dir(path))      // .cursor/rules
+	removeEmptyDir(filepath.Dir(filepath.Dir(path))) // .cursor
 	return []string{path}, nil
 }

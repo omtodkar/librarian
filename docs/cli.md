@@ -73,6 +73,38 @@ librarian install --dry-run
 
 JSON hook entries in `.claude/settings.json` / `.codex/hooks.json` are merged by command string so other hooks aren't clobbered.
 
+### `librarian uninstall [--all|--platforms=...] [--full]`
+
+Reverses `librarian install`. Strips the marker-delimited blocks from `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` / `CONVENTIONS.md` / `.github/copilot-instructions.md`, removes librarian SessionStart entries from `.claude/settings.json` and `.codex/hooks.json` (by matching the librarian command string — other hooks like `bd prime` are preserved), and deletes per-platform extras (`.claude/skills/librarian/SKILL.md`, `.cursor/rules/librarian.mdc`). The `.git/hooks/post-commit` librarian block is stripped; the file is deleted if it ends up empty.
+
+```sh
+librarian uninstall                        # interactive, preserves .librarian/
+librarian uninstall --all                  # unwire every installed platform
+librarian uninstall --platforms=claude,cursor
+librarian uninstall --full --yes           # also rm -rf .librarian/, skip prompt
+librarian uninstall --dry-run
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--all` | `false` | Unwire every supported platform without prompting |
+| `--platforms <keys>` | — | Comma-separated subset: `aider`, `claude`, `codex`, `copilot`, `cursor`, `gemini`, `opencode` |
+| `--full` | `false` | Also remove the `.librarian/` workspace directory |
+| `--dry-run` | `false` | Print planned changes without touching disk |
+| `--yes` | `false` | Skip the confirmation prompt for `--full` |
+
+Safety contract:
+
+- **User content is preserved byte-for-byte.** Only content inside `<!-- librarian:start -->` … `<!-- librarian:end -->` is removed; prose outside survives exactly.
+- **Other JSON hooks stay put.** `bd prime`, matcher-specific hooks, and any non-librarian `SessionStart` entries are preserved verbatim.
+- **Torn blocks are surfaced, not destroyed.** A pointer file with a start marker but no end marker prints a warning and is left untouched — repair manually, then re-run uninstall.
+- **Librarian-only files are deleted.** A pointer file (e.g. `AGENTS.md`) that contained nothing but the librarian block is removed from disk. User-content pointer files (e.g. `CLAUDE.md` with user prose) have only the block stripped and keep their prose.
+- **Idempotent.** Re-running uninstall on an already-clean repo reports nothing to do and exits 0.
+
+Caveat — **shared AGENTS.md**: Codex and OpenCode both register against the same marker block in `AGENTS.md`. Uninstalling either strips the block for both — there isn't a Codex-only or OpenCode-only block to unwire separately.
+
+Caveat — **Aider**: uninstall prints a reminder to remove `read: [CONVENTIONS.md]` from `.aider.conf.yml` if you had added it. We don't edit `.aider.conf.yml` directly — it's user-owned YAML we never wrote.
+
 ## Indexing commands
 
 ### `librarian index [docs-dir]`

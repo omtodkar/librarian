@@ -33,17 +33,24 @@ import (
 const hookCommand = "bash .librarian/hooks/sessionstart.sh"
 
 // Platform describes one assistant integration — its human name, CLI key,
-// detection heuristic, and install action.
+// detection heuristic, and install/uninstall actions. Install writes the
+// platform's integration pointers and returns the paths touched; Uninstall
+// reverses that (strips marker blocks, removes hook entries, deletes per-
+// platform extras) and returns the paths affected. Both are idempotent —
+// running twice produces zero changes on the second call.
 type Platform struct {
-	Name     string
-	Key      string
-	Detected func(root string) bool
-	Install  func(ws *workspace.Workspace, warn io.Writer) ([]string, error)
+	Name      string
+	Key       string
+	Detected  func(root string) bool
+	Install   func(ws *workspace.Workspace, warn io.Writer) ([]string, error)
+	Uninstall func(ws *workspace.Workspace, warn io.Writer) ([]string, error)
 }
 
-// Options control Run. Zero value = interactive TTY prompt over all platforms,
-// git post-commit hook installed, dry-run off.
-type Options struct {
+// InstallOptions control Run. Zero value = interactive TTY prompt over all
+// platforms, git post-commit hook installed, dry-run off. Paired with
+// UninstallOptions in uninstall.go — keeping the Install/Uninstall prefix
+// parallel so tools searching for one find the other.
+type InstallOptions struct {
 	All       bool
 	Platforms []string
 	NoGitHook bool
@@ -70,7 +77,7 @@ func PlatformKeys() []string {
 // templates (rules.md, skill.md, sessionstart.sh), selects platforms, installs
 // each, and optionally installs the git post-commit hook. Returns the ordered
 // list of paths written or updated (for summary reporting).
-func Run(ws *workspace.Workspace, opts Options) ([]string, error) {
+func Run(ws *workspace.Workspace, opts InstallOptions) ([]string, error) {
 	if opts.In == nil {
 		opts.In = os.Stdin
 	}
@@ -89,7 +96,7 @@ func Run(ws *workspace.Workspace, opts Options) ([]string, error) {
 	}
 	written = append(written, shared...)
 
-	platforms, err := selectRequested(ws.Root, opts)
+	platforms, err := selectPlatformsByFlags(opts.In, opts.Out, ws.Root, opts.All, opts.Platforms)
 	if err != nil {
 		return nil, err
 	}
@@ -125,27 +132,34 @@ func Run(ws *workspace.Workspace, opts Options) ([]string, error) {
 	return written, nil
 }
 
-func selectRequested(root string, opts Options) ([]*Platform, error) {
-	all := allPlatforms()
+// selectPlatformsByFlags resolves the caller's --all / --platforms / interactive
+// choice to a concrete platform slice. Shared between Run (install) and
+// Uninstall so both commands make identical decisions on the same inputs.
+//
+//   - all=true             → every supported platform
+//   - keys non-empty       → only those keys (errors on unknown key)
+//   - both false           → interactive prompt pre-checking detected ones
+func selectPlatformsByFlags(in io.Reader, out io.Writer, root string, all bool, keys []string) ([]*Platform, error) {
+	platforms := allPlatforms()
 	switch {
-	case opts.All:
-		return all, nil
-	case len(opts.Platforms) > 0:
-		byKey := make(map[string]*Platform, len(all))
-		for _, p := range all {
+	case all:
+		return platforms, nil
+	case len(keys) > 0:
+		byKey := make(map[string]*Platform, len(platforms))
+		for _, p := range platforms {
 			byKey[p.Key] = p
 		}
-		out := make([]*Platform, 0, len(opts.Platforms))
-		for _, key := range opts.Platforms {
+		result := make([]*Platform, 0, len(keys))
+		for _, key := range keys {
 			p, ok := byKey[key]
 			if !ok {
 				return nil, fmt.Errorf("unknown platform %q (known: %s)", key, strings.Join(PlatformKeys(), ", "))
 			}
-			out = append(out, p)
+			result = append(result, p)
 		}
-		return out, nil
+		return result, nil
 	default:
-		return selectPlatforms(opts.In, opts.Out, all, root)
+		return selectPlatforms(in, out, platforms, root)
 	}
 }
 
@@ -244,6 +258,69 @@ func installMarkerAndHook(ws *workspace.Workspace, pointerFile, hookConfig strin
 		written = append(written, hookPath)
 	}
 	return written, nil
+}
+
+// uninstallMarkerAndHook is the inverse of installMarkerAndHook. Strips the
+// librarian block from pointerFile and (if hookConfig != "") removes the
+// SessionStart entry from hookConfig. Idempotent: missing files / absent
+// markers / absent hook entries all return cleanly with changed=false.
+func uninstallMarkerAndHook(ws *workspace.Workspace, pointerFile, hookConfig string, warn io.Writer) ([]string, error) {
+	var removed []string
+
+	pointerPath := filepath.Join(ws.Root, pointerFile)
+	if changed, err := removeMarkedBlock(pointerPath, warn); err != nil {
+		return removed, err
+	} else if changed {
+		removed = append(removed, pointerPath)
+	}
+
+	if hookConfig == "" {
+		return removed, nil
+	}
+
+	hookPath := filepath.Join(ws.Root, hookConfig)
+	if changed, err := removeJSONHook(hookPath, "SessionStart", hookCommand); err != nil {
+		return removed, err
+	} else if changed {
+		removed = append(removed, hookPath)
+	}
+	return removed, nil
+}
+
+// uninstallClaudeSkill reverses installClaudeSkill. Removes
+// .claude/skills/librarian/SKILL.md and opportunistically rmdirs the
+// librarian/ and skills/ parents when they become empty. Leaves .claude/
+// alone — it's user-owned and contains other state (settings.json).
+func uninstallClaudeSkill(ws *workspace.Workspace) ([]string, error) {
+	skillDir := filepath.Join(ws.Root, ".claude", "skills", "librarian")
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+
+	if _, err := os.Stat(skillPath); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", skillPath, err)
+	}
+	if err := os.Remove(skillPath); err != nil {
+		return nil, fmt.Errorf("removing %s: %w", skillPath, err)
+	}
+
+	// Best-effort rmdir of parents; ignore errors (non-empty dir means
+	// another tool's files live there — we shouldn't touch them).
+	removeEmptyDir(skillDir)
+	removeEmptyDir(filepath.Dir(skillDir)) // .claude/skills
+
+	return []string{skillPath}, nil
+}
+
+// removeEmptyDir removes dir when its contents are empty. Best-effort: any
+// error (dir missing, dir non-empty, permission) is swallowed because the
+// caller never wants uninstall to fail on parent-dir cleanup.
+func removeEmptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	_ = os.Remove(dir)
 }
 
 // installClaudeSkill places the workspace skill.md at .claude/skills/librarian/SKILL.md

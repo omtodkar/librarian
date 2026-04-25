@@ -41,6 +41,28 @@ func installGitPostCommit(ws *workspace.Workspace, warn io.Writer) (string, bool
 	return path, changed, err
 }
 
+// uninstallGitPostCommit is the inverse of installGitPostCommit. Strips the
+// librarian `# librarian:start ... # librarian:end` block from
+// .git/hooks/post-commit, preserving any other hook body around it. If the
+// post-commit file ends up effectively empty (just whitespace / a lone
+// shebang) after removal, the file is deleted — `removeBlockInFile` handles
+// that cleanup via its trailing TrimSpace check.
+//
+// Returns ("", false, nil) silently when the workspace isn't inside a git
+// repo, mirroring installGitPostCommit's behaviour.
+func uninstallGitPostCommit(ws *workspace.Workspace, warn io.Writer) (string, bool, error) {
+	hooksDir, err := resolveGitHooksDir(ws.Root)
+	if err != nil {
+		return "", false, err
+	}
+	if hooksDir == "" {
+		return "", false, nil
+	}
+	path := filepath.Join(hooksDir, "post-commit")
+	changed, err := removeBlockInFile(path, shMarkerStart, shMarkerEnd, warn)
+	return path, changed, err
+}
+
 // resolveGitHooksDir returns the hooks directory for a repo rooted at root,
 // handling classic repos (.git is a dir), worktrees (.git is a file with a
 // `gitdir:` pointer), and a missing .git (returns "").

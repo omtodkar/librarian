@@ -28,7 +28,7 @@ func TestRun_AllPlatformsEndToEnd(t *testing.T) {
 	ws := newWS(t)
 	var outBuf bytes.Buffer
 
-	written, err := Run(ws, Options{All: true, Out: &outBuf})
+	written, err := Run(ws, InstallOptions{All: true, Out: &outBuf})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -94,13 +94,13 @@ func TestRun_IdempotentReRun(t *testing.T) {
 	ws := newWS(t)
 	buf := &bytes.Buffer{}
 
-	if _, err := Run(ws, Options{All: true, Out: buf}); err != nil {
+	if _, err := Run(ws, InstallOptions{All: true, Out: buf}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := snapshotDir(t, ws.Root)
 
 	// Second run with the same options: no file contents should change.
-	if _, err := Run(ws, Options{All: true, Out: buf}); err != nil {
+	if _, err := Run(ws, InstallOptions{All: true, Out: buf}); err != nil {
 		t.Fatal(err)
 	}
 	after := snapshotDir(t, ws.Root)
@@ -116,10 +116,10 @@ func TestRun_SecondRunReportsNothingWritten(t *testing.T) {
 	ws := newWS(t)
 	buf := &bytes.Buffer{}
 
-	if _, err := Run(ws, Options{All: true, Out: buf}); err != nil {
+	if _, err := Run(ws, InstallOptions{All: true, Out: buf}); err != nil {
 		t.Fatal(err)
 	}
-	written, err := Run(ws, Options{All: true, Out: buf})
+	written, err := Run(ws, InstallOptions{All: true, Out: buf})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestRun_PreservesUserCLAUDEContent(t *testing.T) {
 	if err := os.WriteFile(claudePath, []byte(userPreface), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(ws, Options{Platforms: []string{"claude"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
+	if _, err := Run(ws, InstallOptions{Platforms: []string{"claude"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, claudePath)
@@ -171,7 +171,7 @@ func TestRun_PreservesExistingClaudeSettingsHooks(t *testing.T) {
 		},
 	})
 
-	if _, err := Run(ws, Options{Platforms: []string{"claude"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
+	if _, err := Run(ws, InstallOptions{Platforms: []string{"claude"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +192,7 @@ func TestRun_PreservesExistingClaudeSettingsHooks(t *testing.T) {
 
 func TestRun_DryRunWritesNothing(t *testing.T) {
 	ws := newWS(t)
-	if _, err := Run(ws, Options{All: true, DryRun: true, Out: &bytes.Buffer{}}); err != nil {
+	if _, err := Run(ws, InstallOptions{All: true, DryRun: true, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatal(err)
 	}
 	// No files should have been created besides the pre-seeded workspace skeleton.
@@ -206,7 +206,7 @@ func TestRun_DryRunWritesNothing(t *testing.T) {
 
 func TestRun_UnknownPlatformErrors(t *testing.T) {
 	ws := newWS(t)
-	_, err := Run(ws, Options{Platforms: []string{"nonesuch"}, NoGitHook: true, Out: &bytes.Buffer{}})
+	_, err := Run(ws, InstallOptions{Platforms: []string{"nonesuch"}, NoGitHook: true, Out: &bytes.Buffer{}})
 	if err == nil {
 		t.Error("expected error for unknown platform, got nil")
 	}
@@ -229,7 +229,7 @@ func TestRun_UnknownPlatformErrors(t *testing.T) {
 func TestRun_OpenCodeSharesCodexAGENTS(t *testing.T) {
 	ws := newWS(t)
 	buf := &bytes.Buffer{}
-	if _, err := Run(ws, Options{Platforms: []string{"codex", "opencode"}, NoGitHook: true, Out: buf}); err != nil {
+	if _, err := Run(ws, InstallOptions{Platforms: []string{"codex", "opencode"}, NoGitHook: true, Out: buf}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	body := readString(t, filepath.Join(ws.Root, "AGENTS.md"))
@@ -251,7 +251,7 @@ func TestRun_OpenCodeSharesCodexAGENTS(t *testing.T) {
 // guard that Copilot benefits from it.
 func TestRun_CopilotCreatesGithubDir(t *testing.T) {
 	ws := newWS(t)
-	if _, err := Run(ws, Options{Platforms: []string{"copilot"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
+	if _, err := Run(ws, InstallOptions{Platforms: []string{"copilot"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	pointer := filepath.Join(ws.Root, ".github", "copilot-instructions.md")
@@ -273,7 +273,7 @@ func TestRun_PreservesUserCopilotContent(t *testing.T) {
 	if err := os.WriteFile(pointerPath, []byte(userPreface), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(ws, Options{Platforms: []string{"copilot"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
+	if _, err := Run(ws, InstallOptions{Platforms: []string{"copilot"}, NoGitHook: true, Out: &bytes.Buffer{}}); err != nil {
 		t.Fatal(err)
 	}
 	content := readString(t, pointerPath)
@@ -294,7 +294,7 @@ func TestRun_AiderPrintsPostInstallNote(t *testing.T) {
 
 	// First install — note must print.
 	firstBuf := &bytes.Buffer{}
-	if _, err := Run(ws, Options{Platforms: []string{"aider"}, NoGitHook: true, Out: firstBuf}); err != nil {
+	if _, err := Run(ws, InstallOptions{Platforms: []string{"aider"}, NoGitHook: true, Out: firstBuf}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	mustContain(t, filepath.Join(ws.Root, "CONVENTIONS.md"), "librarian:start")
@@ -304,7 +304,7 @@ func TestRun_AiderPrintsPostInstallNote(t *testing.T) {
 
 	// Second install — CONVENTIONS.md already up to date, note must not repeat.
 	secondBuf := &bytes.Buffer{}
-	if _, err := Run(ws, Options{Platforms: []string{"aider"}, NoGitHook: true, Out: secondBuf}); err != nil {
+	if _, err := Run(ws, InstallOptions{Platforms: []string{"aider"}, NoGitHook: true, Out: secondBuf}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if strings.Contains(secondBuf.String(), ".aider.conf.yml") {

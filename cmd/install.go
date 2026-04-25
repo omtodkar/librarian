@@ -66,7 +66,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workspace: %w", err)
 	}
 
-	opts := install.Options{
+	opts := install.InstallOptions{
 		All:       installAll,
 		NoGitHook: installNoGitHook,
 		DryRun:    installDryRun,

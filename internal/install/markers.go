@@ -144,3 +144,126 @@ func appendBlock(existing []byte, block string) []byte {
 	buf.WriteString(block)
 	return buf.Bytes()
 }
+
+// removeMarkedBlock strips the <!-- librarian:start --> ... <!-- librarian:end -->
+// block from path, preserving user content around it. Thin wrapper over
+// removeBlockInFile for the HTML-comment marker variant. Used by the
+// uninstall path's marker-platform closures.
+func removeMarkedBlock(path string, warn io.Writer) (bool, error) {
+	return removeBlockInFile(path, markerStart, markerEnd, warn)
+}
+
+// removeBlockInFile strips the startMarker...endMarker block from path.
+// Behaviour:
+//   - path missing                 → (false, nil) — already gone, idempotent.
+//   - path exists, no markers      → (false, nil) — nothing to remove.
+//   - path exists, markers present → remove block, write remainder. If the
+//     remainder is empty / whitespace only, delete the file entirely
+//     (cleans up librarian-only files while preserving user files that had
+//     prose around the block).
+//   - torn block (start w/o end)   → warn, leave file untouched. The inverse
+//     of upsertBlockInFile's "replace start-to-EOF" — uninstall is
+//     conservative because deleting content past a stray start marker could
+//     eat user prose.
+//
+// Parameterised on markers so the same logic serves HTML-style (CLAUDE.md et
+// al.) and shell-style (post-commit hook) block removals.
+func removeBlockInFile(path, startMarker, endMarker string, warn io.Writer) (bool, error) {
+	existing, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	// Capture the file's mode immediately after a successful read so the
+	// rewrite path below preserves it. Matches writeExecutableIfChanged's
+	// ordering and shrinks the TOCTOU window between read and write.
+	mode := existingModeOr(path, 0o644)
+
+	updated, present, torn := removeBlock(existing, startMarker, endMarker)
+	if torn {
+		if warn != nil {
+			fmt.Fprintf(warn, "  warning: %s has a torn librarian block (end marker missing); left untouched — fix manually before re-running uninstall\n", path)
+		}
+		return false, nil
+	}
+	if !present {
+		return false, nil
+	}
+
+	// If the file is now effectively empty (only whitespace / newlines),
+	// delete it — this was a librarian-only file to begin with.
+	if len(bytes.TrimSpace(updated)) == 0 {
+		if err := os.Remove(path); err != nil {
+			return false, fmt.Errorf("removing empty %s: %w", path, err)
+		}
+		return true, nil
+	}
+	if bytes.Equal(updated, existing) {
+		return false, nil
+	}
+	// Rewrite with the file's captured-at-read-time mode. Specifically
+	// preserves the +x bit on .git/hooks/post-commit which installGitPostCommit
+	// set at 0o755; hardcoded 0o644 would silently break the hook.
+	if err := writeWithMode(path, updated, mode); err != nil {
+		return false, fmt.Errorf("writing %s: %w", path, err)
+	}
+	return true, nil
+}
+
+// existingModeOr returns the permission bits of path when it can be
+// stat'd, otherwise fallback. Used by the install/uninstall write paths
+// to preserve whatever the user had set (e.g. a tightened 0o600 on
+// settings.json, or 0o755 on a post-commit hook). Falling back to a
+// default when stat fails means create-new paths still get a sane mode.
+func existingModeOr(path string, fallback os.FileMode) os.FileMode {
+	if info, err := os.Stat(path); err == nil {
+		return info.Mode().Perm()
+	}
+	return fallback
+}
+
+// removeBlock returns existing with any startMarker...endMarker region cut
+// out. present=true when the start marker was found; torn=true when start
+// was found but end was not (caller decides what to do — the removal path
+// refuses to modify, the install path replaces to EOF).
+//
+// The returned slice normalises whitespace around the cut: the newline
+// before the start marker (if any) and the newline after the end marker
+// (already handled by renderBlock) are consumed so a marker block wrapped
+// in blank lines doesn't leave a double-blank gap behind.
+func removeBlock(existing []byte, startMarker, endMarker string) (updated []byte, present, torn bool) {
+	startIdx := bytes.Index(existing, []byte(startMarker))
+	if startIdx < 0 {
+		return existing, false, false
+	}
+	present = true
+
+	tail := existing[startIdx:]
+	endOffset := bytes.Index(tail, []byte(endMarker))
+	if endOffset < 0 {
+		return existing, true, true
+	}
+	endIdx := startIdx + endOffset + len(endMarker)
+	// Consume the trailing newline that renderBlock appends so we don't
+	// leave a stranded blank line where the block used to be.
+	if endIdx < len(existing) && existing[endIdx] == '\n' {
+		endIdx++
+	}
+
+	// Consume the blank-line separator appendBlock wrote before the block.
+	// appendBlock always emits `\n\n` before the block (one \n is the user
+	// content's terminating newline, the second is the blank-line separator).
+	// Eating exactly one leaves the user's original trailing newline intact
+	// so uninstall restores the pre-install shape byte-for-byte.
+	blockStart := startIdx
+	if blockStart > 0 && existing[blockStart-1] == '\n' {
+		blockStart--
+	}
+
+	var buf bytes.Buffer
+	buf.Write(existing[:blockStart])
+	buf.Write(existing[endIdx:])
+	return buf.Bytes(), true, false
+}

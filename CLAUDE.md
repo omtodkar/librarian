@@ -39,7 +39,7 @@ Primary CLI surface (`cmd/`):
 - `init` / `index` / `update` — bootstrap, index, write-and-reindex
 - `search` / `context` / `doc` / `list` / `status` — retrieval
 - `neighbors` / `path` / `explain` / `report` — graph queries
-- `install` — write platform-integration pointers (CLAUDE.md, AGENTS.md, …)
+- `install` / `uninstall` — write / reverse platform-integration pointers (CLAUDE.md, AGENTS.md, …)
 - `mcp serve` — optional stdio MCP server (opt-in; top-level `mcp` is a subcommand group)
 
 Every command supports `--json` for machine-readable output. See `docs/cli.md` for full flag reference.
