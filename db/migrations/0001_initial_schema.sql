@@ -1,3 +1,5 @@
+-- +goose Up
+-- +goose StatementBegin
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     file_path TEXT UNIQUE NOT NULL,
@@ -39,9 +41,6 @@ CREATE TABLE IF NOT EXISTS refs (
     PRIMARY KEY (doc_id, code_file_id)
 );
 
--- related_docs is superseded by the graph spine below.
-DROP TABLE IF EXISTS related_docs;
-
 -- Graph spine: generic nodes + edges. Every kind of thing librarian indexes
 -- (documents, code files, code symbols, config keys, ...) projects into a
 -- graph_node with a stable namespaced id (e.g., "doc:{uuid}", "file:{path}",
@@ -49,10 +48,10 @@ DROP TABLE IF EXISTS related_docs;
 -- connect them for structural queries via recursive CTE traversal.
 CREATE TABLE IF NOT EXISTS graph_nodes (
     id          TEXT PRIMARY KEY,
-    kind        TEXT NOT NULL,                           -- "document" | "code_file" | "symbol" | "config_key" | ...
-    label       TEXT NOT NULL DEFAULT '',                -- human-readable name
-    source_path TEXT,                                    -- file path, nullable for synthetic nodes
-    metadata    TEXT NOT NULL DEFAULT '{}',              -- format-specific JSON blob
+    kind        TEXT NOT NULL,
+    label       TEXT NOT NULL DEFAULT '',
+    source_path TEXT,
+    metadata    TEXT NOT NULL DEFAULT '{}',
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -63,7 +62,7 @@ CREATE TABLE IF NOT EXISTS graph_edges (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     from_node  TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
     to_node    TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
-    kind       TEXT NOT NULL,                            -- "mentions" | "shared_code_ref" | "imports" | "calls" | ...
+    kind       TEXT NOT NULL,
     weight     REAL NOT NULL DEFAULT 1.0,
     metadata   TEXT NOT NULL DEFAULT '{}',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -72,3 +71,18 @@ CREATE TABLE IF NOT EXISTS graph_edges (
 
 CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_node, kind);
 CREATE INDEX IF NOT EXISTS idx_graph_edges_to   ON graph_edges(to_node, kind);
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+DROP INDEX IF EXISTS idx_graph_edges_to;
+DROP INDEX IF EXISTS idx_graph_edges_from;
+DROP TABLE IF EXISTS graph_edges;
+DROP INDEX IF EXISTS idx_graph_nodes_source_path;
+DROP INDEX IF EXISTS idx_graph_nodes_kind;
+DROP TABLE IF EXISTS graph_nodes;
+DROP TABLE IF EXISTS refs;
+DROP TABLE IF EXISTS code_files;
+DROP TABLE IF EXISTS doc_chunks;
+DROP TABLE IF EXISTS documents;
+-- +goose StatementEnd

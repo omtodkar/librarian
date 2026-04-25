@@ -8,23 +8,30 @@ import (
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/pressly/goose/v3"
 
 	"librarian/db"
 )
 
 func init() {
 	sqlite_vec.Auto()
+	// goose chatters into the log package by default. Silence it — the
+	// librarian CLI owns all user-facing output; a surprise "OK 0001_..."
+	// line from a third-party logger looks like a bug.
+	goose.SetLogger(goose.NopLogger())
 }
 
 type Store struct {
-	db             *sql.DB
-	vecTableReady  bool
+	db            *sql.DB
+	vecTableReady bool
 }
 
 // Open opens (or creates) a SQLite database at dbPath, loads the sqlite-vec
-// extension, enables WAL mode and foreign keys, and applies the schema.
+// extension, enables WAL mode and foreign keys, and applies any pending
+// goose migrations from db.MigrationsFS. Returns an error for pre-goose
+// databases — see detectLegacyPreGooseDB.
 func Open(dbPath string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
 
@@ -33,63 +40,78 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	// Apply schema
-	if _, err := sqlDB.Exec(db.MigrationsSQL); err != nil {
+	if err := detectLegacyPreGooseDB(sqlDB); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("applying schema: %w", err)
+		return nil, err
 	}
 
-	// Additive migrations for columns that were added after the initial
-	// schema. `CREATE TABLE IF NOT EXISTS` in migrations.sql does not add
-	// new columns to existing tables, so we apply them here explicitly.
-	// Each is idempotent via a column-existence probe — survives fresh
-	// creates (column already present) and upgrades (column added).
-	// lib-3s5 will replace this with pressly/goose once adopted.
-	if err := ensureColumn(sqlDB, "code_files", "content_hash",
-		"ALTER TABLE code_files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
-	); err != nil {
+	if err := applyMigrations(sqlDB); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("applying additive migrations: %w", err)
+		return nil, err
 	}
 
 	s := &Store{db: sqlDB}
 
-	// Check if the vector table already exists (from a previous indexing run)
+	// Check if the vector table already exists (from a previous indexing run).
+	// Lazy-created on first chunk insert so the dimension matches the live
+	// embedding model — kept outside goose because dimensions are a runtime
+	// property, not a schema property.
 	var name string
-	err = sqlDB.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='doc_chunk_vectors'`).Scan(&name)
-	if err == nil {
+	if err := sqlDB.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='doc_chunk_vectors'`,
+	).Scan(&name); err == nil {
 		s.vecTableReady = true
 	}
 
 	return s, nil
 }
 
-// ensureColumn runs alterSQL only if the named column isn't already present
-// on the given table — idempotent column-add for tables created by the
-// original CREATE TABLE IF NOT EXISTS. Uses PRAGMA table_info, which is
-// always available in SQLite and avoids parsing the alter statement.
-func ensureColumn(db *sql.DB, table, column, alterSQL string) error {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return fmt.Errorf("table_info(%s): %w", table, err)
+// applyMigrations runs goose.Up against the embedded migrations directory.
+// Split from Open so tests can call it on a raw *sql.DB too.
+func applyMigrations(sqlDB *sql.DB) error {
+	goose.SetBaseFS(db.MigrationsFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		return fmt.Errorf("setting goose dialect: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("table_info(%s) scan: %w", table, err)
-		}
-		if name == column {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("table_info(%s) iter: %w", table, err)
-	}
-	if _, err := db.Exec(alterSQL); err != nil {
-		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	if err := goose.Up(sqlDB, "migrations"); err != nil {
+		return fmt.Errorf("applying migrations: %w", err)
 	}
 	return nil
+}
+
+// detectLegacyPreGooseDB refuses a database that has librarian tables from
+// the pre-goose era but no goose_db_version. "Tables exist without goose
+// tracking" is the fingerprint of the old MigrationsSQL blob era; running
+// goose.Up on it would succeed silently (every CREATE is IF NOT EXISTS) yet
+// never record v1 as applied, so every future migration would think it needed
+// to re-apply from scratch. Refusing up front with a clear remediation is
+// cheaper than debugging the resulting ghost-migration state later.
+//
+// Fresh databases (no tables at all) pass through — goose.Up populates them.
+func detectLegacyPreGooseDB(sqlDB *sql.DB) error {
+	var hasGoose bool
+	if err := sqlDB.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='goose_db_version')`,
+	).Scan(&hasGoose); err != nil {
+		return fmt.Errorf("probing for goose_db_version: %w", err)
+	}
+	if hasGoose {
+		return nil
+	}
+	var hasDocuments bool
+	if err := sqlDB.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents')`,
+	).Scan(&hasDocuments); err != nil {
+		return fmt.Errorf("probing for documents table: %w", err)
+	}
+	if !hasDocuments {
+		return nil
+	}
+	return fmt.Errorf(
+		"this database was created by a pre-goose version of librarian and " +
+			"is not compatible with the new migration framework; delete " +
+			".librarian/librarian.db and re-run 'librarian index' to rebuild it " +
+			"(your source files are untouched)")
 }
 
 // ensureVecTable creates the doc_chunk_vectors virtual table sized to the

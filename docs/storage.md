@@ -14,7 +14,8 @@ The storage layer (`internal/store/`) manages all interactions with the SQLite d
 
 1. Creates the parent directory if missing.
 2. Opens a SQLite connection with WAL + foreign keys via query string: `?_journal_mode=WAL&_foreign_keys=on`.
-3. Applies the schema from `db/migrations.sql` (embedded at build time via `db/embed.go`).
+3. Refuses a pre-goose database (librarian tables present, no `goose_db_version`) with a clear error — users should `rm .librarian/librarian.db` and re-index.
+4. Applies any pending migrations from `db/migrations/*.sql` via [pressly/goose](https://github.com/pressly/goose) (embedded at build time via `db/embed.go`).
 
 The `doc_chunk_vectors` vec0 virtual table is created **lazily** on the first vector insert via `ensureVecTable()`, with dimensions derived from the actual embedding model's output. This avoids hardcoding a vector size and lets the same binary work with any embedding provider.
 
@@ -22,7 +23,7 @@ The sqlite-vec extension is loaded automatically via `sqlite_vec.Auto()` in the 
 
 ## Schema
 
-Seven persistent tables plus the lazy-created vector table. Full DDL in `db/migrations.sql`.
+Seven persistent tables plus the lazy-created vector table, plus goose's own `goose_db_version` tracker. Full DDL in `db/migrations/0001_initial_schema.sql`.
 
 | Table | Primary key | Purpose |
 |---|---|---|
@@ -34,7 +35,7 @@ Seven persistent tables plus the lazy-created vector table. Full DDL in `db/migr
 | `graph_nodes` | `id` (namespaced text) | Generic node for every indexed entity (doc, file, symbol, config key) |
 | `graph_edges` | autoincrement | Typed edges between nodes: `mentions`, `shared_code_ref`, `imports`, `calls`, … |
 
-`related_docs` from earlier versions is **superseded** by the graph spine; the migration drops it.
+`related_docs` from earlier versions is **superseded** by the graph spine. It isn't in the current baseline migration — users coming from the pre-goose era are asked to re-index from scratch (see "Schema evolution" below).
 
 ## Document operations
 
@@ -159,4 +160,24 @@ Size per chunk = `dims × 4 bytes`. For a 3072-dim Gemini embedding that's ~12 K
 
 ## Schema evolution
 
-`db/migrations.sql` is re-run on every `store.Open`. Each statement is idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, explicit `DROP TABLE IF EXISTS` for removals). There is no versioned migration system yet — add columns with `ALTER TABLE … ADD COLUMN` guarded by SQLite's permissive idempotency, and replace tables by combining `DROP TABLE IF EXISTS` + `CREATE TABLE IF NOT EXISTS` as `related_docs → graph_nodes/edges` did.
+Migrations live under `db/migrations/<N>_<name>.sql` and are tracked by [pressly/goose](https://github.com/pressly/goose) in the `goose_db_version` table. `store.Open` calls `goose.Up` on every start; the tracker makes re-runs a no-op once migrations are applied.
+
+Each file uses goose's annotation syntax:
+
+```sql
+-- +goose Up
+-- +goose StatementBegin
+CREATE TABLE foo ( ... );
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+DROP TABLE foo;
+-- +goose StatementEnd
+```
+
+To add a migration, create `db/migrations/000N_what_you_did.sql` with the next sequential number and both Up/Down sections. The file is picked up automatically via the `//go:embed migrations/*.sql` directive in `db/embed.go`.
+
+Pre-goose databases (created before this framework landed) are rejected at `Open` with a friendly error — users delete `.librarian/librarian.db` and re-index to rebuild from the current baseline.
+
+The `doc_chunk_vectors` vec0 table is deliberately **not** managed by migrations: its dimension is a runtime property of the embedding model, created lazily on first insert.

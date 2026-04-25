@@ -96,7 +96,8 @@ internal/
   mcpserver/                      # MCP tool implementations
 
 db/
-  migrations.sql                  # SQLite schema, embedded via db/embed.go
+  migrations/                     # Numbered goose migrations, embedded via db/embed.go
+    0001_initial_schema.sql
 
 docs/                             # This documentation (librarian indexes itself)
 ```
@@ -115,6 +116,7 @@ docs/                             # This documentation (librarian indexes itself
 | `github.com/klippa-app/go-pdfium` | PDFium binding (WebAssembly via wazero) |
 | `github.com/pelletier/go-toml/v2` | TOML parsing |
 | `github.com/mark3labs/mcp-go` | MCP server SDK |
+| `github.com/pressly/goose/v3` | SQL migration framework |
 | `github.com/google/uuid` | UUIDs for documents / code files |
 | `gonum.org/v1/gonum` | Graph algorithms for `librarian report` |
 
@@ -167,6 +169,17 @@ No changes to walker / registry / store / CLI / MCP needed — those pick the ne
 1. New file in `cmd/` with a Cobra `*cobra.Command` and `init()` calling `rootCmd.AddCommand(…)`.
 2. Wire dependencies via the shared `config.Load()` + `store.Open()` + `embedding.NewEmbedder` pattern used by every other command.
 3. Document in [CLI Reference](cli.md).
+
+## Adding a migration
+
+Schema changes land as numbered [goose](https://github.com/pressly/goose) migration files under `db/migrations/`.
+
+1. Create `db/migrations/000N_short_description.sql` where `N` is the next free integer (zero-padded to four digits to keep ordering visually correct).
+2. Populate both `Up` and `Down` sections with goose's annotation syntax (see any existing migration for the shape). Both use `-- +goose StatementBegin` / `-- +goose StatementEnd` fences when the migration contains multiple statements.
+3. The file is picked up automatically on next `go build` via `//go:embed migrations/*.sql` in `db/embed.go` — no Go-side wiring needed.
+4. Run `go test ./internal/store/...` to exercise `Open` (which runs `goose.Up`) against a fresh DB and confirm the migration applies cleanly.
+
+Keep migrations append-only: never edit a migration that's shipped, even to fix a typo. If the change is wrong, write a new migration that corrects it.
 
 ## Beads issue tracker
 
