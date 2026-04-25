@@ -85,6 +85,7 @@ Tree-sitter powered. Six languages share one `CodeHandler` wrapping per-language
 | JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | function, arrow-fn, class, method, export, **class extends** (`inherits`; call-expression mixin fallback with `unresolved_expression=true`) |
 | TypeScript | `.ts` | everything above + interface, enum, type, abstract class, method signature, **class/interface extends + implements** |
 | TSX | `.tsx` | TypeScript + JSX |
+| Kotlin | `.kt` | class, interface, enum class, object, companion object, function, property, typealias, secondary constructor, `@annotation` signals, **data/sealed/open/abstract/override/suspend/interface/enum label signals**, **extends/implements** (`inherits`; heuristic: `constructor_invocation` target → extends, bare `user_type` → implements, interface-extends-interface → extends); same-file-import bare-name resolution including aliases |
 
 Each grammar implements the `Grammar` interface: AST node kinds mapped to Unit kinds, symbol name extraction, docstring extraction, import shapes, optional annotation + extra-signal extractors. The shared walker handles comment buffering (docstrings), container descent (class bodies), and rationale signal extraction (TODO/FIXME/HACK/XXX).
 

@@ -287,7 +287,8 @@ func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseCon
 
 	// pathPrefix starts at title (not pkg) so stem-based languages get the
 	// stem in every Unit.Path. For Go, title == pkg; behaviour unchanged.
-	h.extractUnits(root, content, title, "", symbolKinds, containerKinds, commentSet, doc, nil)
+	// Tail-pending at the root level has nowhere to attach; discard.
+	_ = h.extractUnits(root, content, title, "", symbolKinds, containerKinds, commentSet, doc, nil)
 	h.extractImports(root, content, doc)
 	if r, ok := h.grammar.(importResolver); ok {
 		doc.Refs = r.ResolveImports(doc.Refs, path, ctx)
@@ -353,7 +354,7 @@ func (h *CodeHandler) extractUnits(
 	commentSet map[string]bool,
 	doc *indexer.ParsedDoc,
 	inheritedPending []*sitter.Node,
-) {
+) []*sitter.Node {
 	pending := inheritedPending
 
 	for i := 0; i < int(node.NamedChildCount()); i++ {
@@ -397,9 +398,11 @@ func (h *CodeHandler) extractUnits(
 			}
 			// Hybrid: a node that's also a container has its body descended
 			// into with the symbol's name extending the path. pending is not
-			// forwarded — it was consumed by the hybrid's own Unit.
+			// forwarded — it was consumed by the hybrid's own Unit. Tail
+			// from the hybrid descent is discarded so a trailing comment
+			// inside one class body can't leak onto the next sibling class.
 			if isContainer && name != "" {
-				h.extractUnits(child, source, joinPath(pathPrefix, name), declaredKind, symbolKinds, containerKinds, commentSet, doc, nil)
+				_ = h.extractUnits(child, source, joinPath(pathPrefix, name), declaredKind, symbolKinds, containerKinds, commentSet, doc, nil)
 			}
 			pending = nil
 			continue
@@ -408,16 +411,17 @@ func (h *CodeHandler) extractUnits(
 		if isContainer {
 			// Pure container (no Unit for itself). Descend, forwarding `pending`
 			// so a preceding docstring-comment attaches to the first inner
-			// symbol. `containerKind` passes through unchanged — this container
-			// doesn't add a class scope of its own (e.g., decorated_definition
-			// wraps a class without changing whether we're inside a class).
+			// symbol. Tail-pending from the recursion is re-inherited so a
+			// comment that appears inside the container with no symbol
+			// following it (tree-sitter-kotlin traps the file-level KDoc
+			// inside package_header / import_header) can still attach to
+			// the symbol that follows the container at the outer frame.
 			containerName := h.grammar.SymbolName(child, source)
 			next := pathPrefix
 			if containerName != "" {
 				next = joinPath(pathPrefix, containerName)
 			}
-			h.extractUnits(child, source, next, containerKind, symbolKinds, containerKinds, commentSet, doc, pending)
-			pending = nil
+			pending = h.extractUnits(child, source, next, containerKind, symbolKinds, containerKinds, commentSet, doc, pending)
 			continue
 		}
 
@@ -425,6 +429,7 @@ func (h *CodeHandler) extractUnits(
 		// comments don't drift to the next symbol.
 		pending = nil
 	}
+	return pending
 }
 
 // buildUnit constructs a Unit from a symbol AST node. Docstrings come from
@@ -649,6 +654,7 @@ func init() {
 		NewJavaScriptGrammar(),
 		NewTypeScriptGrammar(),
 		NewTSXGrammar(),
+		NewKotlinGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}
