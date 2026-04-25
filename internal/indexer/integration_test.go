@@ -24,6 +24,17 @@ func (f fakeEmbedder) Embed(text string) ([]float64, error) {
 	return make([]float64, f.dim), nil
 }
 
+// EmbedBatch returns one zero-vector per input. Only the length and order
+// contract is exercised by the indexer; vector content doesn't matter for
+// wiring tests.
+func (f fakeEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
+	out := make([][]float64, len(texts))
+	for i := range texts {
+		out[i] = make([]float64, f.dim)
+	}
+	return out, nil
+}
+
 // Model satisfies the Embedder interface. Defaults to "fake-embedder" when
 // the test didn't set a specific name, so every caller that doesn't care
 // about mismatch detection still compiles.

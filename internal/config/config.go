@@ -68,6 +68,11 @@ type EmbeddingConfig struct {
 	Model    string `mapstructure:"model"`
 	APIKey   string `mapstructure:"api_key"`
 	BaseURL  string `mapstructure:"base_url"`
+	// BatchSize caps the number of texts per EmbedBatch API call. 0 (default)
+	// resolves to 100 inside each provider constructor; values above the
+	// provider's documented max are silently clamped down. This is the
+	// ceiling, not a demand.
+	BatchSize int `mapstructure:"batch_size"`
 }
 
 type ChunkingConfig struct {

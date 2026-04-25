@@ -119,10 +119,12 @@ Known limitation: if two runs use the same model name against different OpenAI-c
 
 ## Pipeline flow
 
-**Indexing**: each chunk's `EmbeddingText` (context header + content + signal line — see [Indexing Pipeline](indexing.md#stage-4-chunk)) passes to `Embed()`. The returned `[]float64` is converted to float32 little-endian bytes at the store boundary and inserted into `doc_chunk_vectors` alongside the chunk metadata.
+**Indexing**: each document's chunks are batched through `EmbedBatch(texts []string) ([][]float64, error)` — one HTTP call per `embedding.batch_size` chunks (default 100). Provider implementations split larger inputs into waves internally and preserve input order. Returned vectors are converted to float32 little-endian bytes at the store boundary and inserted into `doc_chunk_vectors` alongside the chunk metadata.
 
-**Search**: `librarian search` / `search_docs` / `get_context` all embed the user's query string once, over-fetch `limit × 3` candidates from sqlite-vec, then re-rank with signal metadata. See [Storage Layer](storage.md#search-re-ranking).
+**Search**: `librarian search` / `search_docs` / `get_context` all embed the user's query string once via `Embed()` (the single-query method), over-fetch `limit × 3` candidates from sqlite-vec, then re-rank with signal metadata. See [Storage Layer](storage.md#search-re-ranking).
 
 ## Cost considerations
 
-One embedding request per chunk at index time. A small docs directory (~50 files, ~200 chunks) is trivially cheap on any provider. A large monorepo with code + docs + PDFs can run into hundreds of thousands of chunks — at that scale a local embedder (LM Studio, Ollama) becomes attractive for iteration speed and cost. Content-hash-based incremental indexing means only changed files re-embed on subsequent runs.
+Indexing sends one batch request per ~100 chunks (configurable via `embedding.batch_size`). A small docs directory (~50 files, ~200 chunks) is two or three requests total — trivially cheap on any provider. A large monorepo with code + docs + PDFs running into hundreds of thousands of chunks scales linearly with request count; batching caps that at `total_chunks / batch_size`. Content-hash-based incremental indexing means only changed files re-embed on subsequent runs.
+
+For local endpoints (LM Studio, Ollama, vLLM), raising `batch_size` up to the server's limit (typically well under `openaiBatchMax` of 2048) reduces per-request overhead further. For Gemini, 100 is both the default and the documented cap — raising it has no effect because EmbedBatch clamps down silently.

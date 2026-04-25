@@ -90,6 +90,7 @@ embedding:
   provider: gemini         # gemini | openai (or any OpenAI-compatible endpoint)
   model: gemini-embedding-2   # 3072-dim multimodal; older text-embedding-004 is deprecated
   # base_url: for OpenAI-compatible endpoints (e.g. http://localhost:1234/v1)
+  # batch_size: 100           # chunks per embedding API call (Gemini cap 100, OpenAI cap 2048)
 
 chunking:
   max_tokens: 512

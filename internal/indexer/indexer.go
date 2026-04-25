@@ -614,14 +614,22 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		return fmt.Errorf("creating document: %w", err)
 	}
 
-	for _, chunk := range chunks {
-		vector, err := idx.embedder.Embed(chunk.EmbeddingText)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("chunk %d embed: %s", chunk.ChunkIndex, err))
-			continue
-		}
-		_, err = idx.store.AddChunk(store.AddChunkInput{
-			Vector:           vector,
+	// Batch-embed every chunk's text in one shot (provider slices into waves
+	// of batch_size internally). Previously this was one HTTP call per chunk
+	// which dominated indexing wall-clock and tripped rate limits quickly.
+	texts := make([]string, len(chunks))
+	for i, c := range chunks {
+		texts[i] = c.EmbeddingText
+	}
+	vectors, err := idx.embedder.EmbedBatch(texts)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("batch embed (%d chunks): %s", len(chunks), err))
+		return nil
+	}
+	model := idx.embedder.Model()
+	for i, chunk := range chunks {
+		_, err := idx.store.AddChunk(store.AddChunkInput{
+			Vector:           vectors[i],
 			Content:          chunk.EmbeddingText,
 			FilePath:         file.FilePath,
 			SectionHeading:   chunk.SectionHeading,
@@ -630,7 +638,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 			TokenCount:       chunk.TokenCount,
 			DocID:            doc.ID,
 			SignalMeta:       chunk.SignalMeta,
-			Model:            idx.embedder.Model(),
+			Model:            model,
 		})
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("chunk %d: %s", chunk.ChunkIndex, err))

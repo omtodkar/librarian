@@ -33,6 +33,7 @@ embedding:
   provider: gemini         # gemini | openai (or any OpenAI-compatible endpoint)
   model: gemini-embedding-2   # 3072-dim multimodal; older text-embedding-004 is deprecated
   # base_url: for OpenAI-compatible endpoints (e.g. http://localhost:1234/v1)
+  # batch_size: 100           # chunks per embedding API call (Gemini cap 100, OpenAI cap 2048)
 
 chunking:
   max_tokens: 512
@@ -87,6 +88,7 @@ exclude_patterns:
 | `model` | conditionally | — | Required for `openai`; optional for `gemini` (has a built-in default) |
 | `api_key` | no | — | Falls back to `LIBRARIAN_EMBEDDING_API_KEY` / `GEMINI_API_KEY` env vars for Gemini |
 | `base_url` | no | `http://localhost:1234/v1` | Only read for `openai`; set to your provider's endpoint |
+| `batch_size` | no | `100` | Max chunks per `EmbedBatch` API call at index time. `0` resolves to `100`. Silently clamped to the provider's documented hard max (Gemini 100, OpenAI 2048). Does not affect the single-query search path. |
 
 See [Embedding](embedding.md) for provider-specific detail.
 
