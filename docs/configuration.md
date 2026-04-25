@@ -169,7 +169,16 @@ consumes this; future Python-specific options will land here.
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `src_roots` | `[]` | Directories (relative to the workspace root) whose immediate children are top-level Python packages. Files under a listed root skip the `__init__.py` walk and anchor at the root boundary — covers PEP 420 namespace packages and src-layout projects. Empty (default): walk upward looking for an `__init__.py` chain, then fall back to a virtual directory package as last resort |
+| `src_roots` | `[]` | Directories (relative to the workspace root) whose immediate children are top-level Python packages. Files under a listed root skip the `__init__.py` walk and anchor at the root boundary — covers PEP 420 namespace packages and src-layout projects. Explicit entries are merged with any auto-detected roots from `pyproject.toml` (see below). Empty (default) + no `pyproject.toml`: walk upward looking for an `__init__.py` chain, then fall back to a virtual directory package as last resort |
+
+**`pyproject.toml` auto-detection.** The indexer reads `<project_root>/pyproject.toml` at startup and derives implicit `src_roots` from the package-layout metadata:
+
+- `[tool.setuptools]` `package-dir = {"" = "src"}` → `src/` (the pre-find src-layout idiom)
+- `[tool.setuptools.packages.find]` `where = ["src", "libs"]` → `src/`, `libs/`
+- `[[tool.poetry.packages]]` `{include = "foo", from = "src"}` → `src/`
+- `[tool.hatch.build.targets.wheel]` or `.sdist` `packages = ["src/foo"]` → `src/` (parent of each declared package; wheel-only and sdist-only projects are both covered)
+
+Explicit `python.src_roots` entries take priority (matched first), auto-detected roots append. Missing or malformed `pyproject.toml` falls back gracefully — explicit config still applies. Flit, PDM, Rye, and maturin layouts aren't auto-detected yet; users of those build backends should list `src_roots` explicitly.
 
 Without resolution, `from . import utils` inside `mypkg/a.py` produces graph
 node `sym:.utils` while `from mypkg import utils` elsewhere produces

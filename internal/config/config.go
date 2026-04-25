@@ -106,10 +106,18 @@ type PythonConfig struct {
 	// skip the __init__.py walk and anchor at the src_root boundary — covers
 	// PEP 420 namespace packages and src-layout projects. Example:
 	//   python.src_roots: ["src"]   → src/mypkg/sub/a.py has package mypkg.sub
-	// Empty (default): fall back to __init__.py walk, then a virtual directory
-	// package as last resort. Prefixes match after filepath.Clean; src_roots
-	// themselves are not recursive — only files under an immediate child of
-	// the listed directory are resolved by this rule.
+	//
+	// The indexer additionally auto-detects src_roots from pyproject.toml at
+	// the project root (setuptools packages.find.where, Poetry packages[].from,
+	// and Hatch build.targets.wheel.packages parent dirs). Explicit entries
+	// here are merged with auto-detected ones — explicit first, auto-detect
+	// appended, deduped on cleaned absolute path.
+	//
+	// Empty (default) + no pyproject.toml: fall back to __init__.py walk,
+	// then a virtual directory package as last resort. Prefixes match after
+	// filepath.Clean; src_roots themselves are not recursive — only files
+	// under an immediate child of the listed directory are resolved by this
+	// rule.
 	SrcRoots []string `mapstructure:"src_roots"`
 }
 

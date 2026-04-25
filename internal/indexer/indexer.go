@@ -109,24 +109,56 @@ func NewWithRegistry(s *store.Store, cfg *config.Config, embedder embedding.Embe
 	}
 }
 
-// resolvePythonSrcRoots joins each configured src_root onto ProjectRoot and
-// filepath.Cleans it, so per-file handler dispatch can compare absolute paths
-// without re-resolving. Returns nil when no roots are configured or
-// ProjectRoot is empty (tests without a workspace).
+// resolvePythonSrcRoots produces the absolute, cleaned src-root list the
+// Python import resolver matches against. Two sources are merged:
+//
+//  1. Explicit cfg.Python.SrcRoots (user opt-in, matched first — if a user
+//     bothered to configure something, they expect it to win).
+//  2. pyproject.toml auto-detection (setuptools / Poetry / Hatch layouts),
+//     appended after explicit entries. Dedupes on cleaned absolute path so
+//     a user redundantly listing what the TOML already declares doesn't
+//     double-count.
+//
+// Malformed pyproject.toml emits one stderr warning and drops auto-detect
+// for this run — explicit config still applies. Missing pyproject.toml is
+// silent (not every indexed project is Python).
+//
+// Returns nil when ProjectRoot is empty (tests without a workspace) or
+// neither source yields anything.
 func resolvePythonSrcRoots(cfg *config.Config) []string {
-	if cfg == nil || cfg.ProjectRoot == "" || len(cfg.Python.SrcRoots) == 0 {
+	if cfg == nil || cfg.ProjectRoot == "" {
 		return nil
 	}
-	out := make([]string, 0, len(cfg.Python.SrcRoots))
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(abs string) {
+		if _, ok := seen[abs]; ok {
+			return
+		}
+		seen[abs] = struct{}{}
+		out = append(out, abs)
+	}
+
 	for _, r := range cfg.Python.SrcRoots {
 		if r == "" {
 			continue
 		}
 		if filepath.IsAbs(r) {
-			out = append(out, filepath.Clean(r))
+			add(filepath.Clean(r))
 			continue
 		}
-		out = append(out, filepath.Clean(filepath.Join(cfg.ProjectRoot, r)))
+		add(filepath.Clean(filepath.Join(cfg.ProjectRoot, r)))
+	}
+
+	detected, err := detectPythonSrcRootsFromPyproject(cfg.ProjectRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "librarian: %s; python src-root auto-detect disabled\n", err)
+	}
+	for _, d := range detected {
+		add(d)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

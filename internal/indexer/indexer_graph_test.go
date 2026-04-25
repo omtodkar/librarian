@@ -709,6 +709,51 @@ func TestIntegration_Graph_ForceIndexCompatibleWithOrphanSweep(t *testing.T) {
 	}
 }
 
+// TestIntegration_Graph_PythonPyprojectAutoDetectsSrcRoot exercises the
+// full auto-detect chain: a PEP 420 namespace package under src/ with no
+// __init__.py anywhere, declared via pyproject.toml setuptools config, is
+// detected by the indexer and anchors the resolver correctly. Without
+// pyproject.toml detection the resolver would fall to the virtual
+// directory fallback and land on sym:src.ns.b instead of sym:ns.b.
+func TestIntegration_Graph_PythonPyprojectAutoDetectsSrcRoot(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"pyproject.toml": "[tool.setuptools.packages.find]\nwhere = [\"src\"]\n",
+		"src/ns/utils.py": "def helper():\n    return 1\n",
+		"src/ns/a.py":     "from . import utils\n\ndef a():\n    return utils.helper()\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	// newGraphTestIndexer builds its cfg without Python.SrcRoots; the
+	// pyproject.toml must supply the anchor by itself.
+	idx, s := newGraphTestIndexer(t, root)
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	if n, _ := s.GetNode("sym:ns.utils"); n == nil {
+		nodes, _ := s.ListNodes()
+		var syms []string
+		for _, nd := range nodes {
+			if nd.Kind == "symbol" {
+				syms = append(syms, nd.ID)
+			}
+		}
+		t.Errorf("sym:ns.utils not found; symbol nodes: %v", syms)
+	}
+	if stale, _ := s.GetNode("sym:src.ns.utils"); stale != nil {
+		t.Error("virtual-package fallback fired despite pyproject.toml auto-detect")
+	}
+}
+
 // TestIntegration_Graph_PythonSrcRootsResolvesWithoutInitPy pins that
 // configuring python.src_roots lets PEP 420 namespace packages (no
 // __init__.py) resolve too. Without src_roots, a file under src/ns/ has no
