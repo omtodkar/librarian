@@ -37,9 +37,12 @@ import (
 // open, abstract, suspend) emit as Signal{Kind="label"} via
 // extraSignalsExtractor.
 //
-// Extension functions: `fun String.toSlug()` — the receiver type (`String`)
-// is stashed on the Unit.Metadata["receiver"] so "all extensions of String"
-// stays queryable.
+// Extension functions: `fun String.toSlug()` — the receiver type surfaces in
+// Unit.Content and Title but is NOT extracted as structured metadata today.
+// Receiver-type extraction (so "all extensions of String" becomes a cheap
+// label/metadata filter) is deferred to a follow-up bead — the Grammar
+// interface would need a symbolMetadataExtractor hook since buildUnit in
+// code.go does not populate Unit.Metadata from any existing extractor.
 //
 // Imports: `import foo.bar.Baz`, `import foo.bar.Baz as B`, `import foo.*`.
 // Wildcards land with `metadata.wildcard=true`; aliases populate Alias.
@@ -84,12 +87,19 @@ func (*KotlinGrammar) SymbolKinds() map[string]string {
 // package_header / import_list / import_header / identifier are included
 // because tree-sitter-kotlin's extent rules greedily absorb the trailing
 // file-level KDoc into whichever of these nodes precedes the first class
-// declaration. Making them pure containers lets the walker descend, buffer
-// the trapped multiline_comment, and — via the walker's tail-pending
-// bubble — attach it to the class that follows at the file level.
-// identifier-as-container is scoped to this grammar only; other grammars
-// never register identifier as a container so their walker cost is
-// unchanged.
+// declaration. The trap nests: a file with no imports puts the KDoc in
+// package_header; a file with imports can place it inside the last
+// import_header; either form can nest one more level into the identifier
+// child. Making all four pure containers lets the walker descend through
+// the chain, buffer the trapped multiline_comment at whichever depth it
+// landed, and — via the walker's tail-pending bubble — attach it to the
+// class that follows at the file level.
+//
+// Kotlin is the only current grammar to register `identifier` as a
+// container. That's a per-grammar choice: any future grammar that needs
+// to descend into identifier (say, to rescue a trapped comment) is free
+// to do the same without affecting the shared walker's cost for grammars
+// that don't.
 func (*KotlinGrammar) ContainerKinds() map[string]bool {
 	return map[string]bool{
 		"class_declaration":  true,
@@ -270,6 +280,12 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 	if n.Type() == "class_declaration" {
 		if hasAnonymousChild(n, "interface") {
 			out = append(out, indexer.Signal{Kind: "label", Value: "interface"})
+			// `fun interface Foo` (Kotlin 1.5 SAM) — surfaces as an
+			// extra label so callers can distinguish functional
+			// interfaces from plain ones without re-parsing.
+			if hasAnonymousChild(n, "fun") {
+				out = append(out, indexer.Signal{Kind: "label", Value: "fun_interface"})
+			}
 		}
 		if hasAnonymousChild(n, "enum") {
 			out = append(out, indexer.Signal{Kind: "label", Value: "enum"})
@@ -295,8 +311,11 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 				continue
 			}
 			switch keyword {
-			case "data", "sealed", "open", "abstract", "inline",
+			case "data", "sealed", "open", "abstract", "inline", "value",
 				"override", "suspend", "companion":
+				// `value` is the Kotlin 1.5+ successor to `inline class`
+				// — both emit as labels so "find all value classes"
+				// matches either syntax form.
 				out = append(out, indexer.Signal{Kind: "label", Value: keyword})
 			}
 		}
@@ -331,20 +350,19 @@ func (*KotlinGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 			if name == "" {
 				continue
 			}
+			// Default: bare user_type on a class → implemented interface;
+			// enum class targets → implemented interface (enums can't
+			// extend). Only two cases override that default.
 			relation := "implements"
 			switch {
 			case isInterface:
 				// `interface X : Y, Z` — every target is a parent interface.
 				relation = "extends"
-			case isEnum:
-				// `enum class X : I` — enums can only implement interfaces.
-				relation = "implements"
-			case target.Type() == "constructor_invocation":
-				// Class with a concrete superclass (`: Base()`).
+			case !isEnum && target.Type() == "constructor_invocation":
+				// Class with a concrete superclass (`: Base()`). Excluded
+				// for enums because an `enum class X : I()` would be a
+				// syntax error anyway.
 				relation = "extends"
-			default:
-				// Bare user_type on a class — implemented interface.
-				relation = "implements"
 			}
 			meta := map[string]any{}
 			if len(args) > 0 {
@@ -376,16 +394,12 @@ func kotlinExtractParentType(n *sitter.Node, source []byte) (string, []string) {
 	switch n.Type() {
 	case "user_type":
 		return kotlinUserTypeName(n, source)
-	case "constructor_invocation":
-		// Find the user_type child; ignore the value_arguments.
-		for i := 0; i < int(n.NamedChildCount()); i++ {
-			c := n.NamedChild(i)
-			if c != nil && c.Type() == "user_type" {
-				return kotlinUserTypeName(c, source)
-			}
-		}
-	case "explicit_delegation":
-		// `Foo by bar` — find the type.
+	case "constructor_invocation", "explicit_delegation":
+		// constructor_invocation wraps a user_type + value_arguments
+		// (`Base(arg)`); explicit_delegation wraps a user_type + `by`
+		// expression (`Foo by bar`). Both expose the target type as a
+		// direct user_type child — the rest is arguments / delegate we
+		// don't need for inheritance edges.
 		for i := 0; i < int(n.NamedChildCount()); i++ {
 			c := n.NamedChild(i)
 			if c != nil && c.Type() == "user_type" {

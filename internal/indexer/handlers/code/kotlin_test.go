@@ -55,7 +55,6 @@ typealias UserId = String
 fun String.toSlug(): String = this.lowercase().replace(" ", "-")
 `
 
-// Inherits refs local to a specific Source (child class Path).
 func TestKotlinGrammar_ParseExtractsTypesAndFunctions(t *testing.T) {
 	h := code.New(code.NewKotlinGrammar())
 	doc, err := h.Parse("src/AuthService.kt", []byte(kotlinSample))

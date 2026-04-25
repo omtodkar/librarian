@@ -191,6 +191,76 @@ python:
     - src
 ```
 
+## Local embedding + rerank via Infinity
+
+Running both the embedder and the reranker locally keeps every indexed chunk on your machine and lets you shut down cloud embedding providers entirely. [Infinity](https://github.com/michaelfeil/infinity) serves any SentenceTransformers-compatible embedding model on `/v1/embeddings` and any cross-encoder reranker on `/v1/rerank` from a single process. Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B together need ~1.5 GB of model weights and run on Apple Silicon (MPS), NVIDIA GPUs (CUDA), or CPU fallback.
+
+### Setup
+
+One-time:
+
+```sh
+brew install uv        # or: curl -LsSf https://astral.sh/uv/install.sh | sh
+make infinity-setup    # creates ~/.local/share/librarian/infinity/.venv with infinity-emb
+```
+
+Day-to-day:
+
+```sh
+make infinity-start    # starts both models on port 7997
+make infinity-smoke    # hits /v1/embeddings + /v1/rerank to verify
+make infinity-status   # pid, port, loaded models
+make infinity-logs     # tail the server log
+make infinity-stop
+```
+
+Under the hood, `make infinity-start` runs `scripts/infinity.sh start`, which execs `infinity_emb v2 --model-id Qwen/Qwen3-Embedding-0.6B --model-id Qwen/Qwen3-Reranker-0.6B --engine torch --device mps --port 7997`. See the script header for environment-variable overrides (`INFINITY_PORT`, `INFINITY_EMBED_MODEL`, `INFINITY_RERANK_MODEL`, `INFINITY_ENGINE`, `INFINITY_DEVICE`).
+
+### Point Librarian at it
+
+Once `make infinity-smoke` prints `dim = 1024` for the embedding test, swap `.librarian/config.yaml`:
+
+```yaml
+embedding:
+  provider: openai              # Infinity speaks the OpenAI-compatible shape
+  base_url: http://127.0.0.1:7997/v1
+  model: Qwen/Qwen3-Embedding-0.6B
+  batch_size: 32
+```
+
+Set any non-empty API key (Infinity ignores it unless you configured one):
+
+```sh
+export LIBRARIAN_EMBEDDING_API_KEY=local
+```
+
+Dimension changed from whatever you had (Gemini: 3072, LM Studio Nomic: 768) to 1024, so **force a reindex**:
+
+```sh
+librarian index --force
+```
+
+### Reranker (pending `lib-5ny`)
+
+Infinity already exposes `/v1/rerank` for Qwen3-Reranker-0.6B — hit it with:
+
+```sh
+curl http://127.0.0.1:7997/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-Reranker-0.6B",
+       "query": "how does auth work",
+       "documents": ["...", "..."]}'
+```
+
+The response is `{"results": [{"index": N, "relevance_score": 0.xx, "document": "..."}, ...]}` — proper cross-encoder scores, no chat-completion hacks. Librarian doesn't yet call this endpoint (tracked in `bd show lib-5ny`); when that lands the config will gain a sibling `rerank:` block pointing at the same `127.0.0.1:7997/v1`.
+
+### Platform notes
+
+- **Mac (Apple Silicon):** MPS is auto-detected. Expect ~30ms per embedding, ~100-200ms per rerank pair for the 0.6B models. Warmup ≈60s on first run while weights download.
+- **Linux with NVIDIA GPU:** pass `INFINITY_DEVICE=cuda make infinity-start` — 3-5× faster than MPS.
+- **CPU fallback:** `INFINITY_DEVICE=cpu`. Usable but slower; batch size of 8 recommended instead of 32.
+- **Docker alternative:** `docker run -p 7997:7997 michaelf34/infinity:latest v2 --model-id Qwen/Qwen3-Embedding-0.6B --model-id Qwen/Qwen3-Reranker-0.6B --port 7997`. Loses GPU access on Mac (no MPS passthrough in Docker Desktop); CUDA works with `--gpus all` on Linux.
+
 ### Ignore file
 
 `.librarian/ignore` (gitignore-style, one pattern per line) stacks on top of `exclude_patterns`. `librarian init` seeds it with common patterns:

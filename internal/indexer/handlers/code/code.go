@@ -6,8 +6,9 @@
 // This package ships the Grammar interface + CodeHandler wiring. Concrete
 // languages live in sibling files (golang.go, python.go, java.go,
 // javascript.go — the last ships TypeScript, TSX, and JavaScript grammars
-// backed by a shared base). Each grammar registers through the package-level
-// init() so the extension → handler mapping stays in one place.
+// backed by a shared base — and kotlin.go). Each grammar registers through
+// the package-level init() so the extension → handler mapping stays in one
+// place.
 package code
 
 import (
