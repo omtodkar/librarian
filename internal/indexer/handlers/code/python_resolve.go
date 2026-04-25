@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"librarian/internal/indexer"
 )
@@ -238,6 +239,29 @@ func containingPackage(absPath, projectRoot string, srcRoots []string, statFn fu
 	return nil
 }
 
+// cachedContainingPackage wraps containingPackage with a per-graph-pass
+// memo keyed on the file's parent directory. Two files in the same directory
+// resolve to the same package parts, so caching on dir collapses repeat
+// __init__.py walks across a typical deep package. cache=nil disables
+// memoization (ParseCtx callers outside the indexer pass a nil cache).
+//
+// The cached value may itself be nil (file has no package) — so we sentinel
+// with a typed zero-length slice on miss-caching to distinguish "not cached"
+// from "cached empty". sync.Map's Load/Store semantics handle the distinction
+// naturally via the presence bool.
+func cachedContainingPackage(absPath, projectRoot string, srcRoots []string, cache *sync.Map) []string {
+	if cache == nil {
+		return containingPackage(absPath, projectRoot, srcRoots, nil)
+	}
+	dir := filepath.Dir(filepath.Clean(absPath))
+	if v, ok := cache.Load(dir); ok {
+		return v.([]string)
+	}
+	parts := containingPackage(absPath, projectRoot, srcRoots, nil)
+	cache.Store(dir, parts)
+	return parts
+}
+
 // ResolveImports rewrites relative-form Reference.Target values in refs to
 // absolute dotted paths using the file's location and ctx.PythonSrcRoots. Refs
 // with Kind != "import" or without leading dots pass through unchanged.
@@ -254,7 +278,7 @@ func (*PythonGrammar) ResolveImports(refs []indexer.Reference, path string, ctx 
 		return refs
 	}
 	projectRoot := inferProjectRoot(ctx.AbsPath, path)
-	anchor := containingPackage(ctx.AbsPath, projectRoot, ctx.PythonSrcRoots, nil)
+	anchor := cachedContainingPackage(ctx.AbsPath, projectRoot, ctx.PythonSrcRoots, ctx.PackageCache)
 
 	for i, r := range refs {
 		if r.Kind != "import" {

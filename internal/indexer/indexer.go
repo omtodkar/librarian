@@ -32,6 +32,16 @@ type Indexer struct {
 	// repeat the join/clean work. Consumed by parseFile when building
 	// ParseContext. Nil when no roots are configured.
 	pythonSrcRoots []string
+
+	// pythonPackageCache memoizes directory → package-parts lookups within a
+	// single IndexProjectGraph pass. Reset at the start of every pass so
+	// content added mid-session (fixture files in tests, user edits between
+	// re-indexes) is observed afresh. Nil pointer semantics: parseFile
+	// passes &idx.pythonPackageCache through ParseContext, and the resolver
+	// treats a nil inner map as no-op (no caching). A fresh sync.Map per
+	// run is cheaper than threading allocation decisions through the call
+	// graph and makes concurrent access safe by default.
+	pythonPackageCache sync.Map
 }
 
 // SetProgressOverride forces the progress-reporting mode for subsequent
@@ -130,9 +140,19 @@ func (idx *Indexer) parseFile(handler FileHandler, file WalkResult, content []by
 		return ctxh.ParseCtx(file.FilePath, content, ParseContext{
 			AbsPath:        file.AbsPath,
 			PythonSrcRoots: idx.pythonSrcRoots,
+			PackageCache:   &idx.pythonPackageCache,
 		})
 	}
 	return handler.Parse(file.FilePath, content)
+}
+
+// resetPythonPackageCache clears the memo for a fresh graph pass. Called from
+// IndexProjectGraph before any file is walked so the cache reflects the
+// on-disk state at pass-start. Swapping the whole sync.Map is preferable to
+// iterating + deleting since fresh passes are expected to populate most
+// entries from scratch anyway.
+func (idx *Indexer) resetPythonPackageCache() {
+	idx.pythonPackageCache = sync.Map{}
 }
 
 func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, error) {
@@ -184,6 +204,8 @@ func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, er
 // untouched.
 func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult, error) {
 	result := &GraphResult{}
+
+	idx.resetPythonPackageCache()
 
 	walkCfg := GraphWalkConfig{
 		HonorGitignore:  idx.cfg.Graph.HonorGitignore,

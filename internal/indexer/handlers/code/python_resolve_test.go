@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"librarian/internal/indexer"
@@ -314,6 +316,108 @@ func TestContainingPackage_SrcRootsBypassInitRequirement(t *testing.T) {
 	want := []string{"ns", "deep"}
 	if !equalStrings(got, want) {
 		t.Errorf("pep420 via src_roots: got %v, want %v", got, want)
+	}
+}
+
+// TestCachedContainingPackage_SharesResultsAcrossFilesInSameDir pins the
+// cache's payoff: two files in the same directory must produce the same
+// package parts via ONE containingPackage call, not two. We can't directly
+// observe the underlying containingPackage invocations, so use two files
+// with different absPaths but the same parent dir and assert identical
+// results — and then separately hammer the cache to confirm the sync.Map
+// stores the parts keyed on dir.
+func TestCachedContainingPackage_SharesResultsAcrossFilesInSameDir(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel string) {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, nil, 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	write("mypkg/__init__.py")
+	write("mypkg/sub/__init__.py")
+	write("mypkg/sub/a.py")
+	write("mypkg/sub/b.py")
+
+	var cache sync.Map
+	srcRoots := []string(nil)
+
+	partsA := cachedContainingPackage(filepath.Join(root, "mypkg", "sub", "a.py"), root, srcRoots, &cache)
+	partsB := cachedContainingPackage(filepath.Join(root, "mypkg", "sub", "b.py"), root, srcRoots, &cache)
+
+	want := []string{"mypkg", "sub"}
+	if !equalStrings(partsA, want) || !equalStrings(partsB, want) {
+		t.Errorf("got a=%v b=%v, both want %v", partsA, partsB, want)
+	}
+
+	// One entry in the cache — keyed on the shared dir, not per-file.
+	var n int
+	cache.Range(func(k, v any) bool { n++; return true })
+	if n != 1 {
+		t.Errorf("cache size = %d, want 1 (shared dir key)", n)
+	}
+}
+
+// TestCachedContainingPackage_NilCacheDelegates verifies that a nil cache
+// pointer falls through to the uncached path (ParseCtx callers outside the
+// indexer pass nil).
+func TestCachedContainingPackage_NilCacheDelegates(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel string) {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, nil, 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	write("mypkg/__init__.py")
+	write("mypkg/a.py")
+
+	parts := cachedContainingPackage(filepath.Join(root, "mypkg", "a.py"), root, nil, nil)
+	if !equalStrings(parts, []string{"mypkg"}) {
+		t.Errorf("nil-cache got %v, want [mypkg]", parts)
+	}
+}
+
+// TestCachedContainingPackage_ConcurrentSafeForSameDir verifies the sync.Map
+// protects against the classic double-compute race when two goroutines miss
+// the cache simultaneously. Both may compute, but the cache must still
+// converge on a single stored value and both results must be equal.
+func TestCachedContainingPackage_ConcurrentSafeForSameDir(t *testing.T) {
+	root := t.TempDir()
+	mustWrite := func(rel string) {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, nil, 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	mustWrite("pkg/__init__.py")
+	mustWrite("pkg/a.py")
+
+	var cache sync.Map
+	var wg sync.WaitGroup
+	var okCount atomic.Int32
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			parts := cachedContainingPackage(filepath.Join(root, "pkg", "a.py"), root, nil, &cache)
+			if equalStrings(parts, []string{"pkg"}) {
+				okCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if okCount.Load() != 16 {
+		t.Errorf("only %d/16 goroutines got the expected parts", okCount.Load())
 	}
 }
 

@@ -88,6 +88,18 @@ Tree-sitter powered. Six languages share one `CodeHandler` wrapping per-language
 
 Each grammar implements the `Grammar` interface: AST node kinds mapped to Unit kinds, symbol name extraction, docstring extraction, import shapes, optional annotation + extra-signal extractors. The shared walker handles comment buffering (docstrings), container descent (class bodies), and rationale signal extraction (TODO/FIXME/HACK/XXX).
 
+#### Python relative-import resolver
+
+Python's `from . import utils` and `from ..pkg import Thing` preserve leading dots at the grammar layer but are rewritten to absolute dotted form (`mypkg.utils`, `pkg.Thing`) before they reach the store — so a module imported via both relative and absolute syntax lands on a single `sym:` graph node, giving "who imports X?" queries the full fan-in.
+
+The rewrite is a `ParseCtx` post-pass: the grammar's optional `importResolver` method (`python.go:ResolveImports`) runs after `Imports()` using the file's absolute path and `config.Python.SrcRoots`. Three-tier package detection (`python_resolve.go:containingPackage`):
+
+1. `python.src_roots` match — file sits under a configured root → anchor at the root boundary (PEP 420 / src-layout friendly, no `__init__.py` required).
+2. `__init__.py` walk — upward traversal from the file's directory, collecting contiguous package markers.
+3. Virtual directory fallback — project-relative directory as implicit package when the first two yield nothing; rejected if any component isn't a valid Python identifier.
+
+`AssertGrammarInvariants` (shared grammar test helper) enforces the postcondition via a Python-gated check: `Reference.Target` must never start with `.` or contain `..` on Python grammar output. The gate widens grammar-by-grammar as their own resolvers land.
+
 ### Config files — `internal/indexer/handlers/config/`
 
 Six handlers, one file each:

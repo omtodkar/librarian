@@ -1,5 +1,7 @@
 package indexer
 
+import "sync"
+
 // FileHandler parses and chunks a single file format. Implementations register with a
 // Registry to be dispatched by file extension.
 //
@@ -43,6 +45,16 @@ type ParseContext struct {
 	// Python grammar's import resolver. Absolute paths (project-root-joined,
 	// filepath.Clean'd) so handlers can prefix-match without re-cleaning.
 	PythonSrcRoots []string
+
+	// PackageCache memoizes per-directory resolution results within a single
+	// graph pass — the Python resolver's __init__.py walk hits O(depth) stats
+	// per file, and every file in the same directory produces the same
+	// package parts. The indexer allocates one sync.Map at the start of each
+	// IndexProjectGraph run and passes the same pointer to every ParseCtx
+	// call in that pass; nil means no memoization (tests that call ParseCtx
+	// directly). Keys are absolute directory paths, values are []string
+	// package parts (or a nil slice for "no package").
+	PackageCache *sync.Map
 }
 
 // FileHandlerCtx is an optional extension of FileHandler for handlers that need
