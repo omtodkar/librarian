@@ -15,6 +15,14 @@ func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
 		signalMeta = "{}"
 	}
 
+	// Run the (model, dim) mismatch check BEFORE the chunk row is inserted.
+	// Otherwise a config-level model swap would leave every doc's first
+	// chunk row committed with no vector — invisible to search but visible
+	// to GetChunksForDocument.
+	if err := s.ensureVecTable(input.Model, len(input.Vector)); err != nil {
+		return nil, fmt.Errorf("add_chunk ensure_vec_table: %w", err)
+	}
+
 	res, err := s.db.Exec(`
 		INSERT INTO doc_chunks (file_path, section_heading, section_hierarchy, chunk_index, content, token_count, doc_id, signal_meta)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -30,15 +38,6 @@ func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
 		return nil, fmt.Errorf("add_chunk last_insert_id: %w", err)
 	}
 
-	// Lazily create vec0 table sized to the actual embedding dimensions, and
-	// verify the active (model, dim) pair matches what was first recorded.
-	// A mismatch here is the sentinel for "user swapped embedding.model in
-	// config.yaml" — ensureVecTable returns the actionable recovery message.
-	if err := s.ensureVecTable(input.Model, len(input.Vector)); err != nil {
-		return nil, fmt.Errorf("add_chunk ensure_vec_table: %w", err)
-	}
-
-	// Insert the vector into the vec0 virtual table
 	vecBytes := float64sToFloat32Bytes(input.Vector)
 	_, err = s.db.Exec(`INSERT INTO doc_chunk_vectors (chunk_id, embedding) VALUES (?, ?)`,
 		chunkID, vecBytes)

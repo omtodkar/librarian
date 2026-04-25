@@ -26,8 +26,10 @@ func TestOpen_FreshDB(t *testing.T) {
 		t.Errorf("max applied version_id: got %d want 1", maxVersion)
 	}
 
-	// Every baseline table must exist after goose.Up.
-	wantTables := []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges"}
+	// Every baseline table must exist after goose.Up. Include embedding_meta
+	// so a regression that drops it from 0001 fails this test rather than
+	// later at the first AddChunk (cryptic "no such table" from a live run).
+	wantTables := []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta"}
 	for _, tbl := range wantTables {
 		var name string
 		err := s.db.QueryRow(
@@ -122,14 +124,12 @@ func TestGooseDown_RestoresEmptyState(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("SetDialect: %v", err)
-	}
+	// Dialect + BaseFS are set in store.go's init(), so no test setup needed.
 	if err := goose.Down(s.db, "migrations"); err != nil {
 		t.Fatalf("goose.Down: %v", err)
 	}
 
-	for _, tbl := range []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges"} {
+	for _, tbl := range []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta"} {
 		var name string
 		err := s.db.QueryRow(
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl,

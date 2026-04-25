@@ -112,6 +112,16 @@ func TestAddChunk_DimensionMismatchErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "reindex --rebuild-vectors") {
 		t.Errorf("error should surface the recovery command; got: %v", err)
 	}
+	// Regression: AddChunk used to insert the doc_chunks row before the
+	// mismatch check, leaving an orphan on failure. Seed added 1 chunk; a
+	// failed AddChunk must not add a second.
+	var chunkCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM doc_chunks`).Scan(&chunkCount); err != nil {
+		t.Fatalf("counting doc_chunks: %v", err)
+	}
+	if chunkCount != 1 {
+		t.Errorf("doc_chunks rows after failed AddChunk: got %d want 1 (orphan row from old ordering?)", chunkCount)
+	}
 }
 
 // TestAddChunk_ModelMismatchErrors pins the same-dim / different-model case.

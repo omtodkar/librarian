@@ -16,26 +16,32 @@ import (
 
 func init() {
 	sqlite_vec.Auto()
-	// goose chatters into the log package by default. Silence it — the
-	// librarian CLI owns all user-facing output; a surprise "OK 0001_..."
-	// line from a third-party logger looks like a bug.
+	// goose.SetBaseFS/SetDialect/SetLogger write to package-level globals.
+	// Set them here rather than on each Open so parallel Opens can't race.
+	// Dialect and FS never vary for librarian — always sqlite3 + our embed.
 	goose.SetLogger(goose.NopLogger())
+	goose.SetBaseFS(db.MigrationsFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		// SetDialect only errors on an unknown dialect string; "sqlite3"
+		// is known. A panic here means a goose-version change broke the
+		// API, which surfaces at import time — what we want.
+		panic(fmt.Sprintf("goose.SetDialect: %v", err))
+	}
 }
 
 type Store struct {
 	db            *sql.DB
 	vecTableReady bool
-	// embedMeta caches the (model, dim) recorded in embedding_meta. Populated
-	// once per Open by loadEmbeddingMeta; ensureVecTable compares against it
-	// on every chunk insert. A zero-value cache means "never recorded" — the
-	// first successful insert writes the meta to lock it in.
+	// embedMeta caches the (model, dim) recorded in embedding_meta — populated
+	// by loadEmbeddingMeta on Open and refreshed on first-ever insert.
+	// Zero-value means "never recorded"; ensureVecTable uses model=="" as the
+	// first-insert sentinel.
 	embedMeta embedMetaCache
 }
 
 type embedMetaCache struct {
-	loaded bool
-	model  string
-	dim    int
+	model string
+	dim   int
 }
 
 // Open opens (or creates) a SQLite database at dbPath, loads the sqlite-vec
@@ -57,9 +63,9 @@ func Open(dbPath string) (*Store, error) {
 		return nil, err
 	}
 
-	if err := applyMigrations(sqlDB); err != nil {
+	if err := goose.Up(sqlDB, "migrations"); err != nil {
 		sqlDB.Close()
-		return nil, err
+		return nil, fmt.Errorf("applying migrations: %w", err)
 	}
 
 	s := &Store{db: sqlDB}
@@ -85,19 +91,6 @@ func Open(dbPath string) (*Store, error) {
 	}
 
 	return s, nil
-}
-
-// applyMigrations runs goose.Up against the embedded migrations directory.
-// Split from Open so tests can call it on a raw *sql.DB too.
-func applyMigrations(sqlDB *sql.DB) error {
-	goose.SetBaseFS(db.MigrationsFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		return fmt.Errorf("setting goose dialect: %w", err)
-	}
-	if err := goose.Up(sqlDB, "migrations"); err != nil {
-		return fmt.Errorf("applying migrations: %w", err)
-	}
-	return nil
 }
 
 // detectLegacyPreGooseDB refuses a database that has librarian tables from
@@ -146,11 +139,14 @@ func detectLegacyPreGooseDB(sqlDB *sql.DB) error {
 // embedding model in config.yaml"; its wording must point at the recovery
 // command so users don't have to guess.
 func (s *Store) ensureVecTable(model string, dim int) error {
-	if s.embedMeta.model != "" && s.embedMeta.model != model {
-		return embeddingMismatchError(s.embedMeta.model, s.embedMeta.dim, model, dim)
-	}
-	if s.embedMeta.dim != 0 && s.embedMeta.dim != dim {
-		return embeddingMismatchError(s.embedMeta.model, s.embedMeta.dim, model, dim)
+	// model == "" is the single first-ever-insert sentinel. writeEmbeddingMeta
+	// writes (model, dim) atomically via a compound INSERT, so a populated
+	// cache always has both or neither — gating on model alone is sufficient
+	// and avoids an asymmetric check.
+	if s.embedMeta.model != "" {
+		if s.embedMeta.model != model || s.embedMeta.dim != dim {
+			return embeddingMismatchError(s.embedMeta.model, s.embedMeta.dim, model, dim)
+		}
 	}
 
 	if !s.vecTableReady {
@@ -164,13 +160,12 @@ func (s *Store) ensureVecTable(model string, dim int) error {
 		s.vecTableReady = true
 	}
 
-	if s.embedMeta.model == "" && s.embedMeta.dim == 0 {
+	if s.embedMeta.model == "" {
 		if err := s.writeEmbeddingMeta(model, dim); err != nil {
 			return err
 		}
 		s.embedMeta.model = model
 		s.embedMeta.dim = dim
-		s.embedMeta.loaded = true
 	}
 	return nil
 }
@@ -203,7 +198,6 @@ func (s *Store) loadEmbeddingMeta() error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterating embedding_meta: %w", err)
 	}
-	s.embedMeta.loaded = true
 	return nil
 }
 
@@ -245,7 +239,7 @@ func (s *Store) ClearVectorState() error {
 		return fmt.Errorf("commit: %w", err)
 	}
 	s.vecTableReady = false
-	s.embedMeta = embedMetaCache{loaded: true}
+	s.embedMeta = embedMetaCache{}
 	return nil
 }
 
