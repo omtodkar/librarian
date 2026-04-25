@@ -31,6 +31,7 @@ type CodeFile struct {
 	FilePath         string    `json:"file_path"`
 	Language         string    `json:"language"`
 	RefType          string    `json:"ref_type"`
+	ContentHash      string    `json:"content_hash"`
 	LastReferencedAt time.Time `json:"last_referenced_at"`
 }
 

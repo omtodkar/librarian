@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS code_files (
     file_path TEXT UNIQUE NOT NULL,
     language TEXT NOT NULL DEFAULT '',
     ref_type TEXT NOT NULL DEFAULT 'file',
+    content_hash TEXT NOT NULL DEFAULT '',
     last_referenced_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

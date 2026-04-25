@@ -39,6 +39,19 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
 
+	// Additive migrations for columns that were added after the initial
+	// schema. `CREATE TABLE IF NOT EXISTS` in migrations.sql does not add
+	// new columns to existing tables, so we apply them here explicitly.
+	// Each is idempotent via a column-existence probe — survives fresh
+	// creates (column already present) and upgrades (column added).
+	// lib-3s5 will replace this with pressly/goose once adopted.
+	if err := ensureColumn(sqlDB, "code_files", "content_hash",
+		"ALTER TABLE code_files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+	); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("applying additive migrations: %w", err)
+	}
+
 	s := &Store{db: sqlDB}
 
 	// Check if the vector table already exists (from a previous indexing run)
@@ -49,6 +62,34 @@ func Open(dbPath string) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// ensureColumn runs alterSQL only if the named column isn't already present
+// on the given table — idempotent column-add for tables created by the
+// original CREATE TABLE IF NOT EXISTS. Uses PRAGMA table_info, which is
+// always available in SQLite and avoids parsing the alter statement.
+func ensureColumn(db *sql.DB, table, column, alterSQL string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return fmt.Errorf("table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return fmt.Errorf("table_info(%s) scan: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("table_info(%s) iter: %w", table, err)
+	}
+	if _, err := db.Exec(alterSQL); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 // ensureVecTable creates the doc_chunk_vectors virtual table sized to the

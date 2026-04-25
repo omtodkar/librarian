@@ -63,6 +63,13 @@ func initConfig() {
 		cfg.DBPath = ws.DBPath()
 	}
 
+	// ProjectRoot is the graph-pass walk root. Unlike DocsDir (relative to CWD),
+	// the graph always walks the workspace root, so an assistant running from
+	// any subdirectory sees the whole project graph.
+	if ws != nil {
+		cfg.ProjectRoot = ws.Root
+	}
+
 	// Propagate Office-handler config so the DOCX/XLSX/PPTX handlers pick up
 	// user-specified row/col caps and speaker-notes preferences. The office
 	// package auto-registers its handlers at init with DefaultConfig; we

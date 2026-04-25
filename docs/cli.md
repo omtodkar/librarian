@@ -77,13 +77,15 @@ JSON hook entries in `.claude/settings.json` / `.codex/hooks.json` are merged by
 
 ### `librarian index [docs-dir]`
 
-Runs the pipeline over the configured docs directory (or the given argument). Produces documents + chunks + graph nodes + graph edges in SQLite.
+Runs two passes: the **docs pass** over `docs_dir` (produces documents + chunks + vectors) and the **graph pass** over the workspace root (produces code-symbol nodes + `contains` / `import` edges). Together they populate documents, chunks, code_files, graph_nodes, and graph_edges. See [Indexing Pipeline](indexing.md) for detail.
 
 ```sh
-librarian index                   # default: cfg.docs_dir
-librarian index docs/             # explicit directory
+librarian index                   # default: run both passes
+librarian index docs/             # docs pass uses this directory
 librarian index --force           # ignore content hashes, re-index everything
-librarian index --dry-run         # show files that would be indexed
+librarian index --skip-graph      # run only the docs pass
+librarian index --skip-docs       # run only the graph pass
+librarian index --dry-run         # show files that would be indexed (docs pass)
 librarian index --json            # machine-readable summary
 ```
 
@@ -92,8 +94,13 @@ librarian index --json            # machine-readable summary
 | `--force` | `false` | Ignore content hashes; re-index every file |
 | `--dry-run` | `false` | List files that would be indexed; no writes |
 | `--json` | `false` | Emit the run summary as JSON |
+| `--skip-docs` | `false` | Skip the documentation indexing pass. Incompatible with the `[docs-dir]` positional arg |
+| `--skip-graph` | `false` | Skip the code graph indexing pass |
+| `--workers <n>` | `-1` | Override `graph.max_workers` for this run. `-1` = respect config; `0` = auto (sample + scale); `1` = serial; `N>1` = fixed pool |
+| `--quiet` | `false` | Force quiet progress mode (heartbeat every 100 files). Mutually exclusive with `--verbose` |
+| `--verbose` | `false` | Force verbose progress mode (per-file line). Mutually exclusive with `--quiet` |
 
-Incremental: each document's SHA-256 content hash is compared against the stored hash; unchanged files are skipped.
+Incremental: each file's SHA-256 content hash is compared against the stored hash (`documents.content_hash` for docs, `code_files.content_hash` for graph); unchanged files are skipped.
 
 ### `librarian update <path> --content='...' [--reindex=file|full]`
 

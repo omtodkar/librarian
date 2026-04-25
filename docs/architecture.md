@@ -131,28 +131,49 @@ See [Storage Layer](storage.md) for full schema + operations and [Handlers](hand
 
 ## Indexing flow
 
+`librarian index` runs two passes, scoped to different roots:
+
+1. **Docs pass** over `docs_dir` — produces chunks + vectors + `mentions` edges from doc prose to referenced code files. This is the knowledge base: `search_docs` and `get_context` query here.
+2. **Graph pass** over `ProjectRoot` (the workspace root) — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes{kind=symbol}` with `contains` edges from their file, and emits `imports`/`calls`/`extends`/`implements` edges. No chunks, no vectors — structural only, so the knowledge base stays curated prose.
+
 ```
-input file ──> walker ──> registry.HandlerFor(ext)
-                                │
-                                ▼
-                          FileHandler.Parse  ──> ParsedDoc (units, signals, refs)
-                                │
-                                ▼
-                          FileHandler.Chunk  ──> []Chunk (w/ embedding text + signal meta)
-                                │
-                                ▼
-                          embedder.Embed     ──> []float64 per chunk
-                                │
-                                ▼
-                          store.Add*         ──> documents + chunks + vectors
-                                │                + code_files + refs
-                                │                + graph_nodes per unit/doc/file
-                                ▼
-                     buildRelatedDocEdges    ──> second pass: docs that share
-                                                 code refs get a graph edge
+ PASS 1: docs pass (docs_dir)
+ input file ──> WalkDocs ──> registry.HandlerFor(ext)
+                                   │
+                                   ▼
+                             FileHandler.Parse  ──> ParsedDoc
+                                   │
+                                   ▼
+                             FileHandler.Chunk  ──> []Chunk
+                                   │
+                                   ▼
+                             embedder.Embed     ──> []float64 per chunk
+                                   │
+                                   ▼
+                             store.Add*         ──> documents + chunks + vectors
+                                                    + code_files + refs
+                                                    + graph_nodes per doc/file
+                                                    + mentions / shared_code_ref edges
+
+ PASS 2: graph pass (ProjectRoot)
+ source file ──> WalkGraph ──> hard excludes + gitignore + graph.exclude_patterns
+                                   │
+                                   ▼
+                             hash-gate: code_files.content_hash
+                                   │  (skip if unchanged)
+                                   ▼
+                             FileHandler.Parse  ──> ParsedDoc
+                                   │
+                                   ▼
+                             DeleteSymbolsForFile (wipe stale)
+                                   │
+                                   ▼
+                             UpsertNode per symbol Unit
+                             UpsertEdge contains (file → symbol)
+                             UpsertEdge per parsed.Ref (imports/calls/…)
 ```
 
-Content-hash gate (SHA-256) runs before Parse, so re-indexing is fast when only a handful of files change. See [Indexing Pipeline](indexing.md) for the stage-by-stage detail.
+Content-hash gates run before Parse in both passes, so re-indexing is fast when only a handful of files change. Document-semantic formats (markdown, docx, xlsx, pptx, pdf) are skipped by the graph pass so files already handled by the docs pass aren't double-indexed. See [Indexing Pipeline](indexing.md) for stage-by-stage detail.
 
 ## Key design decisions
 
@@ -186,7 +207,11 @@ Each chunk carries `signal_meta` JSON: warnings, decisions, TODO/FIXME, risk mar
 
 ### Incremental indexing
 
-SHA-256 content hash per file; unchanged files skip `Parse` entirely. `--force` bypasses for a full re-index. For code files, unit-level granularity is a future improvement.
+SHA-256 content hash per file; unchanged files skip `Parse` entirely. The docs pass stores its hash in `documents.content_hash`; the graph pass in `code_files.content_hash`. `--force` bypasses both for a full re-index. Unit-level granularity within a code file is a future improvement.
+
+### Separate docs and graph passes
+
+The CLI / MCP pitch is "help an AI understand your codebase" — that works only when the knowledge base (prose) and the code graph (every source file) are decoupled. One walk over `docs_dir` gets you search but no symbols; one walk over the project root gets you symbols but pollutes search with boilerplate. So both run in one `librarian index` invocation, each scoped to its own root. `--skip-docs` / `--skip-graph` let you run just one when iterating.
 
 ### MCP over stdio, opt-in
 

@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,21 +22,75 @@ func (s *Store) AddCodeFile(filePath, language, refType string) (*CodeFile, erro
 
 	var cf CodeFile
 	err = s.db.QueryRow(`
-		SELECT id, file_path, language, ref_type, last_referenced_at
+		SELECT id, file_path, language, ref_type, content_hash, last_referenced_at
 		FROM code_files WHERE id = ?`, id,
-	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.LastReferencedAt)
+	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.ContentHash, &cf.LastReferencedAt)
 	if err != nil {
 		return nil, fmt.Errorf("add_code_file read-back: %w", err)
 	}
 	return &cf, nil
 }
 
+// AddOrUpdateCodeFile upserts a code_files row keyed by file_path and writes
+// the latest content_hash. Used by the graph pass's incremental gate: the
+// caller computes sha256 of the file content once, this method refreshes
+// the stored hash so the next pass can skip the file when unchanged.
+//
+// Atomic: the INSERT ... ON CONFLICT DO UPDATE is one statement, so two
+// concurrent workers both processing the same previously-unseen path can't
+// each see "no row" and race into duplicate INSERTs (which would fail the
+// UNIQUE(file_path) constraint). On conflict the existing row's id is
+// preserved — only language, content_hash, and last_referenced_at are
+// updated — so graph_nodes and refs pointing at that row stay valid.
+func (s *Store) AddOrUpdateCodeFile(filePath, language, contentHash string) (*CodeFile, error) {
+	id := uuid.New().String()
+	_, err := s.db.Exec(`
+		INSERT INTO code_files (id, file_path, language, ref_type, content_hash)
+		VALUES (?, ?, ?, 'file', ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			language = excluded.language,
+			content_hash = excluded.content_hash,
+			last_referenced_at = CURRENT_TIMESTAMP`,
+		id, filePath, language, contentHash,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upserting code file %s: %w", filePath, err)
+	}
+	return s.GetCodeFileByPath(filePath)
+}
+
+// DeleteCodeFile removes a code_files row by path plus (via FK cascade on
+// refs) any references that point at it. Used by the graph pass to clean up
+// after a file becomes generated (banner banner detected on a file that was
+// previously indexed): the row, any incident refs, and its symbols all go.
+// Symbols live in graph_nodes and are removed separately via
+// DeleteSymbolsForFile.
+//
+// Returns nil (not an error) if no row exists — the cleanup path is
+// idempotent so a first-time scan of a generated file is still safe.
+func (s *Store) DeleteCodeFile(filePath string) error {
+	_, err := s.db.Exec(`DELETE FROM code_files WHERE file_path = ?`, filePath)
+	if err != nil {
+		return fmt.Errorf("delete_code_file: %w", err)
+	}
+	return nil
+}
+
+// GetCodeFileByPath looks up a code_files row by path. Returns (nil, nil)
+// when no row exists — matches GetNode's convention (graph.go) so callers
+// can distinguish "not found" from "DB error" without errors.Is checks.
+// Previously wrapped sql.ErrNoRows into a generic error, forcing every
+// caller to either discard errors with `_` (swallowing real DB failures)
+// or treat absence as fatal.
 func (s *Store) GetCodeFileByPath(filePath string) (*CodeFile, error) {
 	var cf CodeFile
 	err := s.db.QueryRow(`
-		SELECT id, file_path, language, ref_type, last_referenced_at
+		SELECT id, file_path, language, ref_type, content_hash, last_referenced_at
 		FROM code_files WHERE file_path = ?`, filePath,
-	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.LastReferencedAt)
+	).Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.ContentHash, &cf.LastReferencedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get_code_file_by_path: %w", err)
 	}
@@ -91,7 +147,7 @@ func (s *Store) GetReferencedPathsForDocPaths(docPaths []string) (map[string][]s
 
 func (s *Store) GetReferencedCodeFiles(docID string) ([]CodeFile, error) {
 	rows, err := s.db.Query(`
-		SELECT cf.id, cf.file_path, cf.language, cf.ref_type, cf.last_referenced_at
+		SELECT cf.id, cf.file_path, cf.language, cf.ref_type, cf.content_hash, cf.last_referenced_at
 		FROM refs r
 		JOIN code_files cf ON cf.id = r.code_file_id
 		WHERE r.doc_id = ?`, docID)
@@ -103,7 +159,7 @@ func (s *Store) GetReferencedCodeFiles(docID string) ([]CodeFile, error) {
 	var files []CodeFile
 	for rows.Next() {
 		var cf CodeFile
-		if err := rows.Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.LastReferencedAt); err != nil {
+		if err := rows.Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.ContentHash, &cf.LastReferencedAt); err != nil {
 			return nil, fmt.Errorf("get_referenced_code_files scan: %w", err)
 		}
 		files = append(files, cf)

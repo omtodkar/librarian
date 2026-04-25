@@ -15,8 +15,9 @@ var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 // Graph edge kinds used by the current indexer. Additional kinds will land as
 // new handlers extract richer structural information (imports, calls, etc.).
 const (
-	EdgeKindMentions       = "mentions"         // document → code_file
-	EdgeKindSharedCodeRef  = "shared_code_ref"  // document → document (both mention same code file)
+	EdgeKindMentions      = "mentions"        // document → code_file
+	EdgeKindSharedCodeRef = "shared_code_ref" // document → document (both mention same code file)
+	EdgeKindContains      = "contains"        // code_file → symbol (graph pass projects each parsed Unit into a symbol node tied to its file via this edge)
 )
 
 // Graph node kinds. Additional kinds will land as new handlers emit richer
@@ -330,6 +331,62 @@ func (s *Store) DeleteNode(id string) error {
 	_, err := s.db.Exec(`DELETE FROM graph_nodes WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete_node: %w", err)
+	}
+	return nil
+}
+
+// DeleteSymbolsForFile removes every symbol-kind graph_node whose source_path
+// matches filePath, plus (via the FK cascade on graph_edges) their incident
+// edges. Called by the graph pass when a file's content_hash changes — stale
+// symbol nodes from the previous parse get wiped before the new parse
+// reprojects fresh ones, so renamed/removed symbols don't linger.
+//
+// Scoped to kind='symbol' so the code_file node and its outgoing "mentions"
+// / "shared_code_ref" edges (populated by the docs pass) are preserved.
+func (s *Store) DeleteSymbolsForFile(filePath string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM graph_nodes WHERE source_path = ? AND kind = ?`,
+		filePath, NodeKindSymbol,
+	)
+	if err != nil {
+		return fmt.Errorf("delete_symbols_for_file: %w", err)
+	}
+	return nil
+}
+
+// DeleteGeneratedFile atomically removes every artefact the graph pass
+// produced for filePath: symbol nodes + their edges (via cascade), the
+// code_file graph node + its edges (via cascade), and the code_files row.
+// Used when a previously-indexed file acquires a generator banner — the
+// three deletes must land together so a crash between them doesn't leave
+// orphaned symbol nodes or a stale code_file row pointing at a file the
+// graph no longer owns. Name mirrors sibling delete methods
+// (DeleteNode / DeleteSymbolsForFile / DeleteCodeFile).
+func (s *Store) DeleteGeneratedFile(filePath string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("delete_generated_file begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`DELETE FROM graph_nodes WHERE source_path = ? AND kind = ?`,
+		filePath, NodeKindSymbol,
+	); err != nil {
+		return fmt.Errorf("delete_generated_file symbols: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM graph_nodes WHERE id = ?`, CodeFileNodeID(filePath),
+	); err != nil {
+		return fmt.Errorf("delete_generated_file code_file node: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM code_files WHERE file_path = ?`, filePath,
+	); err != nil {
+		return fmt.Errorf("delete_generated_file code_files row: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete_generated_file commit: %w", err)
 	}
 	return nil
 }
