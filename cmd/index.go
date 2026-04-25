@@ -145,11 +145,32 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Orphan sweep on --force: a forced re-index is the user saying "I want
+	// fresh state" — the moment to reap nodes left behind by prior schema
+	// churn (e.g. lib-o8m's renamed Python import targets). Scoped to symbol
+	// kind by default; matches `librarian gc` without flags. Intentionally
+	// skipped on incremental runs because those can briefly orphan a node
+	// between DeleteSymbolsForFile and the subsequent re-projection.
+	var orphanSwept []string
+	if indexForce && !indexSkipGraph && graphRes != nil {
+		orphanSwept, err = s.DeleteOrphanNodes([]string{store.NodeKindSymbol})
+		if err != nil {
+			return fmt.Errorf("orphan sweep: %w", err)
+		}
+	}
+
 	if indexJSON {
-		out, _ := json.MarshalIndent(map[string]any{
+		payload := map[string]any{
 			"docs":  docsRes,
 			"graph": graphRes,
-		}, "", "  ")
+		}
+		if orphanSwept != nil {
+			payload["orphans_swept"] = map[string]any{
+				"count": len(orphanSwept),
+				"ids":   orphanSwept,
+			}
+		}
+		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Println(string(out))
 	} else {
 		fmt.Printf("\nIndexing complete:\n")
@@ -182,6 +203,9 @@ func runIndex(cmd *cobra.Command, args []string) error {
 					fmt.Printf("    - %s\n", e)
 				}
 			}
+		}
+		if orphanSwept != nil {
+			fmt.Printf("  Orphans swept:     %d (kind: %s)\n", len(orphanSwept), store.NodeKindSymbol)
 		}
 	}
 

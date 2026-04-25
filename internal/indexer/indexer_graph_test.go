@@ -593,6 +593,65 @@ func TestIntegration_Graph_PythonRelativeImportsResolveToSingleSymNode(t *testin
 	}
 }
 
+// TestIntegration_Graph_ForceIndexCompatibleWithOrphanSweep constructs a
+// seeded orphan (simulating a pre-lib-o8m leftover node), runs
+// IndexProjectGraph with force=true, then invokes the sweep directly on the
+// store. Pins that the two stages compose: forced re-index leaves the
+// canonical nodes intact, and the subsequent sweep only removes the stale
+// orphan. The CLI's cmd/index.go auto-trigger is built on this contract.
+func TestIntegration_Graph_ForceIndexCompatibleWithOrphanSweep(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"mypkg/__init__.py": "",
+		"mypkg/utils.py":    "def helper():\n    return 1\n",
+		"mypkg/a.py":        "from . import utils\n\ndef a():\n    return utils.helper()\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	idx, s := newGraphTestIndexer(t, root)
+
+	// Seed a stale orphan node manually — mimics a leftover from a prior
+	// indexer run with a different Reference.Target shape.
+	if err := s.UpsertNode(store.Node{ID: "sym:.utils", Kind: store.NodeKindSymbol}); err != nil {
+		t.Fatalf("UpsertNode seed: %v", err)
+	}
+
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	// The stale orphan should still exist pre-sweep.
+	if n, _ := s.GetNode("sym:.utils"); n == nil {
+		t.Fatal("orphan sym:.utils unexpectedly removed by IndexProjectGraph alone")
+	}
+
+	deleted, err := s.DeleteOrphanNodes([]string{store.NodeKindSymbol})
+	if err != nil {
+		t.Fatalf("DeleteOrphanNodes: %v", err)
+	}
+	foundStale := false
+	for _, id := range deleted {
+		if id == "sym:.utils" {
+			foundStale = true
+		}
+	}
+	if !foundStale {
+		t.Errorf("stale orphan sym:.utils was not swept; deleted=%v", deleted)
+	}
+	// Canonical node must survive — it has inbound edges from a.py + utils.py.
+	if n, _ := s.GetNode("sym:mypkg.utils"); n == nil {
+		t.Error("canonical sym:mypkg.utils was incorrectly swept")
+	}
+}
+
 // TestIntegration_Graph_PythonSrcRootsResolvesWithoutInitPy pins that
 // configuring python.src_roots lets PEP 420 namespace packages (no
 // __init__.py) resolve too. Without src_roots, a file under src/ns/ has no

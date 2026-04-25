@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -75,6 +76,12 @@ func ConfigKeyNodeID(target string) string { return "key:" + target }
 // a parallel copy.
 func NodeIDPrefixes() []string {
 	return []string{"doc:", "file:", "sym:", "key:"}
+}
+
+// NodeKinds returns every built-in node kind. Used by the orphan sweep
+// command to expand --kinds=all without hardcoding a parallel copy.
+func NodeKinds() []string {
+	return []string{NodeKindDocument, NodeKindCodeFile, NodeKindSymbol, NodeKindConfigKey}
 }
 
 // UpsertNode inserts or updates a graph node. Idempotent — safe to call on
@@ -365,6 +372,101 @@ func (s *Store) DeleteSymbolsForFile(filePath string) error {
 		return fmt.Errorf("delete_symbols_for_file: %w", err)
 	}
 	return nil
+}
+
+// ListOrphanNodes returns every graph_node whose kind is in the given set and
+// which has neither incoming nor outgoing edges. Pass nil/empty kinds to
+// scan across every kind (matches `librarian gc --kinds=all`). Results are
+// ordered by id for deterministic output.
+//
+// "Orphan" here means graph-topological: zero incident edges. Not "stale on
+// disk" — DeleteSymbolsForFile / DeleteGeneratedFile handle file-backed
+// staleness. Orphans accumulate when Reference.Target shapes change across
+// schema evolutions (lib-o8m renamed sym:.utils → sym:mypkg.utils, leaving
+// old nodes unreachable).
+func (s *Store) ListOrphanNodes(kinds []string) ([]Node, error) {
+	query, args := orphanNodeQuery(kinds, "SELECT id, kind, label, source_path, metadata FROM graph_nodes")
+	query += " ORDER BY id"
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list_orphan_nodes: %w", err)
+	}
+	defer rows.Close()
+	var out []Node
+	for rows.Next() {
+		var n Node
+		var sp sql.NullString
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+			return nil, fmt.Errorf("list_orphan_nodes scan: %w", err)
+		}
+		if sp.Valid {
+			n.SourcePath = sp.String
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// DeleteOrphanNodes removes every graph_node whose kind is in the given set
+// and which has neither incoming nor outgoing edges. Uses a single
+// DELETE ... RETURNING id statement so identify + delete happen atomically
+// under SQLite's row-level mutex — the returned ids list is exactly what was
+// deleted, regardless of concurrent writers. (A SELECT-then-DELETE split
+// would need an explicit BEGIN IMMEDIATE transaction plus careful ordering
+// to match the same guarantee.)
+//
+// RETURNING requires SQLite ≥ 3.35 (2021); mattn/go-sqlite3 bundles a
+// modern SQLite, so this is available across every platform we ship to.
+//
+// Returns the deleted ids in alphabetical order for stable CLI output. Pass
+// nil/empty kinds to sweep every kind.
+func (s *Store) DeleteOrphanNodes(kinds []string) ([]string, error) {
+	query, args := orphanNodeQuery(kinds, "DELETE FROM graph_nodes")
+	query += " RETURNING id"
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("delete_orphan_nodes: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("delete_orphan_nodes scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("delete_orphan_nodes rows: %w", err)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// orphanNodeQuery builds the shared predicate: kind filter plus "no incident
+// edges" via two NOT EXISTS clauses (indexed on graph_edges.from_node /
+// to_node). leader is the full SQL prefix up to (and not including) the
+// shared WHERE clause — ListOrphanNodes supplies a full SELECT, while
+// DeleteOrphanNodes supplies a DELETE. orderBy is appended for reads;
+// DELETE statements can't carry ORDER BY in SQLite so callers that run a
+// DELETE with RETURNING sort the returned ids in Go.
+func orphanNodeQuery(kinds []string, leader string) (string, []any) {
+	var b strings.Builder
+	b.WriteString(leader)
+	b.WriteString(" WHERE NOT EXISTS (SELECT 1 FROM graph_edges WHERE from_node = graph_nodes.id) AND NOT EXISTS (SELECT 1 FROM graph_edges WHERE to_node = graph_nodes.id)")
+	var args []any
+	if len(kinds) > 0 {
+		b.WriteString(" AND kind IN (")
+		for i, k := range kinds {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString("?")
+			args = append(args, k)
+		}
+		b.WriteString(")")
+	}
+	return b.String(), args
 }
 
 // DeleteGeneratedFile atomically removes every artefact the graph pass
