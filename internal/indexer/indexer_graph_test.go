@@ -863,6 +863,23 @@ class PyChild(PyBase):
 		"src/ts/tschild.ts": `import { TsBase } from "./tsbase";
 class TsChild extends TsBase {}
 `,
+		// Kotlin: exercises the full lib-wji.2 pipeline (SymbolParents,
+		// ResolveParents, constructor_invocation → extends heuristic) +
+		// the lib-wji.2-round-3 fixes (companion object walking, primary-
+		// constructor val/var properties, Unit.Metadata → graph_nodes
+		// serialisation for the extension-function receiver).
+		"src/kt/ktbase.kt": `package com.example.kt
+abstract class KtBase(val tag: String)
+`,
+		"src/kt/ktchild.kt": `package com.example.kt
+import com.example.kt.KtBase
+data class KtChild(val name: String) : KtBase("child") {
+    companion object {
+        const val DEFAULT = "anon"
+    }
+}
+fun String.ktSlug(): String = this.lowercase()
+`,
 	}
 	for rel, body := range files {
 		abs := filepath.Join(dir, rel)
@@ -903,6 +920,10 @@ class TsChild extends TsBase {}
 		{"java", "sym:com.example.child.Child", "sym:com.example.bases.Base", "extends"},
 		{"python", "sym:pychild.PyChild", "sym:pybase.PyBase", "extends"},
 		{"typescript", "sym:tschild.TsChild", "sym:tsbase.TsBase", "extends"},
+		// Kotlin's `: KtBase("child")` uses constructor_invocation —
+		// heuristic maps to relation=extends. KtBase imported cross-file,
+		// so ResolveParents rewrites the bare name to the FQN.
+		{"kotlin", "sym:com.example.kt.KtChild", "sym:com.example.kt.KtBase", "extends"},
 	}
 
 	for _, tc := range cases {
@@ -952,6 +973,50 @@ class TsChild extends TsBase {}
 			t.Errorf("filter leaked %q edge through inherits filter", e.Kind)
 		}
 	}
+
+	// Kotlin-specific end-to-end assertions (lib-wji.2 round-3 fixes).
+	// These catch the live-flow regressions that unit-level tests miss:
+	// companion-object members reaching the graph, primary-constructor
+	// val properties reaching the graph, and symbolMetadataExtractor
+	// output landing in graph_nodes.metadata.
+	t.Run("kotlin_companion_object_members", func(t *testing.T) {
+		// `companion object { const val DEFAULT = "anon" }` must surface
+		// as a symbol node — proves the walker descends into
+		// companion_object's class_body.
+		n, _ := s.GetNode("sym:com.example.kt.KtChild.Companion.DEFAULT")
+		if n == nil {
+			allNodes, _ := s.ListNodes()
+			var syms []string
+			for _, nd := range allNodes {
+				if nd.Kind == "symbol" {
+					syms = append(syms, nd.ID)
+				}
+			}
+			t.Errorf("expected sym:com.example.kt.KtChild.Companion.DEFAULT — companion-object member not projected; symbols: %v", syms)
+		}
+	})
+	t.Run("kotlin_primary_constructor_property", func(t *testing.T) {
+		// `data class KtChild(val name: String)` — `name` is a property.
+		n, _ := s.GetNode("sym:com.example.kt.KtChild.name")
+		if n == nil {
+			t.Errorf("expected sym:com.example.kt.KtChild.name — primary-constructor val should project as property node")
+		}
+	})
+	t.Run("kotlin_receiver_metadata_in_graph_nodes", func(t *testing.T) {
+		// `fun String.ktSlug()` — SymbolMetadata emits
+		// {"receiver":"String"}; the graph pass must serialise that into
+		// graph_nodes.metadata so downstream queries can filter on it.
+		n, err := s.GetNode("sym:com.example.kt.ktSlug")
+		if err != nil {
+			t.Fatalf("GetNode ktSlug: %v", err)
+		}
+		if n == nil {
+			t.Fatalf("ktSlug symbol missing")
+		}
+		if !containsJSON(n.Metadata, `"receiver":"String"`) {
+			t.Errorf("expected receiver metadata on ktSlug symbol node; got %q", n.Metadata)
+		}
+	})
 }
 
 // containsJSON is a forgiving substring check used above because Edge.Metadata

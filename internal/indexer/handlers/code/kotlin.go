@@ -37,24 +37,81 @@ import (
 // open, abstract, suspend) emit as Signal{Kind="label"} via
 // extraSignalsExtractor.
 //
-// Extension functions: `fun String.toSlug()` — the receiver type surfaces in
-// Unit.Content and Title but is NOT extracted as structured metadata today.
-// Receiver-type extraction (so "all extensions of String" becomes a cheap
-// label/metadata filter) is deferred to a follow-up bead — the Grammar
-// interface would need a symbolMetadataExtractor hook since buildUnit in
-// code.go does not populate Unit.Metadata from any existing extractor.
+// Extension functions: `fun String.toSlug()` — the receiver type lands
+// on Unit.Metadata["receiver"] via SymbolMetadata, so "all extensions of
+// String" is a cheap metadata filter. Generic receivers strip the type
+// arguments (`fun List<T>.head()` → receiver="List", type args drop).
 //
 // Imports: `import foo.bar.Baz`, `import foo.bar.Baz as B`, `import foo.*`.
 // Wildcards land with `metadata.wildcard=true`; aliases populate Alias.
+//
+// Known tree-sitter-kotlin gaps (upstream grammar limitations, NOT
+// librarian bugs):
+//
+//   - `fun interface` (Kotlin 1.5 SAM) parses as an ERROR node containing
+//     a stray user_type for `interface` and a lambda_literal wrapping the
+//     body. No class_declaration is emitted, so there's no Unit to attach
+//     a `fun_interface` label to.
+//   - `context(Scope)` receivers (Kotlin 1.6 experimental) parse as a
+//     top-level call_expression rather than a distinct context_receivers
+//     node. The walker treats that as a non-symbol / non-container /
+//     non-comment child, which clears the pending-comment buffer — so a
+//     KDoc preceding `context(...)` fails to attach to the following
+//     function. Working around this would require teaching the walker to
+//     peek at call_expression bodies, which is language-specific pollution.
+//
+// Both unblock once the upstream smacker/go-tree-sitter kotlin grammar
+// adds support. Tracked in lib-ljn.
 type KotlinGrammar struct{}
 
 // NewKotlinGrammar returns the Kotlin grammar implementation.
 func NewKotlinGrammar() *KotlinGrammar { return &KotlinGrammar{} }
 
-func (*KotlinGrammar) Name() string                             { return "kotlin" }
-func (*KotlinGrammar) Extensions() []string                     { return []string{".kt"} }
-func (*KotlinGrammar) Language() *sitter.Language               { return kotlin.GetLanguage() }
-func (*KotlinGrammar) CommentNodeTypes() []string               { return []string{"line_comment", "multiline_comment"} }
+// kotlinLabelModifiers is the allow-list of Kotlin modifier keywords that
+// surface as label Signals via SymbolExtraSignals. See that function's
+// godoc for the category breakdown. Visibility modifiers (public / private
+// / internal / protected) are deliberately omitted — they apply to every
+// declaration and add noise rather than signal.
+var kotlinLabelModifiers = map[string]bool{
+	// class_modifier
+	"data":       true,
+	"sealed":     true,
+	"annotation": true,
+	"inner":      true,
+	"value":      true,
+	"companion":  true,
+	// inheritance_modifier
+	"open":     true,
+	"abstract": true,
+	// member_modifier
+	"override": true,
+	"lateinit": true,
+	// function_modifier
+	"inline":   true,
+	"tailrec":  true,
+	"suspend":  true,
+	"external": true,
+	"operator": true,
+	"infix":    true,
+	// property_modifier
+	"const": true,
+	// parameter_modifier
+	"noinline":    true,
+	"crossinline": true,
+	// platform_modifier (Kotlin Multiplatform `expect` / `actual`; note
+	// the tree-sitter node name is platform_modifier, not the
+	// spec-colloquial multiplatform_modifier)
+	"expect": true,
+	"actual": true,
+}
+
+func (*KotlinGrammar) Name() string               { return "kotlin" }
+func (*KotlinGrammar) Extensions() []string       { return []string{".kt"} }
+func (*KotlinGrammar) Language() *sitter.Language { return kotlin.GetLanguage() }
+
+func (*KotlinGrammar) CommentNodeTypes() []string {
+	return []string{"line_comment", "multiline_comment"}
+}
 func (*KotlinGrammar) DocstringFromNode(*sitter.Node, []byte) string { return "" }
 
 // SymbolKinds maps Kotlin AST node types to Unit.Kind values.
@@ -73,8 +130,10 @@ func (*KotlinGrammar) SymbolKinds() map[string]string {
 	return map[string]string{
 		"class_declaration":     "class",
 		"object_declaration":    "object",
+		"companion_object":      "object", // `companion object { ... }` — emit a Unit AND descend into its class_body
 		"function_declaration":  "function",
 		"property_declaration":  "property",
+		"class_parameter":       "property", // `class Foo(val id: String)` — val/var params are properties; SymbolName returns "" for plain params without binding_pattern_kind
 		"type_alias":            "type",
 		"secondary_constructor": "constructor",
 	}
@@ -102,14 +161,16 @@ func (*KotlinGrammar) SymbolKinds() map[string]string {
 // that don't.
 func (*KotlinGrammar) ContainerKinds() map[string]bool {
 	return map[string]bool{
-		"class_declaration":  true,
-		"object_declaration": true,
-		"class_body":         true,
-		"enum_class_body":    true,
-		"package_header":     true,
-		"import_list":        true,
-		"import_header":      true,
-		"identifier":         true,
+		"class_declaration":   true,
+		"object_declaration":  true,
+		"companion_object":    true, // hybrid — emit Unit (via SymbolKinds above) AND descend into class_body
+		"class_body":          true,
+		"enum_class_body":     true,
+		"primary_constructor": true, // descend into class_parameter children so val/var properties get Units
+		"package_header":      true,
+		"import_list":         true,
+		"import_header":       true,
+		"identifier":          true,
 	}
 }
 
@@ -122,8 +183,28 @@ func (*KotlinGrammar) ContainerKinds() map[string]bool {
 // varies.
 func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 	switch n.Type() {
+	case "secondary_constructor":
+		// Kotlin's secondary_constructor has no `name` field and no
+		// simple_identifier name — `constructor` is a keyword token. The
+		// Unit.Title should be the enclosing class's name, mirroring
+		// Java's constructor convention (Unit.Path ends with
+		// `<package>.<Class>.<Class>`).
+		p := findAncestor(n, "class_declaration", "object_declaration")
+		if p == nil {
+			return ""
+		}
+		if name := p.ChildByFieldName("name"); name != nil {
+			return name.Content(source)
+		}
+		for i := 0; i < int(p.NamedChildCount()); i++ {
+			c := p.NamedChild(i)
+			if c != nil && (c.Type() == "simple_identifier" || c.Type() == "type_identifier") {
+				return c.Content(source)
+			}
+		}
+		return ""
 	case "class_declaration", "object_declaration",
-		"function_declaration", "secondary_constructor", "type_alias":
+		"function_declaration", "type_alias":
 		// Named field first; fall back to any direct simple_identifier /
 		// type_identifier child (the typealias grammar variant exposes the
 		// alias name as type_identifier without a field tag).
@@ -156,6 +237,40 @@ func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 				}
 			}
 		}
+	case "class_parameter":
+		// Primary-constructor parameters are properties ONLY when they
+		// carry `val` or `var`: `class Foo(val id: String, plain: Int)`
+		// → id becomes a property, plain is just a ctor arg. Filter by
+		// presence of binding_pattern_kind — return "" to skip plain
+		// params (the walker treats empty as "not a symbol to emit").
+		hasBinding := false
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c != nil && c.Type() == "binding_pattern_kind" {
+				hasBinding = true
+				break
+			}
+		}
+		if !hasBinding {
+			return ""
+		}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c != nil && c.Type() == "simple_identifier" {
+				return c.Content(source)
+			}
+		}
+	case "companion_object":
+		// `companion object` without a name defaults to "Companion" in
+		// Kotlin; `companion object Factory` has an explicit identifier.
+		// Return the explicit name if present, else the implicit default.
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c != nil && (c.Type() == "simple_identifier" || c.Type() == "type_identifier") {
+				return c.Content(source)
+			}
+		}
+		return "Companion"
 	}
 	return ""
 }
@@ -265,30 +380,84 @@ func (*KotlinGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string 
 }
 
 // SymbolExtraSignals implements extraSignalsExtractor. Surfaces Kotlin
-// modifiers that aren't annotations but carry semantic meaning:
+// modifiers that aren't annotations but carry semantic meaning, as
+// Signal{Kind="label"} entries. Querying "find all data classes" /
+// "find all lateinit properties" / "find all suspend functions" becomes
+// a cheap label filter rather than re-parsing source.
 //
-//   - data / sealed / open / abstract / inline (class modifiers)
-//   - override (member modifier) — signals "this overrides a parent"
-//   - suspend (function modifier) — coroutine-aware function
-//   - enum — emitted when the class_declaration's keyword is `enum class`
-//   - interface — emitted when the keyword is `interface`
+// Modifier coverage (organised by tree-sitter-kotlin modifier category):
 //
-// Each becomes a Signal{Kind="label"} so a retrieval query like "find all
-// data classes" hits a cheap label filter rather than re-parsing the file.
+//   - class_modifier:           data, sealed, annotation, inner, value
+//   - inheritance_modifier:     open, abstract
+//   - member_modifier:          override, lateinit
+//   - function_modifier:        inline, tailrec, suspend, external,
+//                               operator, infix
+//   - property_modifier:        const
+//   - parameter_modifier:       noinline, crossinline
+//   - reification_modifier:     reified
+//   - platform_modifier:        expect, actual (the tree-sitter node is
+//                                 named platform_modifier, not the
+//                                 spec-colloquial multiplatform_modifier)
+//   - visibility_modifier:      (not emitted — `private` / `internal` etc.
+//                                are runtime-visible on every declaration
+//                                and add noise rather than signal)
+//
+// Extra class_declaration-level labels (derived from the anonymous keyword
+// child rather than a named modifier):
+//
+//   - interface      — keyword == "interface"
+//   - fun_interface  — keyword == "interface" AND "fun" anon child present
+//   - enum           — keyword == "enum"
+//
+// `companion` is also a class_modifier but applies to companion-object
+// declarations. Emitted as its keyword name so the companion's Unit carries
+// a `companion` label.
 func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexer.Signal {
 	var out []indexer.Signal
 	if n.Type() == "class_declaration" {
 		if hasAnonymousChild(n, "interface") {
 			out = append(out, indexer.Signal{Kind: "label", Value: "interface"})
-			// `fun interface Foo` (Kotlin 1.5 SAM) — surfaces as an
-			// extra label so callers can distinguish functional
-			// interfaces from plain ones without re-parsing.
-			if hasAnonymousChild(n, "fun") {
-				out = append(out, indexer.Signal{Kind: "label", Value: "fun_interface"})
-			}
 		}
 		if hasAnonymousChild(n, "enum") {
 			out = append(out, indexer.Signal{Kind: "label", Value: "enum"})
+		}
+	}
+	// `companion object { ... }` is a distinct node type in tree-sitter-kotlin
+	// (not an object_declaration with a modifier). The `companion` keyword is
+	// intrinsic to the node, so emit the label by node-type check rather than
+	// by scanning modifiers.
+	if n.Type() == "companion_object" {
+		out = append(out, indexer.Signal{Kind: "label", Value: "companion"})
+	}
+	// Reified type parameters live in type_parameter_modifiers inside
+	// type_parameters (sibling of `modifiers`), not under the function's
+	// main modifiers block. Use the shared walker to find any reification
+	// marker without stepping into the function body — emit at most one
+	// `reified` label regardless of how many type parameters are reified,
+	// matching how `data` / `sealed` dedupe on class-level modifiers.
+	//
+	// Gated to `function_declaration` because only functions carry reified
+	// type parameters. Running this on a class_declaration would walk the
+	// class_body into member functions and leak their `reified` up to the
+	// class itself (classes can't be reified). No test caught that leak
+	// because the modifier-coverage test only asserts positive labels.
+	if n.Type() == "function_declaration" {
+		reified := false
+		walk(n, func(c *sitter.Node) bool {
+			switch c.Type() {
+			case "function_body":
+				// Don't descend into bodies — a `reified` keyword inside
+				// the body (in a nested lambda's type params, say) isn't
+				// a modifier of the outer function.
+				return false
+			case "reification_modifier":
+				reified = true
+				return false
+			}
+			return true
+		})
+		if reified {
+			out = append(out, indexer.Signal{Kind: "label", Value: "reified"})
 		}
 	}
 	mods := kotlinModifiersNode(n)
@@ -300,22 +469,24 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 		if c == nil {
 			continue
 		}
-		// class_modifier / function_modifier / member_modifier wrap a
-		// single keyword child; inheritance_modifier wraps `open` /
-		// `abstract` / `final` / `sealed`. Descend one level.
+		// Each modifier wrapper node contains a single keyword child
+		// whose text is the modifier name. Descend one level and filter
+		// against the allow-list so stray / visibility / junk keywords
+		// don't leak into signals. visibility_modifier is deliberately
+		// NOT in the list (see function godoc).
 		switch c.Type() {
+		// reification_modifier is NOT listed here — it lives under
+		// type_parameter_modifiers inside type_parameters (a sibling of
+		// the function's `modifiers` node), not under `modifiers` itself.
+		// The dedicated walk() above handles reified.
 		case "class_modifier", "function_modifier", "member_modifier",
-			"inheritance_modifier", "visibility_modifier":
+			"inheritance_modifier", "property_modifier",
+			"parameter_modifier", "platform_modifier":
 			keyword := strings.TrimSpace(c.Content(source))
 			if keyword == "" {
 				continue
 			}
-			switch keyword {
-			case "data", "sealed", "open", "abstract", "inline", "value",
-				"override", "suspend", "companion":
-				// `value` is the Kotlin 1.5+ successor to `inline class`
-				// — both emit as labels so "find all value classes"
-				// matches either syntax form.
+			if kotlinLabelModifiers[keyword] {
 				out = append(out, indexer.Signal{Kind: "label", Value: keyword})
 			}
 		}
@@ -457,62 +628,69 @@ func kotlinUserTypeName(n *sitter.Node, source []byte) (string, []string) {
 }
 
 // ResolveParents implements inheritanceResolver. Mirrors Java's same-file
-// import lookup: bare names in delegation_specifiers get rewritten to their
-// fully-qualified form using non-wildcard imports in the file. Unresolved
-// names land with metadata["unresolved"]=true.
+// import lookup via the shared helpers: bare names in delegation_specifiers
+// get rewritten to their fully-qualified form using non-wildcard imports
+// in the file. Unresolved names land with metadata["unresolved"]=true.
 func (*KotlinGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
-	local := kotlinLocalTypeImports(refs)
-	for i, r := range refs {
-		if r.Kind != "inherits" {
-			continue
-		}
-		if strings.Contains(r.Target, ".") {
-			continue
-		}
-		if full, ok := local[r.Target]; ok {
-			refs[i].Target = full
-			continue
-		}
-		if refs[i].Metadata == nil {
-			refs[i].Metadata = map[string]any{}
-		}
-		refs[i].Metadata["unresolved"] = true
-	}
-	return refs
+	return resolveInheritsRefs(refs, localTypeBindings(refs, false /* skipStatic */))
 }
 
-// kotlinLocalTypeImports maps a Kotlin file's non-wildcard imports to
-// short-name → fully-qualified-name. Aliased imports (`import foo.Bar as B`)
-// bind the alias as the local name; wildcard imports (`import foo.*`)
-// provide no binding.
-func kotlinLocalTypeImports(refs []indexer.Reference) map[string]string {
-	out := map[string]string{}
-	for _, r := range refs {
-		if r.Kind != "import" || r.Target == "" {
-			continue
-		}
-		if strings.HasSuffix(r.Target, ".*") {
-			continue
-		}
-		local := ""
-		if r.Metadata != nil {
-			if a, ok := r.Metadata["alias"].(string); ok {
-				local = a
-			}
-		}
-		if local == "" {
-			if dot := strings.LastIndex(r.Target, "."); dot >= 0 && dot < len(r.Target)-1 {
-				local = r.Target[dot+1:]
-			} else {
-				local = r.Target
-			}
-		}
-		if _, seen := out[local]; seen {
-			continue
-		}
-		out[local] = r.Target
+// SymbolMetadata implements symbolMetadataExtractor. Currently surfaces the
+// receiver type of extension functions as Metadata["receiver"]. Kotlin's
+// extension syntax puts the receiver as an unfielded type node BEFORE the
+// function's simple_identifier inside function_declaration:
+//
+//	fun String.toSlug(): String = ...    → user_type=String, then simple_identifier=toSlug
+//	fun List<Int>.sum(): Int = 0          → user_type=List<Int>, kotlinUserTypeName strips generics
+//	fun String?.safeLowercase(): String   → nullable_type wrapping user_type=String
+//
+// Non-extension functions (`fun plain()`) don't have a preceding type
+// child; SymbolMetadata returns nil. Generic type arguments on the receiver
+// are dropped from the metadata value (only the base type name lands, so
+// "List" not "List<Int>") to keep the filter predicate consistent, and the
+// nullable marker is stripped (`String?` receivers and `String` receivers
+// both land as Metadata["receiver"]="String") so downstream queries don't
+// have to normalise.
+func (*KotlinGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]any {
+	if n.Type() != "function_declaration" {
+		return nil
 	}
-	return out
+	// Walk named children looking for a receiver type that appears BEFORE
+	// the simple_identifier (the function name). The only valid
+	// type-before-name shape is an extension receiver. nullable_type
+	// wraps a user_type for `String?`-style nullable receivers; unwrap
+	// one level before handing to kotlinUserTypeName.
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "user_type":
+			name, _ := kotlinUserTypeName(c, source)
+			if name == "" {
+				return nil
+			}
+			return map[string]any{"receiver": name}
+		case "nullable_type":
+			for j := 0; j < int(c.NamedChildCount()); j++ {
+				inner := c.NamedChild(j)
+				if inner != nil && inner.Type() == "user_type" {
+					name, _ := kotlinUserTypeName(inner, source)
+					if name == "" {
+						return nil
+					}
+					return map[string]any{"receiver": name}
+				}
+			}
+			return nil
+		case "simple_identifier":
+			// Reached the name without seeing a receiver type — this is
+			// a plain (non-extension) function.
+			return nil
+		}
+	}
+	return nil
 }
 
 // kotlinModifiersNode returns the `modifiers` child of a declaration node,

@@ -564,6 +564,12 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 
 	// Project code-symbol Units. Non-symbol kinds (section/key-path/page/…)
 	// are skipped — those belong to the docs pass or non-code formats.
+	//
+	// Unit.Metadata (populated by grammars implementing
+	// symbolMetadataExtractor — today Kotlin's extension-function receiver
+	// type) serialises into graph_nodes.metadata so downstream queries
+	// ("find all extensions of String") can filter on the JSON. Empty /
+	// nil metadata serialises to "{}" via UpsertNode's own default.
 	for _, u := range parsed.Units {
 		if !isSymbolKind(u.Kind) {
 			continue
@@ -574,6 +580,7 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 			Kind:       store.NodeKindSymbol,
 			Label:      u.Title,
 			SourcePath: file.FilePath,
+			Metadata:   unitMetadataJSON(u.Metadata),
 		}); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("symbol %s: %s", u.Path, err))
 			continue
@@ -647,7 +654,9 @@ func isSymbolKind(kind string) bool {
 	switch kind {
 	case "function", "method", "constructor",
 		"class", "interface", "enum", "record",
-		"type", "field":
+		"type", "field",
+		"object",   // Kotlin object / companion object declarations
+		"property": // Kotlin property (val / var declarations)
 		return true
 	}
 	return false
@@ -878,6 +887,50 @@ func refMetadataJSON(ref Reference) string {
 		// flavor. No current grammar produces un-marshallable values; this
 		// is defensive against future additions.
 		vb, err := json.Marshal(ref.Metadata[k])
+		if err != nil {
+			continue
+		}
+		kb, err := json.Marshal(k)
+		if err != nil {
+			continue
+		}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		b.Write(kb)
+		b.WriteByte(':')
+		b.Write(vb)
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// unitMetadataJSON serialises a Unit.Metadata map to the sorted-key JSON
+// string form used by graph_nodes.metadata. Returns "" (which UpsertNode
+// interprets as "{}") when the map is empty or nil — so non-extension
+// symbols don't get their metadata column churned on reindex.
+//
+// Deterministic ordering matters for the same reason refMetadataJSON
+// sorts its keys: INSERT OR REPLACE writes every time, so non-deterministic
+// JSON would trigger real disk writes even when the logical metadata is
+// unchanged. Per-value marshal errors skip the key rather than dropping
+// the whole map (matching refMetadataJSON's defensive posture).
+func unitMetadataJSON(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	first := true
+	for _, k := range keys {
+		vb, err := json.Marshal(meta[k])
 		if err != nil {
 			continue
 		}

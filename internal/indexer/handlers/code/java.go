@@ -361,54 +361,7 @@ func extractJavaTypeName(n *sitter.Node, source []byte) (string, []string) {
 // Parent targets that already contain '.' are treated as fully-qualified and
 // left alone (the source wrote `extends com.lib.Base` directly).
 func (*JavaGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
-	local := javaLocalTypeImports(refs)
-	for i, r := range refs {
-		if r.Kind != "inherits" {
-			continue
-		}
-		if strings.Contains(r.Target, ".") {
-			// Already dotted — either an explicit FQN in source or an
-			// earlier pass resolved it.
-			continue
-		}
-		if full, ok := local[r.Target]; ok {
-			refs[i].Target = full
-			continue
-		}
-		if refs[i].Metadata == nil {
-			refs[i].Metadata = map[string]any{}
-		}
-		refs[i].Metadata["unresolved"] = true
-	}
-	return refs
-}
-
-// javaLocalTypeImports builds a shortName → FQN map from Java import
-// references. Static imports and wildcards are excluded: neither binds a
-// bare type identifier to an importable class.
-func javaLocalTypeImports(refs []indexer.Reference) map[string]string {
-	out := map[string]string{}
-	for _, r := range refs {
-		if r.Kind != "import" || r.Target == "" {
-			continue
-		}
-		if strings.HasSuffix(r.Target, ".*") {
-			continue
-		}
-		if r.Metadata != nil {
-			if v, ok := r.Metadata["static"].(bool); ok && v {
-				continue
-			}
-		}
-		// Leaf name — last path segment.
-		if dot := strings.LastIndex(r.Target, "."); dot >= 0 && dot < len(r.Target)-1 {
-			short := r.Target[dot+1:]
-			out[short] = r.Target
-		} else {
-			out[r.Target] = r.Target
-		}
-	}
-	return out
+	return resolveInheritsRefs(refs, localTypeBindings(refs, true /* skipStatic */))
 }
 
 // javaAnnotationName pulls the identifier (or dotted scoped_identifier) out

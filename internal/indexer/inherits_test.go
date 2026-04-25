@@ -205,3 +205,30 @@ func TestReferenceMetadataKeys_DocConvention(t *testing.T) {
 	}
 	_ = reflect.TypeOf(back)
 }
+
+// TestIsSymbolKind pins the allow-list of Unit.Kind values that project
+// into graph_nodes{kind=symbol}. Regression guard for the lib-wji.2
+// latent bug where Kotlin's "object" and "property" Units were silently
+// dropped from the graph because isSymbolKind didn't include them.
+func TestIsSymbolKind(t *testing.T) {
+	for _, k := range []string{
+		// Cross-grammar core kinds.
+		"function", "method", "constructor",
+		"class", "interface", "enum", "record",
+		"type", "field",
+		// Kotlin-contributed (lib-wji.2).
+		"object", "property",
+	} {
+		if !isSymbolKind(k) {
+			t.Errorf("isSymbolKind(%q) = false, want true", k)
+		}
+	}
+	// Non-code Unit kinds must stay out of the graph.
+	for _, k := range []string{
+		"section", "paragraph", "key-path", "page", "row", "table", "",
+	} {
+		if isSymbolKind(k) {
+			t.Errorf("isSymbolKind(%q) = true, want false (non-code kind)", k)
+		}
+	}
+}

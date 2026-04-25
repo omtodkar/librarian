@@ -431,3 +431,398 @@ func TestKotlinGrammar_EmptyFile(t *testing.T) {
 		t.Errorf("expected 0 Units, got %d", len(doc.Units))
 	}
 }
+
+// --- lib-gyh: Kotlin coverage gaps ---
+
+// Secondary constructor: class with a primary constructor + a `constructor(...)`
+// block emits a Unit with Kind="constructor".
+func TestKotlinGrammar_SecondaryConstructor(t *testing.T) {
+	src := []byte(`package com.example
+
+class Pair(val a: Int, val b: Int) {
+    constructor(raw: String) : this(raw.length, 0)
+}
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("Pair.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// There should be exactly one Unit with Kind="constructor". The Title
+	// is the containing class name — tree-sitter-kotlin surfaces the
+	// constructor keyword as the secondary_constructor node, and
+	// SymbolName falls back to the first simple_identifier (class name,
+	// since there's no `name` field on secondary_constructor).
+	var ctor *indexer.Unit
+	for i := range doc.Units {
+		if doc.Units[i].Kind == "constructor" {
+			ctor = &doc.Units[i]
+			break
+		}
+	}
+	if ctor == nil {
+		t.Fatal("no constructor Unit emitted")
+	}
+	if !strings.Contains(ctor.Content, "constructor(raw: String)") {
+		t.Errorf("constructor Unit.Content missing the secondary constructor signature:\n%s", ctor.Content)
+	}
+}
+
+// Interface delegation: `class Foo : Bar by delegate` produces an inherits
+// ref to Bar via the explicit_delegation → user_type path.
+func TestKotlinGrammar_ExplicitDelegation(t *testing.T) {
+	src := []byte(`package com.example
+
+import com.example.base.Bar
+
+class Impl(private val delegate: Bar) : Bar by delegate
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("Impl.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "com.example.Impl")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref (via explicit_delegation), got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "com.example.base.Bar" {
+		t.Errorf("Target = %q, want com.example.base.Bar", refs[0].Target)
+	}
+	if refs[0].Metadata["relation"] != "implements" {
+		t.Errorf("relation = %v, want implements (bare user_type → implements)", refs[0].Metadata["relation"])
+	}
+}
+
+// Expanded modifier coverage from lib-gyh: the allow-list in kotlinLabelModifiers
+// surfaces the full set as labels. One fixture, many assertions.
+func TestKotlinGrammar_ExpandedModifierLabels(t *testing.T) {
+	src := []byte(`package m
+
+abstract class Service {
+    abstract val name: String
+    open fun describe() {}
+    inline fun <reified T> cast(x: Any): T = x as T
+    tailrec fun sum(n: Int, acc: Int = 0): Int = if (n == 0) acc else sum(n - 1, acc + n)
+    operator fun plus(other: Int) = this
+    infix fun combine(other: Service): Service = this
+    external fun nativeCall()
+    suspend fun loadAsync(): Int = 0
+    fun apply(block: (Int) -> Unit, noinline cb: () -> Unit, crossinline tap: () -> Unit) {}
+}
+
+const val MAX = 42
+
+class Inner {
+    inner class Nested
+    lateinit var later: String
+}
+
+annotation class Audited
+
+value class UserId(val raw: String)
+
+expect class PlatformCommon
+actual class PlatformJvm
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("modifiers.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// hasLabel searches for Kind="label" Value=label on the Unit with
+	// the given Title (first match wins). Returns false when the Unit
+	// is missing or the label isn't on it.
+	hasLabel := func(title, label string) bool {
+		u := findUnit(doc, title)
+		if u == nil {
+			return false
+		}
+		return hasSignal(u.Signals, "label", label)
+	}
+
+	cases := []struct {
+		title, label string
+	}{
+		{"Service", "abstract"},
+		{"describe", "open"},
+		{"cast", "inline"},
+		{"cast", "reified"}, // T is reified — reification_modifier
+		{"sum", "tailrec"},
+		{"plus", "operator"},
+		{"combine", "infix"},
+		{"nativeCall", "external"},
+		{"loadAsync", "suspend"},
+		{"MAX", "const"},
+		{"Nested", "inner"},
+		{"later", "lateinit"},
+		{"Audited", "annotation"},
+		{"UserId", "value"},
+		{"PlatformCommon", "expect"},
+		{"PlatformJvm", "actual"},
+	}
+	for _, c := range cases {
+		if !hasLabel(c.title, c.label) {
+			u := findUnit(doc, c.title)
+			var sigs []indexer.Signal
+			if u != nil {
+				sigs = u.Signals
+			}
+			t.Errorf("expected label %q on %q; got signals %+v", c.label, c.title, sigs)
+		}
+	}
+}
+
+// A companion object carries the `companion` label — proves the
+// class_modifier allow-list handles the `companion` keyword specifically.
+// Round-3 review found this was only implicitly tested (the main fixture
+// has a companion object but no test asserted the label).
+func TestKotlinGrammar_CompanionObjectCarriesLabel(t *testing.T) {
+	src := []byte(`package m
+class Foo {
+    companion object {
+        const val X = 1
+    }
+}
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("foo.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	c := findUnit(doc, "Companion")
+	if c == nil {
+		t.Fatal("Companion Unit missing — unnamed companion object should default to Title=\"Companion\"")
+	}
+	if c.Kind != "object" {
+		t.Errorf("Companion Kind = %q, want \"object\"", c.Kind)
+	}
+	if !hasSignal(c.Signals, "label", "companion") {
+		t.Errorf("Companion should carry `companion` label; got %+v", c.Signals)
+	}
+}
+
+// Primary-constructor `val`/`var` parameters emit as property Units;
+// plain parameters (no val/var) do NOT — they're just ctor args.
+func TestKotlinGrammar_PrimaryConstructorValParamsAreProperties(t *testing.T) {
+	src := []byte(`package m
+data class User(val id: String, var name: String, plain: Int)
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("user.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// val id and var name should both be property Units.
+	for _, title := range []string{"id", "name"} {
+		u := findUnit(doc, title)
+		if u == nil {
+			t.Errorf("expected property Unit %q from primary-constructor val/var", title)
+			continue
+		}
+		if u.Kind != "property" {
+			t.Errorf("%s Kind = %q, want \"property\"", title, u.Kind)
+		}
+	}
+	// `plain: Int` has no binding_pattern_kind → should NOT emit a Unit.
+	if u := findUnit(doc, "plain"); u != nil {
+		t.Errorf("plain ctor-only parameter should not emit a property Unit; got %+v", u)
+	}
+}
+
+// Regression: the reified walker in SymbolExtraSignals must be gated to
+// function_declaration nodes. Previously it ran on every class-family
+// symbol, descending the class_body into member functions and leaking
+// their `reified` type-parameter modifier up to the enclosing class's
+// Signals. The fixture intentionally pairs a class with a reified-T
+// method to prove the class itself does NOT carry the reified label.
+func TestKotlinGrammar_ReifiedDoesNotLeakToEnclosingClass(t *testing.T) {
+	src := []byte(`package m
+abstract class Service {
+    inline fun <reified T> cast(x: Any): T = x as T
+}
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("svc.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	svc := findUnit(doc, "Service")
+	if svc == nil {
+		t.Fatal("Service Unit missing")
+	}
+	if hasSignal(svc.Signals, "label", "reified") {
+		t.Errorf("class Service should not carry `reified` label; got %+v", svc.Signals)
+	}
+	// Sanity: the cast function IS reified.
+	cast := findUnit(doc, "cast")
+	if cast == nil {
+		t.Fatal("cast Unit missing")
+	}
+	if !hasSignal(cast.Signals, "label", "reified") {
+		t.Errorf("cast should carry `reified` label; got %+v", cast.Signals)
+	}
+}
+
+// expect / actual (Kotlin Multiplatform): two declarations of the same
+// class name, one with `expect`, one with `actual`. Both emit label signals
+// of the corresponding keyword.
+func TestKotlinGrammar_MultiplatformExpectActual(t *testing.T) {
+	src := []byte(`package m
+
+expect class Platform {
+    fun name(): String
+}
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("common.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	p := findUnit(doc, "Platform")
+	if p == nil {
+		t.Fatal("Platform Unit missing")
+	}
+	if !hasSignal(p.Signals, "label", "expect") {
+		t.Errorf("expected 'expect' label; got %+v", p.Signals)
+	}
+}
+
+// fun interface + context receivers are tree-sitter-kotlin upstream gaps
+// (see kotlin.go's "Known tree-sitter-kotlin gaps" block). No tests for
+// either; they'd fail against the current grammar parser regardless of
+// what librarian does. Follow-ups tracked separately.
+
+// --- lib-23w: extension-function receiver metadata ---
+
+// Extension functions on a named type: `fun String.toSlug()` lands with
+// Metadata["receiver"]="String".
+func TestKotlinGrammar_ExtensionReceiverMetadata_SimpleType(t *testing.T) {
+	src := []byte(`package m
+fun String.toSlug(): String = this.lowercase()
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("ext.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "toSlug")
+	if u == nil {
+		t.Fatal("toSlug Unit missing")
+	}
+	if u.Metadata == nil {
+		t.Fatalf("expected Metadata with \"receiver\" key; got nil")
+	}
+	if got, _ := u.Metadata["receiver"].(string); got != "String" {
+		t.Errorf("receiver = %q, want \"String\"", got)
+	}
+}
+
+// Generic receiver: `fun List<Int>.sum()` strips to receiver="List".
+// type_arguments drop so "all extensions of List" matches both
+// `fun List<Int>.` and `fun List<String>.`.
+func TestKotlinGrammar_ExtensionReceiverMetadata_GenericStripped(t *testing.T) {
+	src := []byte(`package m
+fun List<Int>.sum(): Int = 0
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("sum.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "sum")
+	if u == nil {
+		t.Fatal("sum Unit missing")
+	}
+	if got, _ := u.Metadata["receiver"].(string); got != "List" {
+		t.Errorf("receiver = %q, want \"List\" (generics stripped)", got)
+	}
+}
+
+// Non-extension function: plain `fun ordinary()` gets NO receiver key.
+// Unit.Metadata stays nil (no spurious metadata allocation when the
+// grammar has nothing to contribute).
+func TestKotlinGrammar_NonExtensionFunctionHasNoReceiver(t *testing.T) {
+	src := []byte(`package m
+fun ordinary(): Int = 42
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("ord.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "ordinary")
+	if u == nil {
+		t.Fatal("ordinary Unit missing")
+	}
+	if u.Metadata != nil {
+		if _, has := u.Metadata["receiver"]; has {
+			t.Errorf("non-extension function should not carry a receiver: %+v", u.Metadata)
+		}
+	}
+}
+
+// Nullable type-parameter receiver: `fun <T> T?.orDefault()` — T is
+// both a type parameter and the nullable receiver base. Should land
+// Metadata["receiver"]="T" (nullable marker stripped, type-parameter
+// identifier preserved verbatim).
+func TestKotlinGrammar_ExtensionReceiverMetadata_NullableTypeParam(t *testing.T) {
+	src := []byte(`package m
+fun <T> T?.orDefault(default: T): T = this ?: default
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("tp.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "orDefault")
+	if u == nil {
+		t.Fatal("orDefault Unit missing")
+	}
+	if got, _ := u.Metadata["receiver"].(string); got != "T" {
+		t.Errorf("receiver = %q, want \"T\"", got)
+	}
+}
+
+// Nullable receiver: `fun String?.safeLowercase()` lands with
+// Metadata["receiver"]="String" — the nullable marker is stripped so
+// "all extensions of String" matches both `String` and `String?`
+// receivers without the caller having to normalise.
+func TestKotlinGrammar_ExtensionReceiverMetadata_NullableStripped(t *testing.T) {
+	src := []byte(`package m
+fun String?.safeLowercase(): String = this?.lowercase() ?: ""
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("nullable.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "safeLowercase")
+	if u == nil {
+		t.Fatal("safeLowercase Unit missing")
+	}
+	if got, _ := u.Metadata["receiver"].(string); got != "String" {
+		t.Errorf("receiver = %q, want \"String\" (nullable marker stripped)", got)
+	}
+}
+
+// Dotted-receiver extension: `fun pkg.Type.method()`. kotlinUserTypeName
+// returns the dotted form for a fully-qualified receiver.
+func TestKotlinGrammar_ExtensionReceiverMetadata_Dotted(t *testing.T) {
+	src := []byte(`package m
+fun foo.bar.Baz.ext(): Int = 0
+`)
+	h := code.New(code.NewKotlinGrammar())
+	doc, err := h.Parse("dot.kt", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "ext")
+	if u == nil {
+		t.Fatal("ext Unit missing")
+	}
+	if got, _ := u.Metadata["receiver"].(string); got != "foo.bar.Baz" {
+		t.Errorf("receiver = %q, want \"foo.bar.Baz\"", got)
+	}
+}

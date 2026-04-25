@@ -525,77 +525,16 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 //   - `from m import N as A`→ local "A"      → target (absolute post-resolve)
 //
 // Wildcard `from m import *` has no local name binding and is skipped.
+// Python-specific note for the shared LocalTypeBindings helper: `import
+// pkg.subpkg` (no alias) produces Target="pkg.subpkg" after ResolveImports.
+// The shared helper extracts the leaf ("subpkg"), matching Python's own
+// scoping rule: a plain dotted import binds ONLY the leaf in the local
+// scope, not the root. So `local["subpkg"] = "pkg.subpkg"` is correct even
+// though the `class Foo(subpkg):` form is rare — the common
+// `class Foo(pkg.subpkg.Base):` arrives already-dotted and is skipped by
+// ResolveInheritsRefs' early return.
 func (*PythonGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
-	local := pythonLocalBindings(refs)
-	for i, r := range refs {
-		if r.Kind != "inherits" {
-			continue
-		}
-		if r.Metadata != nil {
-			if v, _ := r.Metadata["unresolved_expression"].(bool); v {
-				continue
-			}
-		}
-		if strings.Contains(r.Target, ".") {
-			continue
-		}
-		if full, ok := local[r.Target]; ok {
-			refs[i].Target = full
-			continue
-		}
-		if refs[i].Metadata == nil {
-			refs[i].Metadata = map[string]any{}
-		}
-		refs[i].Metadata["unresolved"] = true
-	}
-	return refs
-}
-
-// pythonLocalBindings builds a local-name → canonical-target map from the
-// file's import Refs. Alias-aware: `import numpy as np` binds "np".
-// Wildcard imports (path ending in ".*") contribute no bindings. A name
-// that appears twice keeps the first binding (Python's later rebinding
-// would shadow, but the AST order matches source order, and the shadowed
-// case is vanishingly rare for type imports).
-//
-// Leaf-name extraction note: `import pkg.subpkg` (no alias) produces a
-// Target of "pkg.subpkg" after ResolveImports. The leaf here is "subpkg",
-// matching Python's own scoping rule: a plain dotted import binds ONLY
-// the leaf name (`subpkg`) in the local scope, not the root (`pkg`). So
-// `local["subpkg"] = "pkg.subpkg"` is correct for the user's perspective
-// even though the `class Foo(subpkg):` form of literal-parent reference
-// is uncommon — more typical is `class Foo(pkg.subpkg.Base):` which
-// arrives already-dotted and is skipped by the resolver's early return.
-func pythonLocalBindings(refs []indexer.Reference) map[string]string {
-	out := map[string]string{}
-	for _, r := range refs {
-		if r.Kind != "import" || r.Target == "" {
-			continue
-		}
-		if strings.HasSuffix(r.Target, ".*") {
-			continue
-		}
-		var alias string
-		if r.Metadata != nil {
-			alias, _ = r.Metadata["alias"].(string)
-		}
-		local := alias
-		if local == "" {
-			// Leaf name from the Target path. `from m import N` has
-			// Target="m.N" (post-ResolveImports) → leaf "N". `import pkg`
-			// has Target="pkg" → leaf "pkg".
-			if dot := strings.LastIndex(r.Target, "."); dot >= 0 && dot < len(r.Target)-1 {
-				local = r.Target[dot+1:]
-			} else {
-				local = r.Target
-			}
-		}
-		if _, seen := out[local]; seen {
-			continue
-		}
-		out[local] = r.Target
-	}
-	return out
+	return resolveInheritsRefs(refs, localTypeBindings(refs, false /* skipStatic */))
 }
 
 // buildFromPath composes the Path for a `from ... import NAME` entry across

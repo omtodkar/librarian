@@ -188,6 +188,32 @@ type importResolver interface {
 	ResolveImports(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
 }
 
+// symbolMetadataExtractor is an optional interface a Grammar implements to
+// contribute structured per-symbol metadata (beyond Signals and References).
+// The walker calls SymbolMetadata for every emitted Unit and merges the
+// returned map into Unit.Metadata; returning nil or an empty map is a no-op.
+//
+// Examples of what this surface is for:
+//
+//   - Kotlin: `fun String.toSlug()` → {"receiver": "String"} so queries
+//     like "all extensions of String" become a cheap metadata filter.
+//
+// Candidate future users (not yet implemented, no beads filed):
+//
+//   - Go method receivers — the pointer/value distinction on
+//     `func (s *Service) Foo()` vs `func (s Service) Foo()`. The AST
+//     already exposes the receiver; only the hook implementation is
+//     missing.
+//   - C# / Swift / Rust extension / impl target types — similar shape.
+//
+// Distinguished from extraSignalsExtractor by shape: signals are
+// append-oriented observations (labels, annotations, TODOs); metadata is a
+// structured key-value map that downstream retrieval uses as a filter
+// predicate. Grammars that don't implement this are unaffected.
+type symbolMetadataExtractor interface {
+	SymbolMetadata(node *sitter.Node, source []byte) map[string]any
+}
+
 // inheritanceExtractor is an optional interface a Grammar implements to
 // surface parent-type relationships declared on a class-family symbol. The
 // walker invokes SymbolParents in buildUnit whenever the symbol's Kind is in
@@ -437,6 +463,18 @@ func (h *CodeHandler) extractUnits(
 // the preceding-comment buffer OR the grammar's DocstringFromNode hook
 // (whichever the grammar implements); both paths can contribute when the
 // grammar returns a non-empty docstring to augment the comment buffer.
+//
+// Optional-interface hook call order (each is a no-op for grammars that
+// don't implement):
+//
+//  1. ExtractRationaleSignals on the docstring (shared, not an extractor)
+//  2. annotationExtractor.SymbolAnnotations      → Signal{Kind="annotation"}
+//  3. extraSignalsExtractor.SymbolExtraSignals   → append verbatim
+//  4. symbolMetadataExtractor.SymbolMetadata     → merged into Unit.Metadata
+//
+// No current grammar depends on state produced by an earlier hook, so the
+// order is purely additive. If a future hook needs cross-hook state, the
+// ordering contract should be made explicit at that point.
 func (h *CodeHandler) buildUnit(
 	n *sitter.Node,
 	source []byte,
@@ -491,6 +529,14 @@ func (h *CodeHandler) buildUnit(
 			unit.Signals = append(unit.Signals, s)
 		}
 	}
+	if me, ok := h.grammar.(symbolMetadataExtractor); ok {
+		for k, v := range me.SymbolMetadata(n, source) {
+			if unit.Metadata == nil {
+				unit.Metadata = map[string]any{}
+			}
+			unit.Metadata[k] = v
+		}
+	}
 	return unit
 }
 
@@ -531,6 +577,102 @@ func (h *CodeHandler) extractParentRefs(n *sitter.Node, source []byte, unitPath,
 			Metadata: meta,
 		})
 	}
+}
+
+// localTypeBindings builds the short-name → canonical-target map used by
+// inheritance resolvers to rewrite bare parent names (`extends BaseService`)
+// into fully-qualified form (`com.example.BaseService`). Shared across
+// Java, Python, and Kotlin — all three languages' import shapes agree on:
+//
+//   - Wildcards (Target suffixed with `.*`) provide no bindings.
+//   - Aliases, when present in Metadata["alias"], become the local name.
+//   - Otherwise the local name is the leaf of the dotted Target.
+//   - On duplicate local names, first-wins (AST order = source order).
+//
+// skipStatic controls whether imports with Metadata["static"]=true are
+// dropped. Java sets this true — `import static Foo.method` binds a method
+// name, not a type, and can't satisfy an inheritance target. Python and
+// Kotlin pass false (neither emits a static-flagged import).
+//
+// JS/TS has a different canonical form (module stem + "." + member) and
+// keeps its own jsLocalNamedBindings in javascript.go.
+func localTypeBindings(refs []indexer.Reference, skipStatic bool) map[string]string {
+	out := map[string]string{}
+	for _, r := range refs {
+		if r.Kind != "import" || r.Target == "" {
+			continue
+		}
+		if strings.HasSuffix(r.Target, ".*") {
+			continue
+		}
+		if skipStatic && r.Metadata != nil {
+			if v, ok := r.Metadata["static"].(bool); ok && v {
+				continue
+			}
+		}
+		local := ""
+		if r.Metadata != nil {
+			if a, ok := r.Metadata["alias"].(string); ok {
+				local = a
+			}
+		}
+		if local == "" {
+			if dot := strings.LastIndex(r.Target, "."); dot >= 0 && dot < len(r.Target)-1 {
+				local = r.Target[dot+1:]
+			} else {
+				local = r.Target
+			}
+		}
+		if _, seen := out[local]; seen {
+			continue
+		}
+		out[local] = r.Target
+	}
+	return out
+}
+
+// resolveInheritsRefs is the shared body of every grammar's ResolveParents
+// method. Rewrites bare (non-dotted) Reference.Target values of Kind="inherits"
+// using the supplied local map, and marks the rest as unresolved. Skips:
+//
+//   - Non-inherits refs.
+//   - Refs already in dotted form (either source wrote an FQN or an earlier
+//     pass canonicalised them).
+//   - Refs with Metadata["unresolved_expression"]=true (Python call bases,
+//     JS/TS mixin-application fallbacks) — these aren't identifier targets
+//     the resolver can reason about.
+//
+// Any ref not rewritten gets Metadata["unresolved"]=true so downstream
+// queries can distinguish confident edges from placeholder ones.
+//
+// Mutation contract: modifies elements in the backing array of `refs`
+// (sets Target or populates Metadata["unresolved"]). Callers must pass
+// the canonical `doc.Refs` slice, not an aliasing sub-slice. Mirrors the
+// in-place contract of Python's ResolveImports; the returned slice is
+// the same backing array for convenience.
+func resolveInheritsRefs(refs []indexer.Reference, local map[string]string) []indexer.Reference {
+	for i, r := range refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if r.Metadata != nil {
+			if v, _ := r.Metadata["unresolved_expression"].(bool); v {
+				continue
+			}
+		}
+		if strings.Contains(r.Target, ".") {
+			continue
+		}
+		if full, ok := local[r.Target]; ok {
+			refs[i].Target = full
+			continue
+		}
+		if refs[i].Metadata == nil {
+			refs[i].Metadata = map[string]any{}
+		}
+		refs[i].Metadata["unresolved"] = true
+	}
+	return refs
 }
 
 // extractImports runs the grammar's import extractor and appends each as a
@@ -611,6 +753,23 @@ func walk(root *sitter.Node, visit func(*sitter.Node) bool) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		walk(root.Child(i), visit)
 	}
+}
+
+// findAncestor walks n.Parent() upward until it finds a node whose Type is
+// in types, or returns nil if no match is reached before the tree root.
+// Mirror of walk() for the upward direction. Package-shared since multiple
+// grammars may need to walk up to a scope-carrying ancestor (Kotlin's
+// secondary_constructor → class_declaration to borrow the class's name;
+// future: Go method receivers, Swift extension targets).
+func findAncestor(n *sitter.Node, types ...string) *sitter.Node {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		for _, t := range types {
+			if p.Type() == t {
+				return p
+			}
+		}
+	}
+	return nil
 }
 
 // joinPath composes a dotted Unit.Path from a prefix and a name, handling

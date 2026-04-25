@@ -519,29 +519,10 @@ func jsExtractParent(n *sitter.Node, source []byte) (string, []string, bool) {
 // npm packages (external node_kind) don't participate: the imported symbol
 // lives outside the workspace and has no sym: node to point at.
 func (*jsLikeGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
-	local := jsLocalNamedBindings(refs)
-	for i, r := range refs {
-		if r.Kind != "inherits" {
-			continue
-		}
-		if r.Metadata != nil {
-			if v, _ := r.Metadata["unresolved_expression"].(bool); v {
-				continue
-			}
-		}
-		if strings.Contains(r.Target, ".") {
-			continue
-		}
-		if full, ok := local[r.Target]; ok {
-			refs[i].Target = full
-			continue
-		}
-		if refs[i].Metadata == nil {
-			refs[i].Metadata = map[string]any{}
-		}
-		refs[i].Metadata["unresolved"] = true
-	}
-	return refs
+	// jsLocalNamedBindings builds its own map (JS uses module-stem +
+	// member canonical paths, unlike Java/Python/Kotlin which take the
+	// Target's leaf). The ResolveInheritsRefs body is shared.
+	return resolveInheritsRefs(refs, jsLocalNamedBindings(refs))
 }
 
 // jsLocalNamedBindings builds the local-name → canonical-symbol map from JS

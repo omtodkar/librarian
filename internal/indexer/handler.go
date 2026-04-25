@@ -145,10 +145,12 @@ type ParsedDoc struct {
 //	"interface"   — interface declaration (Java, TypeScript)
 //	"enum"        — enumeration declaration (Java, TypeScript)
 //	"record"      — Java record
+//	"object"      — Kotlin `object` / `companion object` declaration
 //	"function"    — standalone function/procedure declaration
 //	"method"      — method declaration (function inside a class)
-//	"constructor" — Java constructor
+//	"constructor" — Java / Kotlin constructor
 //	"field"       — class field / top-level variable
+//	"property"    — Kotlin `val` / `var` property
 //	"type"        — type alias / type definition (Go, Python, TypeScript)
 //	"key-path"    — YAML/JSON/TOML/properties key path
 //	"page"        — PDF page or slide
@@ -185,7 +187,23 @@ type Unit struct {
 	// Loc is the source location of this unit for citations.
 	Loc Location
 
-	// Metadata is unit-specific extras (method parameter list, YAML value type).
+	// Metadata is unit-specific extras. Conventional keys populated by one
+	// or more handlers (open set — handlers may introduce new keys):
+	//
+	//	"receiver"   — extension-function receiver type name, generics and
+	//	               nullability stripped. Emitted by the Kotlin grammar
+	//	               for `fun String.toSlug()` / `fun String?.x()` as
+	//	               "String" so "all extensions of String" is a cheap
+	//	               filter regardless of nullability.
+	//	"level"      — markdown section heading level (1-6). Emitted by
+	//	               the markdown handler for section Units.
+	//	"hierarchy"  — markdown section path as []string (e.g. ["Guide",
+	//	               "Installation"]). Emitted by the markdown handler
+	//	               alongside "level".
+	//
+	// Code-grammar keys are merged in by grammars implementing the optional
+	// symbolMetadataExtractor interface (code.go). Non-code handlers may
+	// stash format-specific values here directly during Parse.
 	Metadata map[string]any
 }
 
