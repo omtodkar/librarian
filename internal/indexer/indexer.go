@@ -94,6 +94,12 @@ func NewWithRegistry(s *store.Store, cfg *config.Config, embedder embedding.Embe
 func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, error) {
 	result := &IndexResult{}
 
+	// Fail fast on a model swap — otherwise every chunk pays a full embedding
+	// API call before AddChunk's per-chunk check would surface the mismatch.
+	if err := idx.store.VerifyActiveEmbedder(idx.embedder.Model()); err != nil {
+		return nil, err
+	}
+
 	files, err := WalkDocs(docsDir, idx.cfg.ExcludePatterns, idx.registry)
 	if err != nil {
 		return nil, fmt.Errorf("walking docs directory: %w", err)
@@ -579,7 +585,9 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 			result.Skipped++
 			return nil
 		}
-		idx.store.DeleteDocument(existing.ID)
+		if err := idx.store.DeleteDocument(existing.ID); err != nil {
+			return fmt.Errorf("deleting stale doc row: %w", err)
+		}
 	}
 
 	chunkCfg := ChunkConfig{

@@ -59,16 +59,21 @@ func (s *Store) ListDocuments() ([]Document, error) {
 func (s *Store) DeleteDocument(docID string) error {
 	// Delete vector entries for this document's chunks first (not cascaded
 	// because sqlite-vec virtual tables don't participate in FK CASCADE).
-	_, err := s.db.Exec(`
-		DELETE FROM doc_chunk_vectors WHERE chunk_id IN (
-			SELECT id FROM doc_chunks WHERE doc_id = ?
-		)`, docID)
-	if err != nil {
-		return fmt.Errorf("delete_document vectors: %w", err)
+	// Guard on vecTableReady because ClearVectorState drops the table
+	// entirely; a subsequent reindex would otherwise error "no such table"
+	// here and leave the caller's AddDocument to hit a UNIQUE conflict.
+	if s.vecTableReady {
+		_, err := s.db.Exec(`
+			DELETE FROM doc_chunk_vectors WHERE chunk_id IN (
+				SELECT id FROM doc_chunks WHERE doc_id = ?
+			)`, docID)
+		if err != nil {
+			return fmt.Errorf("delete_document vectors: %w", err)
+		}
 	}
 
 	// Delete the document's graph node; graph_edges cascade via FK.
-	_, err = s.db.Exec(`DELETE FROM graph_nodes WHERE id = ?`, DocNodeID(docID))
+	_, err := s.db.Exec(`DELETE FROM graph_nodes WHERE id = ?`, DocNodeID(docID))
 	if err != nil {
 		return fmt.Errorf("delete_document graph_node: %w", err)
 	}

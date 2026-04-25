@@ -258,6 +258,27 @@ func (s *Store) ClearVectorState() error {
 	return nil
 }
 
+// VerifyActiveEmbedder checks the active model identifier against the one
+// recorded in embedding_meta. Returns nil for fresh DBs (no meta yet) or
+// matching models; returns the recovery-guidance mismatch error otherwise.
+//
+// Called by the indexer at the start of a docs pass so a config-level model
+// swap short-circuits before any embedding API calls are made — the in-band
+// ensureVecTable check still catches the same condition per-chunk, but only
+// after paying Embed() once per chunk. Dim-only mismatch (same model name,
+// different output dim) is still surfaced at first AddChunk; this method
+// covers the common model-rename / provider-swap case at zero API cost.
+func (s *Store) VerifyActiveEmbedder(activeModel string) error {
+	if s.embedMeta.model == "" || s.embedMeta.model == activeModel {
+		return nil
+	}
+	return fmt.Errorf(
+		"embedding model mismatch: index was built with %q, config now specifies %q; "+
+			"run 'librarian reindex --rebuild-vectors' to drop the vector table "+
+			"and re-embed every chunk",
+		s.embedMeta.model, activeModel)
+}
+
 // embeddingMismatchError produces the single user-facing message for model
 // or dimension swaps. Kept as a helper so tests can match on substrings
 // without coupling to the exact format.

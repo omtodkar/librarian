@@ -188,6 +188,62 @@ func TestOpen_PopulatesEmbedMetaFromDB(t *testing.T) {
 	}
 }
 
+// TestVerifyActiveEmbedder pins the up-front mismatch check used by the
+// indexer to fail fast before any embedding API calls. Without this short
+// circuit every chunk in the docs pass paid a full Embed() before the
+// per-chunk ensureVecTable check fired — ~110 wasted API calls per failed
+// run on a mid-sized docs/ dir.
+func TestVerifyActiveEmbedder(t *testing.T) {
+	s := newTestStore(t)
+
+	// Fresh DB — no meta recorded yet. Any model passes.
+	if err := s.VerifyActiveEmbedder("anything"); err != nil {
+		t.Errorf("fresh DB should accept any model; got %v", err)
+	}
+
+	seedChunk(t, s, "model-a", 768)
+
+	if err := s.VerifyActiveEmbedder("model-a"); err != nil {
+		t.Errorf("matching model should pass; got %v", err)
+	}
+	err := s.VerifyActiveEmbedder("model-b")
+	if err == nil {
+		t.Fatal("differing model should fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error should describe mismatch; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "reindex --rebuild-vectors") {
+		t.Errorf("error should surface recovery command; got: %v", err)
+	}
+}
+
+// TestDeleteDocument_ToleratesMissingVecTable pins the bug 1 fix: after
+// ClearVectorState drops doc_chunk_vectors, DeleteDocument must not error
+// on the now-absent table. Without the vecTableReady guard, the reindex
+// recovery path was broken end-to-end (AddDocument UNIQUE conflict on
+// re-insert because DeleteDocument silently failed).
+func TestDeleteDocument_ToleratesMissingVecTable(t *testing.T) {
+	s := newTestStore(t)
+	docID := seedChunk(t, s, "model-a", 768)
+
+	if err := s.ClearVectorState(); err != nil {
+		t.Fatalf("ClearVectorState: %v", err)
+	}
+	// vec0 is now dropped. DeleteDocument's legacy first-step would error
+	// with "no such table: doc_chunk_vectors" here.
+	if err := s.DeleteDocument(docID); err != nil {
+		t.Errorf("DeleteDocument after ClearVectorState: got %v, want nil", err)
+	}
+	var docCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM documents`).Scan(&docCount); err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if docCount != 0 {
+		t.Errorf("documents rows after delete: got %d want 0", docCount)
+	}
+}
+
 // TestClearVectorState_DropsEverything pins the recovery primitive used by
 // `librarian reindex --rebuild-vectors`. After Clear, the vec0 table is
 // gone, embedding_meta is empty, doc_chunks is empty, but documents (and
