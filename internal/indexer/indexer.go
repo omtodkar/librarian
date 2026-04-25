@@ -139,6 +139,7 @@ func (idx *Indexer) parseFile(handler FileHandler, file WalkResult, content []by
 	if ctxh, ok := handler.(FileHandlerCtx); ok {
 		return ctxh.ParseCtx(file.FilePath, content, ParseContext{
 			AbsPath:        file.AbsPath,
+			ProjectRoot:    idx.cfg.ProjectRoot,
 			PythonSrcRoots: idx.pythonSrcRoots,
 			PackageCache:   &idx.pythonPackageCache,
 		})
@@ -769,11 +770,25 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 // graphTargetID maps a Reference to a namespaced graph node id via the store's
 // node-id constructors. Returns "" for reference kinds that don't yet have a
 // node-kind mapping (the edge is skipped rather than invented).
+//
+// For "import" refs, a per-reference Metadata["node_kind"] tag can override
+// the default sym: namespace — used by the JS/TS resolver to route resolved
+// relative specifiers onto file: nodes (matching CodeFileNodeID) and bare
+// specifiers onto ext: nodes (npm packages that aren't in-project). Refs
+// without the tag continue to land on sym:, preserving the lib-o8m behaviour.
 func graphTargetID(ref Reference) string {
 	switch ref.Kind {
 	case "code-file":
 		return store.CodeFileNodeID(ref.Target)
-	case "import", "call", "extends", "implements":
+	case "import":
+		switch nodeKindFromMetadata(ref) {
+		case store.NodeKindCodeFile:
+			return store.CodeFileNodeID(ref.Target)
+		case store.NodeKindExternal:
+			return store.ExternalPackageNodeID(ref.Target)
+		}
+		return store.SymbolNodeID(ref.Target)
+	case "call", "extends", "implements":
 		return store.SymbolNodeID(ref.Target)
 	case "config-key":
 		return store.ConfigKeyNodeID(ref.Target)
@@ -787,12 +802,34 @@ func graphNodeKindFromRef(ref Reference) string {
 	switch ref.Kind {
 	case "code-file":
 		return store.NodeKindCodeFile
-	case "import", "call", "extends", "implements":
+	case "import":
+		if k := nodeKindFromMetadata(ref); k != "" {
+			return k
+		}
+		return store.NodeKindSymbol
+	case "call", "extends", "implements":
 		return store.NodeKindSymbol
 	case "config-key":
 		return store.NodeKindConfigKey
 	}
 	return "unknown"
+}
+
+// nodeKindFromMetadata reads the resolver-set Metadata["node_kind"] tag off a
+// Reference, returning the canonical kind constant or "" if unset.
+func nodeKindFromMetadata(ref Reference) string {
+	if ref.Metadata == nil {
+		return ""
+	}
+	v, ok := ref.Metadata["node_kind"].(string)
+	if !ok {
+		return ""
+	}
+	switch v {
+	case store.NodeKindCodeFile, store.NodeKindExternal, store.NodeKindSymbol:
+		return v
+	}
+	return ""
 }
 
 // buildGraphEdges is the post-indexing pass that projects document/code-file/refs

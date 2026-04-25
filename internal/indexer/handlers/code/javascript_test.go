@@ -1,6 +1,8 @@
 package code_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -121,59 +123,144 @@ func TestJavaScriptGrammar_CoreShape(t *testing.T) {
 	}
 }
 
-// Import handling covers all five shapes: default, named+alias, namespace,
-// type-only, side-effect. Static imports don't apply to JS/TS (that's Java).
-func TestTypeScriptGrammar_Imports(t *testing.T) {
+// TestTypeScriptGrammar_ImportsRawFromGrammar pins the raw AST-level
+// extraction contract: Parse (without ParseCtx) skips the relative-import
+// resolver, so "./utils" and "./types" surface with path-style targets
+// preserved and named members carried separately in Metadata["member"].
+// Production code goes through ParseCtx — see
+// TestTypeScriptGrammar_ResolvesRelativeImportsViaParseCtx for the
+// resolved form.
+func TestTypeScriptGrammar_ImportsRawFromGrammar(t *testing.T) {
 	h := code.New(code.NewTypeScriptGrammar())
 	doc, err := h.Parse("t.ts", []byte(tsSample))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 
-	byTarget := map[string]indexer.Reference{}
+	// Group refs by (Target, member-metadata) so the two named imports of
+	// "./utils" don't collide in a single map.
+	type key struct{ target, member string }
+	found := map[key]indexer.Reference{}
 	for _, r := range doc.Refs {
-		if r.Kind == "import" {
-			byTarget[r.Target] = r
+		if r.Kind != "import" {
+			continue
+		}
+		m := ""
+		if r.Metadata != nil {
+			if s, ok := r.Metadata["member"].(string); ok {
+				m = s
+			}
+		}
+		found[key{r.Target, m}] = r
+	}
+
+	want := []key{
+		{"./utils", "foo"},       // named
+		{"./utils", "bar"},       // named with alias
+		{"./types", "Config"},    // type-only named
+		{"lib", ""},              // default import: module with Alias, no member
+		{"lib", "named"},         // named alongside default
+		{"pkg", ""},              // namespace: module with Alias + Metadata
+		{"side-effects-only", ""}, // side-effect only
+	}
+	for _, w := range want {
+		if _, ok := found[w]; !ok {
+			t.Errorf("missing import %+v (have %v)", w, found)
 		}
 	}
 
-	// Every expected import must be present.
-	for _, want := range []string{
-		"./utils.foo",        // named
-		"./utils.bar",        // named with alias
-		"./types.Config",     // type-only named
-		"lib",                // default import (module itself with Alias)
-		"lib.named",          // named alongside default
-		"pkg",                // namespace (module itself with Alias + Metadata)
-		"side-effects-only",  // side-effect only
-	} {
-		if _, ok := byTarget[want]; !ok {
-			t.Errorf("missing import %q (have %v)", want, byTarget)
-		}
-	}
-
-	// Type-only flag surfaces in Metadata.
-	if r, ok := byTarget["./types.Config"]; ok {
+	// Type-only flag surfaces in Metadata on every named member from the
+	// `import type { Config } from "./types"` clause.
+	if r, ok := found[key{"./types", "Config"}]; ok {
 		if r.Metadata == nil || r.Metadata["type_only"] != true {
-			t.Errorf("expected type_only=true on ./types.Config: %+v", r.Metadata)
+			t.Errorf("expected type_only=true on ./types Config: %+v", r.Metadata)
 		}
 	}
 	// Default import: Alias=defaultX, default=true.
-	if r, ok := byTarget["lib"]; ok {
+	if r, ok := found[key{"lib", ""}]; ok {
 		if r.Metadata == nil || r.Metadata["alias"] != "defaultX" || r.Metadata["default"] != true {
 			t.Errorf("expected lib default import with alias=defaultX, default=true: %+v", r.Metadata)
 		}
 	}
 	// Namespace import: Alias=ns, namespace=true.
-	if r, ok := byTarget["pkg"]; ok {
+	if r, ok := found[key{"pkg", ""}]; ok {
 		if r.Metadata == nil || r.Metadata["alias"] != "ns" || r.Metadata["namespace"] != true {
 			t.Errorf("expected pkg namespace import with alias=ns, namespace=true: %+v", r.Metadata)
 		}
 	}
 	// Named-with-alias: foo no alias, bar alias=b.
-	if r, ok := byTarget["./utils.bar"]; ok {
+	if r, ok := found[key{"./utils", "bar"}]; ok {
 		if r.Metadata == nil || r.Metadata["alias"] != "b" {
-			t.Errorf("expected ./utils.bar with alias=b: %+v", r.Metadata)
+			t.Errorf("expected ./utils bar with alias=b: %+v", r.Metadata)
+		}
+	}
+}
+
+// TestTypeScriptGrammar_ResolvesRelativeImportsViaParseCtx exercises the
+// full ParseCtx pipeline with a tempdir fixture — on-disk sibling files
+// establish the resolution targets, and the grammar's ResolveImports hook
+// rewrites "./utils" → "src/utils.ts", "./types" → "src/types.ts", while
+// bare specifiers like "lib" / "pkg" get tagged as external packages.
+func TestTypeScriptGrammar_ResolvesRelativeImportsViaParseCtx(t *testing.T) {
+	root := t.TempDir()
+	mustWrite := func(rel, body string) {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	mustWrite("src/utils.ts", "export const foo = 1; export const bar = 2;\n")
+	mustWrite("src/types.ts", "export type Config = { name: string };\n")
+
+	const src = `import { foo, bar as b } from "./utils";
+import type { Config } from "./types";
+import defaultX, { named } from "lib";
+import * as ns from "pkg";
+import "side-effects-only";
+`
+	mustWrite("src/a.ts", src)
+	abs := filepath.Join(root, "src", "a.ts")
+
+	h := code.New(code.NewTypeScriptGrammar())
+	doc, err := h.ParseCtx("src/a.ts", []byte(src), indexer.ParseContext{AbsPath: abs, ProjectRoot: root})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+
+	type seen struct {
+		target, nodeKind string
+	}
+	kinds := map[seen]bool{}
+	for _, r := range doc.Refs {
+		if r.Kind != "import" {
+			continue
+		}
+		nk := ""
+		if r.Metadata != nil {
+			if s, ok := r.Metadata["node_kind"].(string); ok {
+				nk = s
+			}
+		}
+		kinds[seen{r.Target, nk}] = true
+	}
+
+	for _, want := range []seen{
+		{"src/utils.ts", "code_file"}, // resolved relative
+		{"src/types.ts", "code_file"}, // resolved relative (type-only)
+		{"lib", "external"},           // bare npm package
+		{"pkg", "external"},           // bare namespace import
+		{"side-effects-only", "external"},
+	} {
+		if !kinds[want] {
+			t.Errorf("missing resolved import %+v; got %+v", want, kinds)
+		}
+	}
+	for s := range kinds {
+		if strings.HasPrefix(s.target, "./") || strings.HasPrefix(s.target, "../") {
+			t.Errorf("unresolved relative import leaked through: %+v", s)
 		}
 	}
 }
@@ -310,17 +397,53 @@ func TestJSFamily_AllExtensionsRegistered(t *testing.T) {
 	}
 }
 
-// Grammar invariants pass for all three flavours.
+// Grammar invariants pass for all three flavours. Uses samples that avoid
+// relative imports — the grammar's Parse path deliberately skips the
+// ResolveImports post-pass (that happens under ParseCtx, which needs a real
+// filesystem fixture), and the shared invariant rejects unresolved
+// relative targets. The raw-grammar shape is exercised by
+// TestTypeScriptGrammar_ImportsRawFromGrammar; resolution lives in
+// TestTypeScriptGrammar_ResolvesRelativeImportsViaParseCtx.
 func TestJSFamily_SatisfiesGrammarInvariants(t *testing.T) {
+	const jsInvariantSample = `import defaultX, { named } from "lib";
+import * as ns from "pkg";
+import "side-effects-only";
+
+export function greet(n) { return "hi " + n; }
+export default class Service {
+    constructor() { this.x = 1; }
+    doThing() { return 42; }
+}
+export const useCounter = () => ({ count: 0 });
+`
+	const tsInvariantSample = `import defaultX, { named } from "lib";
+import * as ns from "pkg";
+import "side-effects-only";
+
+export const PI = 3.14;
+export function hello(name: string): string { return name; }
+
+export const useAuth = (x: number): boolean => true;
+
+export default class Service {
+    readonly x: number = 1;
+    constructor() {}
+    async validate(u: string): Promise<boolean> { return true; }
+}
+
+export interface User { id: number; name: string }
+export type Handler = (x: string) => void;
+export enum Status { ACTIVE, INACTIVE }
+`
 	cases := []struct {
 		name string
 		g    code.Grammar
 		path string
 		src  []byte
 	}{
-		{"javascript", code.NewJavaScriptGrammar(), "u.js", []byte(jsSample)},
-		{"typescript", code.NewTypeScriptGrammar(), "s.ts", []byte(tsSample)},
-		{"tsx", code.NewTSXGrammar(), "c.tsx", []byte(tsSample)},
+		{"javascript", code.NewJavaScriptGrammar(), "u.js", []byte(jsInvariantSample)},
+		{"typescript", code.NewTypeScriptGrammar(), "s.ts", []byte(tsInvariantSample)},
+		{"tsx", code.NewTSXGrammar(), "c.tsx", []byte(tsInvariantSample)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

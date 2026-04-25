@@ -28,6 +28,7 @@ const (
 	NodeKindCodeFile  = "code_file"
 	NodeKindSymbol    = "symbol"     // tree-sitter method/class/function nodes
 	NodeKindConfigKey = "config_key" // YAML/TOML/properties key paths
+	NodeKindExternal  = "external"   // external packages (npm, crates.io, PyPI) referenced but not in-project
 )
 
 // Node is a row in graph_nodes.
@@ -70,18 +71,24 @@ func SymbolNodeID(target string) string { return "sym:" + target }
 // path, e.g. "spring.datasource.url").
 func ConfigKeyNodeID(target string) string { return "key:" + target }
 
+// ExternalPackageNodeID returns the stable graph node id for a reference to an
+// external package (e.g. "ext:lodash", "ext:@scope/pkg"). Used for bare JS/TS
+// module specifiers that don't map to an in-project file — distinguishing
+// them from in-project symbols keeps the sym: namespace clean.
+func ExternalPackageNodeID(spec string) string { return "ext:" + spec }
+
 // NodeIDPrefixes returns the namespaced id prefixes used by the built-in node
 // id constructors. Callers that resolve user input against all known node
 // kinds (e.g. the CLI's resolveNode) iterate this list rather than hardcoding
 // a parallel copy.
 func NodeIDPrefixes() []string {
-	return []string{"doc:", "file:", "sym:", "key:"}
+	return []string{"doc:", "file:", "sym:", "key:", "ext:"}
 }
 
 // NodeKinds returns every built-in node kind. Used by the orphan sweep
 // command to expand --kinds=all without hardcoding a parallel copy.
 func NodeKinds() []string {
-	return []string{NodeKindDocument, NodeKindCodeFile, NodeKindSymbol, NodeKindConfigKey}
+	return []string{NodeKindDocument, NodeKindCodeFile, NodeKindSymbol, NodeKindConfigKey, NodeKindExternal}
 }
 
 // UpsertNode inserts or updates a graph node. Idempotent — safe to call on

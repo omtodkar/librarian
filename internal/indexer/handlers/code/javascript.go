@@ -179,13 +179,19 @@ func (*jsLikeGrammar) PackageName(*sitter.Node, []byte) string { return "" }
 // Imports walks import_statement nodes and emits one ImportRef per imported
 // binding. Five shapes are handled:
 //
-//   - `import "side-effects";`       → one ref, Path=module, no name.
+//   - `import "side-effects";`        → one ref, Path=module, no name.
 //   - `import foo from "m";`          → Path=m, Alias=foo, Metadata["default"].
-//   - `import { a, b as c } from "m";` → Path=m.a; Path=m.b (Alias="c").
+//   - `import { a, b as c } from "m";` → Path=m, Metadata["member"]=a;
+//                                        Path=m, Metadata["member"]=b, Alias=c.
 //   - `import * as ns from "m";`      → Path=m, Alias=ns, Metadata["namespace"].
 //   - `import type { X } from "m";`   → any of the above, Metadata["type_only"].
 //
-// Mixed forms like `import def, { named } from "m"` emit one ref per binding.
+// Named imports keep the module and the named member on separate fields so
+// the JS/TS resolver (javascript_resolve.go) can rewrite Path to a
+// project-relative file path without having to disentangle "./utils.foo"
+// (member `foo` of module `./utils`) from "./utils.foo" (file literally
+// named `utils.foo`). Mixed forms like `import def, { named } from "m"`
+// emit one ref per binding.
 func (*jsLikeGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
@@ -276,7 +282,11 @@ func extractJSImports(n *sitter.Node, source []byte) []ImportRef {
 					if name == "" {
 						continue
 					}
-					out = append(out, ImportRef{Path: module + "." + name, Alias: alias})
+					out = append(out, ImportRef{
+						Path:     module,
+						Alias:    alias,
+						Metadata: map[string]any{"member": name},
+					})
 				}
 			}
 		}

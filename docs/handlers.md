@@ -98,7 +98,15 @@ The rewrite is a `ParseCtx` post-pass: the grammar's optional `importResolver` m
 2. `__init__.py` walk — upward traversal from the file's directory, collecting contiguous package markers.
 3. Virtual directory fallback — project-relative directory as implicit package when the first two yield nothing; rejected if any component isn't a valid Python identifier.
 
-`AssertGrammarInvariants` (shared grammar test helper) enforces the postcondition via a Python-gated check: `Reference.Target` must never start with `.` or contain `..` on Python grammar output. The gate widens grammar-by-grammar as their own resolvers land.
+`AssertGrammarInvariants` (shared grammar test helper) enforces the postcondition via a grammar-gated check: Python `Reference.Target` must never start with `.` or contain `..`; JS/TS `Reference.Target` must never start with `./` or `../`.
+
+#### JS/TS relative-specifier resolver
+
+ES modules map 1:1 to files, so `import x from "./utils"` in `src/a.ts` resolves to the on-disk path `src/utils.ts` (or `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, or `utils/index.*` — TS-family first, index-file fallback). `NodeNext`-style explicit-`.js` imports on TS sources are rewritten to the `.ts` sibling so graph nodes land on the canonical source.
+
+Resolved relative specifiers emit `file:src/utils.ts` graph nodes (matching `store.CodeFileNodeID`) — "who imports file X?" becomes an incoming-edge lookup on the existing code-file node. Bare npm specifiers (`lodash`, `@scope/pkg`) stay untouched but get tagged `node_kind=external` in `Reference.Metadata` so `graphTargetID` routes them to `ext:` nodes, keeping `sym:` exclusive to in-project symbols. Named imports (`import { foo, bar as b } from "./utils"`) are split at grammar-extraction time: `Path=./utils` with `Metadata["member"]=foo` + `Alias=b` as applicable — no dot-heuristics needed in the resolver.
+
+Config knobs are intentionally absent — the priority order matches ts-node / esbuild / Vite conventions. `tsconfig.json` paths aliases (`@/components/*`) fall through to the bare-specifier branch and currently land as `ext:@/components/Button`; proper path resolution is a follow-up.
 
 ### Config files — `internal/indexer/handlers/config/`
 

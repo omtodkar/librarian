@@ -593,6 +593,63 @@ func TestIntegration_Graph_PythonRelativeImportsResolveToSingleSymNode(t *testin
 	}
 }
 
+// TestIntegration_Graph_JSTSRelativeImportsResolveToSingleFileNode pins
+// the JS/TS analog of lib-o8m's Python guarantee: two files importing the
+// same module via different relative specifiers (`./utils` from src/ vs
+// `../src/utils` from pkg/) produce a single `file:src/utils.ts` graph node
+// with edges from both importers. Bare npm specifiers land on `ext:` nodes.
+func TestIntegration_Graph_JSTSRelativeImportsResolveToSingleFileNode(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"src/utils.ts": "export const helper = 1;\n",
+		"src/a.ts":     `import { helper } from "./utils"; import _ from "lodash"; export const a = helper;` + "\n",
+		"src/b.ts":     `import { helper } from "./utils"; export const b = helper;` + "\n",
+		"pkg/c.ts":     `import { helper } from "../src/utils"; export const c = helper;` + "\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	idx, s := newGraphTestIndexer(t, root)
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	edges, err := s.ListEdges()
+	if err != nil {
+		t.Fatalf("ListEdges: %v", err)
+	}
+	importersOfUtils := map[string]bool{}
+	for _, e := range edges {
+		if e.Kind == "import" && e.To == "file:src/utils.ts" {
+			importersOfUtils[e.From] = true
+		}
+	}
+	for _, want := range []string{"file:src/a.ts", "file:src/b.ts", "file:pkg/c.ts"} {
+		if !importersOfUtils[want] {
+			t.Errorf("missing import edge from %s to file:src/utils.ts; have %v", want, importersOfUtils)
+		}
+	}
+
+	// lodash (bare specifier) should land on an ext: node, not sym:.
+	lodash, err := s.GetNode("ext:lodash")
+	if err != nil {
+		t.Fatalf("GetNode ext:lodash: %v", err)
+	}
+	if lodash == nil {
+		t.Error("expected ext:lodash node for bare npm import")
+	}
+	if stale, _ := s.GetNode("sym:lodash"); stale != nil {
+		t.Error("bare npm specifier leaked onto sym: namespace")
+	}
+}
+
 // TestIntegration_Graph_ForceIndexCompatibleWithOrphanSweep constructs a
 // seeded orphan (simulating a pre-lib-o8m leftover node), runs
 // IndexProjectGraph with force=true, then invokes the sweep directly on the

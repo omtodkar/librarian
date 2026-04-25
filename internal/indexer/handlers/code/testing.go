@@ -12,13 +12,15 @@ import (
 // call it with a representative source sample and then layer language-
 // specific assertions on top.
 //
-// This helper exercises the Parse path (not ParseCtx), so Python samples
-// passed in MUST NOT contain relative imports (`from . import ...`,
-// `from ..pkg import ...`) — the invariant below that rejects leading-dot
-// Reference.Target values assumes the resolver has run, and ParseCtx with a
-// real AbsPath is required for that. Samples with only absolute imports are
-// fine. See TestPythonGrammar_ResolvesRelativeImportsViaParseCtx for the
-// ParseCtx-driven equivalent.
+// This helper exercises the Parse path (not ParseCtx), so samples for
+// grammars with a ResolveImports post-pass (Python, JS/TS) MUST NOT contain
+// relative module references — the invariant below that rejects unresolved
+// targets assumes the resolver has run, and ParseCtx with a real AbsPath +
+// ProjectRoot is required for that. Samples with only absolute imports (or
+// bare npm specifiers on JS/TS) are fine. See
+// TestPythonGrammar_ResolvesRelativeImportsViaParseCtx and
+// TestTypeScriptGrammar_ResolvesRelativeImportsViaParseCtx for ParseCtx-
+// driven equivalents.
 //
 // Invariants checked:
 //   - Parse succeeds and returns a non-nil doc.
@@ -84,21 +86,31 @@ func AssertGrammarInvariants(t *testing.T, h *CodeHandler, path string, src []by
 	}
 
 	for _, r := range doc.Refs {
-		if r.Kind == "import" && r.Target == "" {
-			t.Errorf("import Reference has empty Target: %+v", r)
+		if r.Kind != "import" {
+			continue
 		}
-		// Python-specific: the grammar's ResolveImports post-pass must
-		// rewrite relative imports into absolute dotted form so two files
-		// importing the same module via relative vs. absolute syntax
-		// collapse onto the same sym: graph node. JS/TS legitimately emits
-		// leading-dot module specifiers today (file-path style) — widen this
-		// gate grammar-by-grammar as they grow equivalent resolvers.
-		if r.Kind == "import" && h.grammar.Name() == "python" {
+		if r.Target == "" {
+			t.Errorf("import Reference has empty Target: %+v", r)
+			continue
+		}
+		// Post-resolution postcondition: the grammar's ResolveImports hook
+		// must rewrite relative module references into an absolute form so
+		// two files importing the same module via relative vs. absolute
+		// syntax collapse onto a single graph node. Check-shape varies per
+		// grammar (Python: dotted symbols; JS/TS: project-relative file
+		// paths), but the non-relative guarantee is shared.
+		switch h.grammar.Name() {
+		case "python":
 			if strings.HasPrefix(r.Target, ".") {
 				t.Errorf("python import Target %q starts with '.' (relative import not resolved)", r.Target)
 			}
 			if strings.Contains(r.Target, "..") {
 				t.Errorf("python import Target %q contains '..' (relative import not resolved)", r.Target)
+			}
+		case "javascript", "typescript", "tsx":
+			if strings.HasPrefix(r.Target, "./") || strings.HasPrefix(r.Target, "../") {
+				t.Errorf("%s import Target %q starts with './' or '../' (relative import not resolved)",
+					h.grammar.Name(), r.Target)
 			}
 		}
 	}

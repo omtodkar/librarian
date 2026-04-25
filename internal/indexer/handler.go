@@ -41,6 +41,14 @@ type ParseContext struct {
 	// resolution walks for __init__.py markers).
 	AbsPath string
 
+	// ProjectRoot is the absolute path of the workspace root (cfg.ProjectRoot).
+	// Used by handlers that need to emit project-relative node IDs or resolve
+	// against a workspace boundary (JS/TS resolves './utils' to a path
+	// relative to this root so graph nodes align with CodeFileNodeID's
+	// project-relative contract). Empty when the indexer has no workspace
+	// (some test paths).
+	ProjectRoot string
+
 	// PythonSrcRoots carries config.PythonConfig.SrcRoots through to the
 	// Python grammar's import resolver. Absolute paths (project-root-joined,
 	// filepath.Clean'd) so handlers can prefix-match without re-cleaning.
