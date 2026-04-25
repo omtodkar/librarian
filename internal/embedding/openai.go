@@ -25,7 +25,7 @@ func NewOpenAIEmbedder(baseURL, model, apiKey string) (*OpenAIEmbedder, error) {
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	if model == "" {
-		return nil, fmt.Errorf("embedding model is required for openai provider: set embedding.model in .librarian.yaml")
+		return nil, fmt.Errorf("embedding model is required for openai provider: set embedding.model in .librarian/config.yaml")
 	}
 	return &OpenAIEmbedder{
 		baseURL: baseURL,

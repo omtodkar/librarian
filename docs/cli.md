@@ -18,11 +18,13 @@ Librarian's CLI is organised around a project-local **workspace** at `.librarian
 | `list` | List indexed documents, optionally filtered by type |
 | `status` | Show index statistics |
 | `update` | Write or overwrite a doc and re-index it |
+| `reindex` | Drop vector state and re-embed every chunk (recovery after changing embedding.model) |
 | `neighbors` | Show a graph node's immediate connections |
 | `path` | Shortest directed path between two graph nodes |
 | `explain` | Summarise a graph node and its connections |
 | `report` | Write `GRAPH_REPORT.md`, `graph.html`, `graph.json` to `.librarian/out/` |
 | `install` | Write assistant-platform integration pointers |
+| `uninstall` | Reverse `install`; optionally delete the workspace with `--full` |
 | `mcp serve` | Start the MCP stdio server |
 
 ## Workspace discovery

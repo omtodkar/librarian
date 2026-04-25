@@ -71,9 +71,11 @@ func TestOpen_RerunIsNoOp(t *testing.T) {
 	}
 	defer s2.Close()
 
-	// goose records one row per (version_id, is_applied) transition. A fresh
-	// install writes exactly one row: version_id=1, is_applied=1. A spurious
-	// re-apply would add two more (down + up), yielding 3.
+	// goose writes version_id=0 (table-creation baseline) plus one row per
+	// applied migration. We filter to version_id=1 so the assertion survives
+	// goose's baseline row. A second goose.Up is a no-op (current version
+	// already 1); a spurious down+up cycle would add two more rows for
+	// version_id=1, yielding 3.
 	var rowCount int
 	if err := s2.db.QueryRow(`SELECT count(*) FROM goose_db_version WHERE version_id=1`).Scan(&rowCount); err != nil {
 		t.Fatalf("counting goose rows: %v", err)

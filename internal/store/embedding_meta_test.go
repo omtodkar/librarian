@@ -1,6 +1,7 @@
 package store
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -144,6 +145,46 @@ func TestAddChunk_ModelMismatchErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "model-a") || !strings.Contains(err.Error(), "model-b") {
 		t.Errorf("error should name both stored and active models; got: %v", err)
+	}
+}
+
+// TestOpen_PopulatesEmbedMetaFromDB pins the read path that every
+// incremental re-index depends on: after Open on a DB with prior meta,
+// the in-memory cache must be populated by loadEmbeddingMeta before any
+// AddChunk call. Without this test, a regression in loadEmbeddingMeta
+// (empty cache on reopen) would silently bypass the mismatch check on
+// the next run and re-write meta with whatever model is currently active.
+func TestOpen_PopulatesEmbedMetaFromDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reopen.db")
+
+	s1, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	seedChunk(t, s1, "model-a", 768)
+	s1.Close()
+
+	s2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer s2.Close()
+	if s2.embedMeta.model != "model-a" {
+		t.Errorf("embedMeta.model after reopen: got %q want %q", s2.embedMeta.model, "model-a")
+	}
+	if s2.embedMeta.dim != 768 {
+		t.Errorf("embedMeta.dim after reopen: got %d want 768", s2.embedMeta.dim)
+	}
+
+	// A mismatch attempt on the reopened store must surface the same error
+	// as the in-process case — proves the cache is authoritative, not stale.
+	doc, _ := s2.GetDocumentByPath("docs/a.md")
+	_, err = s2.AddChunk(AddChunkInput{
+		Vector: make([]float64, 3072), Content: "x", FilePath: doc.FilePath,
+		ChunkIndex: 1, DocID: doc.ID, Model: "model-a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("expected mismatch error on reopened store; got: %v", err)
 	}
 }
 

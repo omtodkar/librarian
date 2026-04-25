@@ -60,12 +60,13 @@ Most packages are unit-testable without network or filesystem setup. A few integ
 ## Project layout
 
 ```
-cmd/                              # Cobra CLI — 14 subcommands
+cmd/                              # Cobra CLI — 16 subcommands
   root.go                         # flags, Viper init, workspace discovery,
                                   # re-registers config-scoped handlers
   init.go index.go search.go context.go doc.go list.go status.go update.go
+  reindex.go                      # drop vector state and re-embed (after model change)
   neighbors.go path.go explain.go report.go   # graph surface
-  install.go                      # platform pointer installer
+  install.go uninstall.go         # platform pointer installer / removal
   mcp.go                          # `librarian mcp serve`
 
 internal/

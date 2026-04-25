@@ -64,6 +64,14 @@ type scoredChunk struct {
 }
 
 func (s *Store) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
+	// vec0 may be absent on a fresh DB, between ClearVectorState and the
+	// first AddChunk of a reindex, or in a long-lived process (MCP server)
+	// that held an open Store while another process dropped the table.
+	// Returning an empty result matches "no matches" semantics instead of
+	// surfacing a sqlite "no such table" error.
+	if !s.vecTableReady {
+		return nil, nil
+	}
 	vecBytes := float64sToFloat32Bytes(vector)
 
 	// Over-fetch candidates for re-ranking

@@ -108,8 +108,8 @@ Dimensions are discovered at runtime: the first call to `AddChunk` creates the `
 The `(model, dimension)` pair used on first index is recorded in the `embedding_meta` table and checked on every subsequent `AddChunk`. If you change `embedding.model` or `embedding.provider` in `.librarian/config.yaml`, the next indexing run fails with:
 
 ```
-embedding model/dimension mismatch: index was built with "gemini-embedding-2" (768-dim),
-config now specifies "text-embedding-3-large" (3072-dim);
+embedding model/dimension mismatch: index was built with "text-embedding-004" (768-dim),
+config now specifies "gemini-embedding-2" (3072-dim);
 run 'librarian reindex --rebuild-vectors' to drop the vector table and re-embed every chunk
 ```
 

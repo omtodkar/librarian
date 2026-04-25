@@ -90,6 +90,21 @@ func Open(dbPath string) (*Store, error) {
 		return nil, err
 	}
 
+	// Crash-window recovery: vec0 created but embedding_meta never written
+	// means the previous run died between the DDL and the compound INSERT
+	// in ensureVecTable. The vec table's dimension is unknown to this run;
+	// dropping it lets the next AddChunk re-create at the active model's
+	// dimension. Without this, a model/dim-swap after the crash would
+	// either error cryptically at the sqlite-vec level or (same-dim,
+	// different-model) silently corrupt the semantic space.
+	if s.vecTableReady && s.embedMeta.model == "" {
+		if _, err := sqlDB.Exec(`DROP TABLE IF EXISTS doc_chunk_vectors`); err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("recovering from inconsistent vec0 state: %w", err)
+		}
+		s.vecTableReady = false
+	}
+
 	return s, nil
 }
 
