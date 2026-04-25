@@ -193,7 +193,7 @@ python:
 
 ## Local embedding + rerank via Infinity
 
-Running both the embedder and the reranker locally keeps every indexed chunk on your machine and lets you shut down cloud embedding providers entirely. [Infinity](https://github.com/michaelfeil/infinity) serves any SentenceTransformers-compatible embedding model on `/v1/embeddings` and any cross-encoder reranker on `/v1/rerank` from a single process. Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B together need ~1.5 GB of model weights and run on Apple Silicon (MPS), NVIDIA GPUs (CUDA), or CPU fallback.
+Running both the embedder and the reranker locally keeps every indexed chunk on your machine and lets you shut down cloud embedding providers entirely. [Infinity](https://github.com/michaelfeil/infinity) serves any SentenceTransformers-compatible embedding model on `/embeddings` and any cross-encoder reranker on `/rerank` from a single process (no `/v1/` prefix — set Librarian's `base_url` without it). The Librarian defaults pair **Qwen3-Embedding-0.6B** (1024-dim, Apache 2.0) with **gte-reranker-modernbert-base** (149M params, Apache 2.0, strong code-retrieval quality). Together ~900 MB of model weights; runs on Apple Silicon (MPS), NVIDIA GPUs (CUDA), or CPU fallback.
 
 ### Setup
 
@@ -208,13 +208,13 @@ Day-to-day:
 
 ```sh
 make infinity-start    # starts both models on port 7997
-make infinity-smoke    # hits /v1/embeddings + /v1/rerank to verify
+make infinity-smoke    # hits /embeddings + /rerank to verify
 make infinity-status   # pid, port, loaded models
 make infinity-logs     # tail the server log
 make infinity-stop
 ```
 
-Under the hood, `make infinity-start` runs `scripts/infinity.sh start`, which execs `infinity_emb v2 --model-id Qwen/Qwen3-Embedding-0.6B --model-id Qwen/Qwen3-Reranker-0.6B --engine torch --device mps --port 7997`. See the script header for environment-variable overrides (`INFINITY_PORT`, `INFINITY_EMBED_MODEL`, `INFINITY_RERANK_MODEL`, `INFINITY_ENGINE`, `INFINITY_DEVICE`).
+Under the hood, `make infinity-start` runs `scripts/infinity.sh start`, which execs `infinity_emb v2 --model-id Qwen/Qwen3-Embedding-0.6B --model-id Alibaba-NLP/gte-reranker-modernbert-base --engine torch --device mps --no-bettertransformer --port 7997`. See the script header for environment-variable overrides (`INFINITY_PORT`, `INFINITY_EMBED_MODEL`, `INFINITY_RERANK_MODEL`, `INFINITY_ENGINE`, `INFINITY_DEVICE`).
 
 ### Point Librarian at it
 
@@ -222,8 +222,8 @@ Once `make infinity-smoke` prints `dim = 1024` for the embedding test, swap `.li
 
 ```yaml
 embedding:
-  provider: openai              # Infinity speaks the OpenAI-compatible shape
-  base_url: http://127.0.0.1:7997/v1
+  provider: openai              # OpenAI-compatible provider talks to Infinity
+  base_url: http://127.0.0.1:7997    # NO /v1 prefix — Infinity serves /embeddings directly
   model: Qwen/Qwen3-Embedding-0.6B
   batch_size: 32
 ```
@@ -234,29 +234,38 @@ Set any non-empty API key (Infinity ignores it unless you configured one):
 export LIBRARIAN_EMBEDDING_API_KEY=local
 ```
 
-Dimension changed from whatever you had (Gemini: 3072, LM Studio Nomic: 768) to 1024, so **force a reindex**:
+Rebuild against the new embedder (`librarian index --force` alone will refuse on dimension change — use `reindex --rebuild-vectors` to drop + refill the vector table):
 
 ```sh
-librarian index --force
+librarian reindex --rebuild-vectors
 ```
 
-### Reranker (pending `lib-5ny`)
+### Reranker model choice
 
-Infinity already exposes `/v1/rerank` for Qwen3-Reranker-0.6B — hit it with:
+Infinity's `/rerank` auto-detects any model declaring `AutoModelForSequenceClassification` or equivalent cross-encoder architecture. The default `Alibaba-NLP/gte-reranker-modernbert-base` (ModernBERT, 149M params, 8K context, Apache 2.0) works out of the box and scores strongly on code retrieval (COIR 79.99).
+
+**Why not Qwen3-Reranker?** It's tempting (32K context, top MTEB-Code scores), but its HuggingFace repo declares `Qwen3ForCausalLM` — a causal LLM fine-tuned to answer "yes"/"no" via prompt-template assembly and `P(yes) / (P(yes) + P(no))` logit extraction. Infinity has no auto-detect path for this pattern; it falls back to `SentenceTransformer` with mean pooling and `/rerank` refuses the model with `ModelNotDeployedError: does not support 'rerank'`. Proper Qwen3-Reranker serving requires either vLLM's `--task score` mode (NVIDIA-only) or a custom FastAPI wrapper — both tracked as options in `bd show lib-5ny` if they're ever needed.
+
+**Alternative rerankers that work with Infinity today:**
+
+| Model | Params | Context | License | Notes |
+|---|---|---|---|---|
+| `Alibaba-NLP/gte-reranker-modernbert-base` (default) | 149M | 8K | Apache 2.0 | ModernBERT, strongest code retrieval per size, English only |
+| `BAAI/bge-reranker-v2-m3` | 568M | 8K | Apache 2.0 | Multilingual (100+ languages), safer on non-English corpora |
+| `mixedbread-ai/mxbai-rerank-base-v2` | ~280M | 8K | Apache 2.0 | Strong general reranker, competitive with BGE |
+| `jinaai/jina-reranker-v2-base-multilingual` | 278M | 1K | CC-BY-NC-4.0 | Non-commercial license — avoid for work use |
+
+Override via env var:
 
 ```sh
-curl http://127.0.0.1:7997/v1/rerank \
-  -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3-Reranker-0.6B",
-       "query": "how does auth work",
-       "documents": ["...", "..."]}'
+INFINITY_RERANK_MODEL=BAAI/bge-reranker-v2-m3 make infinity-start
 ```
 
-The response is `{"results": [{"index": N, "relevance_score": 0.xx, "document": "..."}, ...]}` — proper cross-encoder scores, no chat-completion hacks. Librarian doesn't yet call this endpoint (tracked in `bd show lib-5ny`); when that lands the config will gain a sibling `rerank:` block pointing at the same `127.0.0.1:7997/v1`.
+Librarian's `/rerank` caller doesn't exist yet (tracked in `bd show lib-5ny`). When that lands, the config will gain a sibling `rerank:` block pointing at the same `127.0.0.1:7997`.
 
 ### Platform notes
 
-- **Mac (Apple Silicon):** MPS is auto-detected. Expect ~30ms per embedding, ~100-200ms per rerank pair for the 0.6B models. Warmup ≈60s on first run while weights download.
+- **Mac (Apple Silicon):** MPS is auto-detected. Steady-state throughput for the 0.6B models is ~800 embeddings/sec at `batch_size=32` per Infinity's internal benchmark — about ~1ms per embedding amortised. First-run indexing is much slower (~10 chunks/sec observed on a full docs re-embed) because model weights download from HuggingFace (~1.2 GB), the first batch pays a cold-cache penalty, and warmup takes 30-60s. Second and later runs are batched efficiently.
 - **Linux with NVIDIA GPU:** pass `INFINITY_DEVICE=cuda make infinity-start` — 3-5× faster than MPS.
 - **CPU fallback:** `INFINITY_DEVICE=cpu`. Usable but slower; batch size of 8 recommended instead of 32.
 - **Docker alternative:** `docker run -p 7997:7997 michaelf34/infinity:latest v2 --model-id Qwen/Qwen3-Embedding-0.6B --model-id Qwen/Qwen3-Reranker-0.6B --port 7997`. Loses GPU access on Mac (no MPS passthrough in Docker Desktop); CUDA works with `--gpus all` on Linux.

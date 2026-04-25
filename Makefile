@@ -5,8 +5,12 @@ BINARY_NAME=librarian
 
 # Infinity venv lives under XDG_DATA_HOME so it survives repo clones /
 # branch switches and stays out of the working tree. scripts/infinity.sh
-# references the same path.
-INFINITY_DATA_DIR ?= $(HOME)/.local/share/librarian/infinity
+# resolves the same path via $XDG_DATA_HOME at runtime — honour the env
+# var here too so a user who exports XDG_DATA_HOME doesn't end up with
+# the Makefile installing at ~/.local/share/... and the script looking
+# under $XDG_DATA_HOME/...
+XDG_DATA_HOME ?= $(HOME)/.local/share
+INFINITY_DATA_DIR ?= $(XDG_DATA_HOME)/librarian/infinity
 INFINITY_VENV = $(INFINITY_DATA_DIR)/.venv
 
 build:
@@ -27,8 +31,15 @@ test:
 # See docs/configuration.md § "Local embedding + rerank via Infinity".
 
 infinity-setup:
-	@command -v uv >/dev/null 2>&1 || { echo "uv not found; install with: brew install uv"; exit 1; }
+	@command -v uv >/dev/null 2>&1 || { \
+	    echo "uv not found."; \
+	    echo "  macOS:  brew install uv"; \
+	    echo "  Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh"; \
+	    exit 1; }
 	mkdir -p $(INFINITY_DATA_DIR)
+	# uv venv is a no-op if the venv already exists, so infinity-setup is
+	# safe to re-run. To force a clean re-install (e.g. a corrupt venv),
+	# `rm -rf $(INFINITY_VENV) && make infinity-setup`.
 	uv venv --python 3.12 $(INFINITY_VENV)
 	uv pip install --python $(INFINITY_VENV)/bin/python 'infinity-emb[all]'
 	# Dependency fix-ups for the current infinity-emb 0.0.77 pin:

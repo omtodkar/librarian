@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
-# infinity.sh — manage a local Infinity server for Qwen3-Embedding + Qwen3-Reranker.
+# infinity.sh — manage a local Infinity server for embedding + rerank.
 #
-# Runs a single Infinity process serving both the embedder and the reranker.
-# Matches the `/v1/embeddings` + `/v1/rerank` endpoint shape the Librarian
-# indexer + the planned lib-5ny reranker client target. Works on Mac (MPS),
-# NVIDIA Linux (CUDA), and CPU-only fallback. No Docker required — Infinity
-# is a Python package, installed into an isolated venv at
-# ~/.local/share/librarian/infinity/.venv by the `make infinity-setup` target.
+# Defaults to Qwen3-Embedding-0.6B (1024-dim, top-MTEB) for the embedder and
+# gte-reranker-modernbert-base (149M params, Apache 2.0, strong code-retrieval
+# quality, Infinity-native auto-detect) for the reranker. Override either via
+# INFINITY_EMBED_MODEL / INFINITY_RERANK_MODEL.
+#
+# Runs a single Infinity process serving both via /embeddings and /rerank
+# (Infinity uses those paths directly — no /v1/ prefix). Works on Mac (MPS),
+# NVIDIA Linux (CUDA), and CPU fallback. No Docker required — Infinity is a
+# Python package, installed into an isolated venv at
+# ~/.local/share/librarian/infinity/.venv by `make infinity-setup`.
+#
+# Reranker note: Qwen3-Reranker-0.6B is tempting but incompatible with
+# Infinity — its Qwen3ForCausalLM architecture isn't auto-detected as a
+# cross-encoder; Infinity loads it as an embedder with mean pooling, and
+# /rerank refuses it. gte-reranker-modernbert-base sidesteps this with a
+# real AutoModelForSequenceClassification head and scores better on code.
 #
 # See docs/configuration.md § "Local embedding + rerank via Infinity" for the
 # full end-to-end flow (install → start → point librarian at it → reindex).
@@ -17,7 +27,7 @@ set -euo pipefail
 
 PORT="${INFINITY_PORT:-7997}"
 EMBED_MODEL="${INFINITY_EMBED_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
-RERANK_MODEL="${INFINITY_RERANK_MODEL:-Qwen/Qwen3-Reranker-0.6B}"
+RERANK_MODEL="${INFINITY_RERANK_MODEL:-Alibaba-NLP/gte-reranker-modernbert-base}"
 ENGINE="${INFINITY_ENGINE:-torch}"
 
 # Pick sensible device default per platform. User can override with
@@ -60,7 +70,7 @@ Commands:
 Environment overrides:
   INFINITY_PORT          default $PORT
   INFINITY_EMBED_MODEL   default Qwen/Qwen3-Embedding-0.6B
-  INFINITY_RERANK_MODEL  default Qwen/Qwen3-Reranker-0.6B
+  INFINITY_RERANK_MODEL  default Alibaba-NLP/gte-reranker-modernbert-base
   INFINITY_ENGINE        default torch
   INFINITY_DEVICE        default mps (Mac) / cuda (NVIDIA Linux) / cpu
 
@@ -175,19 +185,22 @@ cmd_smoke() {
         echo "Not running — start first with: $0 start" >&2
         return 1
     fi
-    echo "== /v1/embeddings =="
-    curl -sf "http://127.0.0.1:$PORT/v1/embeddings" \
+    # Note: Infinity serves /embeddings and /rerank WITHOUT the /v1/ prefix
+    # OpenAI uses — this is a deliberate divergence. Librarian's openai
+    # provider works by setting base_url=http://127.0.0.1:$PORT (no /v1).
+    echo "== /embeddings =="
+    curl -sf "http://127.0.0.1:$PORT/embeddings" \
         -H "Content-Type: application/json" \
         -d "{\"model\": \"$EMBED_MODEL\", \"input\": \"semantic search for documentation\"}" |
         python3 -c "import sys,json; r=json.load(sys.stdin); print('dim =', len(r['data'][0]['embedding']))" ||
         echo "  embedding endpoint FAILED — check $0 logs"
     echo ""
-    echo "== /v1/rerank =="
-    curl -sf "http://127.0.0.1:$PORT/v1/rerank" \
+    echo "== /rerank =="
+    curl -sf "http://127.0.0.1:$PORT/rerank" \
         -H "Content-Type: application/json" \
         -d "{\"model\": \"$RERANK_MODEL\", \"query\": \"what is sqlite-vec\", \"documents\": [\"sqlite-vec is a SQLite extension that provides vector search for embeddings.\", \"Paris is the capital of France.\"]}" |
         python3 -m json.tool ||
-        echo "  rerank endpoint FAILED — check $0 logs"
+        echo "  rerank endpoint FAILED — likely a model-detection issue (see docs/configuration.md § Infinity rerank notes)"
 }
 
 # ---- Dispatch -----------------------------------------------------------
