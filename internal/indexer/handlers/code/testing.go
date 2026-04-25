@@ -12,6 +12,14 @@ import (
 // call it with a representative source sample and then layer language-
 // specific assertions on top.
 //
+// This helper exercises the Parse path (not ParseCtx), so Python samples
+// passed in MUST NOT contain relative imports (`from . import ...`,
+// `from ..pkg import ...`) — the invariant below that rejects leading-dot
+// Reference.Target values assumes the resolver has run, and ParseCtx with a
+// real AbsPath is required for that. Samples with only absolute imports are
+// fine. See TestPythonGrammar_ResolvesRelativeImportsViaParseCtx for the
+// ParseCtx-driven equivalent.
+//
 // Invariants checked:
 //   - Parse succeeds and returns a non-nil doc.
 //   - doc.Format equals h.Name(); doc.DocType is "code".
@@ -21,6 +29,9 @@ import (
 //     (unqualified symbol) or is prefixed with doc.Title + "." (package
 //     qualifier) — or is prefixed with a container name like "Title.Container".
 //   - Every Reference with Kind="import" has non-empty Target.
+//   - For Python grammar: Reference.Target never starts with '.' or contains
+//     '..' (relative-import form). Grammar-gated because JS/TS legitimately
+//     emits leading-dot module specifiers today; widen as resolvers land.
 //   - Chunk returns without error and produces chunks whose SectionHeading
 //     is non-empty.
 //   - Grammar.CommentNodeTypes returns at least one entry (otherwise the
@@ -75,6 +86,20 @@ func AssertGrammarInvariants(t *testing.T, h *CodeHandler, path string, src []by
 	for _, r := range doc.Refs {
 		if r.Kind == "import" && r.Target == "" {
 			t.Errorf("import Reference has empty Target: %+v", r)
+		}
+		// Python-specific: the grammar's ResolveImports post-pass must
+		// rewrite relative imports into absolute dotted form so two files
+		// importing the same module via relative vs. absolute syntax
+		// collapse onto the same sym: graph node. JS/TS legitimately emits
+		// leading-dot module specifiers today (file-path style) — widen this
+		// gate grammar-by-grammar as they grow equivalent resolvers.
+		if r.Kind == "import" && h.grammar.Name() == "python" {
+			if strings.HasPrefix(r.Target, ".") {
+				t.Errorf("python import Target %q starts with '.' (relative import not resolved)", r.Target)
+			}
+			if strings.Contains(r.Target, "..") {
+				t.Errorf("python import Target %q contains '..' (relative import not resolved)", r.Target)
+			}
 		}
 	}
 

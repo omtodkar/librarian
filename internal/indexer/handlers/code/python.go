@@ -246,9 +246,13 @@ func extractPythonStringContent(str *sitter.Node, source []byte) string {
 // Path values — "collections.deque" for `from collections import deque` —
 // so consumers have a fully-qualified identifier for grep/link purposes.
 //
-// Relative imports preserve their leading dot: `from . import X` → Path ".X";
-// `from ..pkg import X` → Path "..pkg.X". Stripping the dots would lose the
-// relativity signal that matters for resolution.
+// Relative imports are emitted in raw form with leading dots preserved
+// (`from . import X` → ".X"; `from ..pkg import X` → "..pkg.X"). The
+// CodeHandler's ParseCtx dispatches to the Grammar's optional ResolveImports
+// method — see python_resolve.go — which rewrites these to absolute dotted
+// paths using the file's containing package. Callers on the legacy Parse
+// path (grammar-level tests) see the raw dotted form; the production indexer
+// routes through ParseCtx and sees resolved targets only.
 func (*PythonGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
@@ -299,10 +303,10 @@ func extractPlainImports(n *sitter.Node, source []byte) []ImportRef {
 // `from . import X`. The emitted Path is MODULE.NAME so every imported
 // symbol carries its fully-qualified identifier.
 //
-// Relative imports keep their leading dots in the emitted Path (`.utils`,
-// `..pkg.Thing`) so the relativity signal survives into downstream graph
-// nodes; consumers that need to resolve against a project root can re-
-// anchor using the source file's location.
+// Relative imports keep their leading dots in the raw Path (`.utils`,
+// `..pkg.Thing`); the CodeHandler's ParseCtx pipeline invokes the grammar's
+// ResolveImports hook to rewrite these to absolute dotted paths before the
+// References reach the store. See python_resolve.go.
 //
 // Wildcard imports (`from X import *`) emit a single ImportRef with Path
 // `MODULE.*` — the `*` marker is preserved so consumers can distinguish

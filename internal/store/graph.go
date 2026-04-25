@@ -77,14 +77,27 @@ func NodeIDPrefixes() []string {
 	return []string{"doc:", "file:", "sym:", "key:"}
 }
 
-// UpsertNode inserts or replaces a graph node. Idempotent — safe to call on re-index.
+// UpsertNode inserts or updates a graph node. Idempotent — safe to call on
+// re-index. Uses ON CONFLICT DO UPDATE rather than INSERT OR REPLACE because
+// the latter deletes the conflicting row and re-inserts, which triggers the
+// ON DELETE CASCADE on graph_edges.from_node/to_node and wipes every edge
+// incident to this node — even when the only difference is updated metadata.
+// That's catastrophic for cross-file shared targets: file A upserts sym:X,
+// adds edge A→X; file B upserts sym:X and vapourises A's edge. See lib-o8m's
+// Python integration test for a concrete reproduction. ON CONFLICT DO UPDATE
+// preserves the row identity and leaves FK-dependent edges untouched.
 func (s *Store) UpsertNode(n Node) error {
 	if n.Metadata == "" {
 		n.Metadata = "{}"
 	}
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO graph_nodes (id, kind, label, source_path, metadata)
-		VALUES (?, ?, ?, ?, ?)`,
+		INSERT INTO graph_nodes (id, kind, label, source_path, metadata)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			kind        = excluded.kind,
+			label       = excluded.label,
+			source_path = excluded.source_path,
+			metadata    = excluded.metadata`,
 		n.ID, n.Kind, n.Label, nullString(n.SourcePath), n.Metadata)
 	if err != nil {
 		return fmt.Errorf("upsert_node: %w", err)

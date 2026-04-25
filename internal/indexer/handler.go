@@ -30,6 +30,29 @@ type FileHandler interface {
 	Chunk(doc *ParsedDoc, opts ChunkOpts) ([]Chunk, error)
 }
 
+// ParseContext carries per-file, per-parse context that some handlers need beyond
+// what Parse() provides. Populated by the indexer from config + walker output.
+// Grows additively as new handler-specific knobs appear.
+type ParseContext struct {
+	// AbsPath is the file's absolute on-disk path. Used by handlers that need
+	// filesystem access to siblings or ancestors (Python relative-import
+	// resolution walks for __init__.py markers).
+	AbsPath string
+
+	// PythonSrcRoots carries config.PythonConfig.SrcRoots through to the
+	// Python grammar's import resolver. Absolute paths (project-root-joined,
+	// filepath.Clean'd) so handlers can prefix-match without re-cleaning.
+	PythonSrcRoots []string
+}
+
+// FileHandlerCtx is an optional extension of FileHandler for handlers that need
+// context beyond path + content. The indexer prefers ParseCtx when the handler
+// implements it; legacy handlers keep using Parse untouched.
+type FileHandlerCtx interface {
+	FileHandler
+	ParseCtx(path string, content []byte, ctx ParseContext) (*ParsedDoc, error)
+}
+
 // ChunkOpts is the forward-looking name for ChunkConfig. Both names are interchangeable
 // during the multi-format migration; new handler code should prefer ChunkOpts.
 type ChunkOpts = ChunkConfig

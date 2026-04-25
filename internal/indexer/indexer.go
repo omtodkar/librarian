@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -25,6 +26,12 @@ type Indexer struct {
 	// Set via SetProgressOverride from the CLI; decoupled from cfg so
 	// transient per-run overrides don't mutate the shared *config.Config.
 	progressOverride string
+
+	// pythonSrcRoots is cfg.Python.SrcRoots resolved to absolute, cleaned
+	// paths once at construction time so per-file handler dispatch doesn't
+	// repeat the join/clean work. Consumed by parseFile when building
+	// ParseContext. Nil when no roots are configured.
+	pythonSrcRoots []string
 }
 
 // SetProgressOverride forces the progress-reporting mode for subsequent
@@ -84,11 +91,48 @@ func New(s *store.Store, cfg *config.Config, embedder embedding.Embedder) *Index
 // required; most callers should use New.
 func NewWithRegistry(s *store.Store, cfg *config.Config, embedder embedding.Embedder, reg *Registry) *Indexer {
 	return &Indexer{
-		store:    s,
-		cfg:      cfg,
-		embedder: embedder,
-		registry: reg,
+		store:          s,
+		cfg:            cfg,
+		embedder:       embedder,
+		registry:       reg,
+		pythonSrcRoots: resolvePythonSrcRoots(cfg),
 	}
+}
+
+// resolvePythonSrcRoots joins each configured src_root onto ProjectRoot and
+// filepath.Cleans it, so per-file handler dispatch can compare absolute paths
+// without re-resolving. Returns nil when no roots are configured or
+// ProjectRoot is empty (tests without a workspace).
+func resolvePythonSrcRoots(cfg *config.Config) []string {
+	if cfg == nil || cfg.ProjectRoot == "" || len(cfg.Python.SrcRoots) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Python.SrcRoots))
+	for _, r := range cfg.Python.SrcRoots {
+		if r == "" {
+			continue
+		}
+		if filepath.IsAbs(r) {
+			out = append(out, filepath.Clean(r))
+			continue
+		}
+		out = append(out, filepath.Clean(filepath.Join(cfg.ProjectRoot, r)))
+	}
+	return out
+}
+
+// parseFile dispatches file parsing through FileHandlerCtx when the handler
+// implements it (Python today for relative-import resolution), passing AbsPath
+// and cached per-language config. Falls back to the legacy Parse for
+// handlers that haven't opted in.
+func (idx *Indexer) parseFile(handler FileHandler, file WalkResult, content []byte) (*ParsedDoc, error) {
+	if ctxh, ok := handler.(FileHandlerCtx); ok {
+		return ctxh.ParseCtx(file.FilePath, content, ParseContext{
+			AbsPath:        file.AbsPath,
+			PythonSrcRoots: idx.pythonSrcRoots,
+		})
+	}
+	return handler.Parse(file.FilePath, content)
 }
 
 func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, error) {
@@ -435,7 +479,7 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 		return nil
 	}
 
-	parsed, err := handler.Parse(file.FilePath, content)
+	parsed, err := idx.parseFile(handler, file, content)
 	if err != nil {
 		return fmt.Errorf("parsing: %w", err)
 	}
@@ -571,7 +615,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		return fmt.Errorf("reading: %w", err)
 	}
 
-	parsed, err := handler.Parse(file.FilePath, content)
+	parsed, err := idx.parseFile(handler, file, content)
 	if err != nil {
 		return fmt.Errorf("parsing: %w", err)
 	}

@@ -142,6 +142,19 @@ graph:
   # SQLite writes serialize, so values above ~8 give diminishing returns.
   # max_workers: 0
 
+# Python-specific indexing knobs. The relative-import resolver collapses
+# 'from . import utils' (inside mypkg/a.py) and 'from mypkg import utils'
+# (elsewhere) onto a single sym:mypkg.utils graph node — "who imports X?"
+# queries see the full fan-in instead of a fragmented one.
+# python:
+#   # src_roots lists directories whose immediate children are top-level
+#   # Python packages. Files under a matching root skip the __init__.py
+#   # walk and anchor at the root boundary — covers PEP 420 namespace
+#   # packages and src-layout projects. Empty (default): __init__.py walk
+#   # first, then a virtual directory package as last resort.
+#   src_roots:
+#     - src
+
 code_file_patterns:
   - "*.go"
   - "*.ts"

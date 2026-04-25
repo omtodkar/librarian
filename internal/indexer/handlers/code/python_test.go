@@ -1,6 +1,8 @@
 package code_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -102,15 +104,18 @@ func TestPythonGrammar_ParseExtractsClassMethodsFunctions(t *testing.T) {
 	}
 }
 
-func TestPythonGrammar_Imports(t *testing.T) {
+// TestPythonGrammar_ImportsRawFromGrammar pins the raw AST-level extraction
+// contract: Parse (without ParseCtx) skips the relative-import resolver, so
+// `from . import X` and `from ..pkg import Y as T` surface here with leading
+// dots preserved. Production code goes through ParseCtx — see
+// TestPythonGrammar_ResolvesRelativeImportsViaParseCtx for the resolved form.
+func TestPythonGrammar_ImportsRawFromGrammar(t *testing.T) {
 	h := code.New(code.NewPythonGrammar())
 	doc, err := h.Parse("svc.py", []byte(pySample))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 
-	// Expected import Paths — from-imports are dotted, relative imports keep
-	// their leading dots, aliased imports carry Alias.
 	byTarget := map[string]indexer.Reference{}
 	for _, r := range doc.Refs {
 		if r.Kind == "import" {
@@ -120,11 +125,11 @@ func TestPythonGrammar_Imports(t *testing.T) {
 
 	wantTargets := []string{
 		"os",
-		"foo.bar",                // aliased plain import
-		"collections.deque",      // from X import Y
+		"foo.bar", // aliased plain import
+		"collections.deque",
 		"collections.OrderedDict",
-		".utils",  // from . import utils
-		"..pkg.Thing", // from ..pkg import Thing as T
+		".utils",      // from . import utils (raw, unresolved)
+		"..pkg.Thing", // from ..pkg import Thing as T (raw, unresolved)
 	}
 	for _, want := range wantTargets {
 		if _, ok := byTarget[want]; !ok {
@@ -132,7 +137,6 @@ func TestPythonGrammar_Imports(t *testing.T) {
 		}
 	}
 
-	// Aliases surface in Metadata.
 	if r, ok := byTarget["foo.bar"]; ok {
 		if r.Metadata == nil || r.Metadata["alias"] != "fb" {
 			t.Errorf("foo.bar missing alias 'fb': %+v", r.Metadata)
@@ -141,6 +145,65 @@ func TestPythonGrammar_Imports(t *testing.T) {
 	if r, ok := byTarget["..pkg.Thing"]; ok {
 		if r.Metadata == nil || r.Metadata["alias"] != "T" {
 			t.Errorf("..pkg.Thing missing alias 'T': %+v", r.Metadata)
+		}
+	}
+}
+
+// TestPythonGrammar_ResolvesRelativeImportsViaParseCtx exercises the full
+// ParseCtx pipeline with a real on-disk fixture — two levels of __init__.py
+// establish mypkg.sub as the file's containing package, and the grammar's
+// ResolveImports post-pass rewrites `.utils` → `mypkg.sub.utils` and
+// `..pkg.Thing` → `mypkg.pkg.Thing`.
+func TestPythonGrammar_ResolvesRelativeImportsViaParseCtx(t *testing.T) {
+	root := t.TempDir()
+	mustWrite := func(rel, body string) {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	mustWrite("mypkg/__init__.py", "")
+	mustWrite("mypkg/sub/__init__.py", "")
+
+	const src = `from . import utils
+from .utils import X
+from .. import sibling
+from ..pkg import Thing as T
+from collections import deque
+`
+	mustWrite("mypkg/sub/a.py", src)
+	abs := filepath.Join(root, "mypkg", "sub", "a.py")
+
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.ParseCtx("mypkg/sub/a.py", []byte(src), indexer.ParseContext{AbsPath: abs})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, r := range doc.Refs {
+		if r.Kind == "import" {
+			got[r.Target] = true
+		}
+	}
+	want := []string{
+		"mypkg.sub.utils",   // from . import utils
+		"mypkg.sub.utils.X", // from .utils import X
+		"mypkg.sibling",     // from .. import sibling
+		"mypkg.pkg.Thing",   // from ..pkg import Thing as T
+		"collections.deque", // absolute import — pass-through
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing resolved import %q; got %v", w, got)
+		}
+	}
+	for tgt := range got {
+		if strings.HasPrefix(tgt, ".") || strings.Contains(tgt, "..") {
+			t.Errorf("unresolved relative import survived: %q", tgt)
 		}
 	}
 }
@@ -248,8 +311,38 @@ func TestPythonGrammar_RegisteredByDefault(t *testing.T) {
 }
 
 func TestPythonGrammar_SatisfiesGrammarInvariants(t *testing.T) {
+	// pyInvariantSample mirrors pySample but drops relative imports — the
+	// grammar's Parse path deliberately skips the ResolveImports post-pass
+	// (that happens under ParseCtx, which needs a real filesystem fixture).
+	// Standing up a tempdir just to satisfy the invariants test would conflate
+	// grammar-structural assertions with resolver integration; the resolver
+	// has its own dedicated tests. This sample exercises every invariant
+	// dimension the grammar owns directly.
+	const pyInvariantSample = `"""Module docstring for service."""
+
+import os
+import foo.bar as fb
+from collections import deque, OrderedDict
+from typing import TypeAlias
+
+type UserID = int
+LegacyUserID: TypeAlias = int
+
+def top_level(x):
+    """Top-level helper."""
+    return x
+
+@dataclass
+class Service:
+    """Service does things."""
+    x: int
+
+    def validate(self, y):
+        """Validate y against x."""
+        return y
+`
 	h := code.New(code.NewPythonGrammar())
-	code.AssertGrammarInvariants(t, h, "auth/service.py", []byte(pySample))
+	code.AssertGrammarInvariants(t, h, "auth/service.py", []byte(pyInvariantSample))
 }
 
 // Nested function definitions inside another function are NOT extracted as

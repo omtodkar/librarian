@@ -162,6 +162,26 @@ graph:
   max_workers: 0  # auto
 ```
 
+### `python` section
+
+Python-specific indexing knobs. Today only the relative-import resolver
+consumes this; future Python-specific options will land here.
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `src_roots` | `[]` | Directories (relative to the workspace root) whose immediate children are top-level Python packages. Files under a listed root skip the `__init__.py` walk and anchor at the root boundary — covers PEP 420 namespace packages and src-layout projects. Empty (default): walk upward looking for an `__init__.py` chain, then fall back to a virtual directory package as last resort |
+
+Without resolution, `from . import utils` inside `mypkg/a.py` produces graph
+node `sym:.utils` while `from mypkg import utils` elsewhere produces
+`sym:mypkg.utils` — two nodes for one symbol, so cross-file "who imports X?"
+queries miss the fan-in. The resolver collapses both onto `sym:mypkg.utils`.
+
+```yaml
+python:
+  src_roots:
+    - src
+```
+
 ### Ignore file
 
 `.librarian/ignore` (gitignore-style, one pattern per line) stacks on top of `exclude_patterns`. `librarian init` seeds it with common patterns:

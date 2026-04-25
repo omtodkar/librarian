@@ -512,3 +512,143 @@ func TestIntegration_Graph_IncrementalHashGate(t *testing.T) {
 		t.Errorf("second run FilesScanned=%d; want 0 (all unchanged)", second.FilesScanned)
 	}
 }
+
+// TestIntegration_Graph_PythonRelativeImportsResolveToSingleSymNode pins the
+// lib-o8m guarantee: a Python module imported via `from . import utils` and
+// `from mypkg import utils` from separate files produces a single
+// `sym:mypkg.utils` graph node — not one per syntax form — so "who imports X?"
+// queries see the full fan-in.
+func TestIntegration_Graph_PythonRelativeImportsResolveToSingleSymNode(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"mypkg/__init__.py": "",
+		"mypkg/utils.py":    "def helper():\n    return 1\n",
+		"mypkg/a.py":        "from . import utils\n\ndef a():\n    return utils.helper()\n",
+		"mypkg/b.py":        "from mypkg import utils\n\ndef b():\n    return utils.helper()\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	dbPath := filepath.Join(root, ".librarian", "test.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{
+		DocsDir:     filepath.Join(root, "docs"),
+		DBPath:      dbPath,
+		ProjectRoot: root,
+		Chunking:    config.ChunkingConfig{MaxTokens: 512, MinTokens: 1},
+		Graph:       config.GraphConfig{HonorGitignore: false, DetectGenerated: true, MaxWorkers: 1},
+	}
+	idx := indexer.New(s, cfg, fakeEmbedder{dim: 4})
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	nodes, err := s.ListNodes()
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	var utilsSyms []string
+	for _, n := range nodes {
+		if n.Kind == "symbol" && (n.ID == "sym:mypkg.utils" || n.ID == "sym:.utils" || n.ID == "sym:utils") {
+			utilsSyms = append(utilsSyms, n.ID)
+		}
+	}
+	if len(utilsSyms) != 1 || utilsSyms[0] != "sym:mypkg.utils" {
+		t.Errorf("utils symbol nodes = %v; want exactly [sym:mypkg.utils]", utilsSyms)
+	}
+
+	// Both files should have an import edge to sym:mypkg.utils. Relies on
+	// UpsertNode using ON CONFLICT DO UPDATE (see lib-idi store fix) — with
+	// INSERT OR REPLACE, b.py's re-upsert would cascade-delete a.py's edge.
+	// filepath.Walk traverses alphabetically, so a.py runs before b.py —
+	// that's the exact ordering the cascade-delete bug needed to surface.
+	edges, err := s.ListEdges()
+	if err != nil {
+		t.Fatalf("ListEdges: %v", err)
+	}
+	importersOfUtils := map[string]bool{}
+	for _, e := range edges {
+		if e.To == "sym:mypkg.utils" && e.Kind == "import" {
+			importersOfUtils[e.From] = true
+		}
+	}
+	for _, want := range []string{"file:mypkg/a.py", "file:mypkg/b.py"} {
+		if !importersOfUtils[want] {
+			t.Errorf("missing import edge from %s to sym:mypkg.utils; have %v", want, importersOfUtils)
+		}
+	}
+}
+
+// TestIntegration_Graph_PythonSrcRootsResolvesWithoutInitPy pins that
+// configuring python.src_roots lets PEP 420 namespace packages (no
+// __init__.py) resolve too. Without src_roots, a file under src/ns/ has no
+// ancestor __init__.py and would fall to the virtual-package tier — with
+// src_roots: [src], the file anchors cleanly at ns.
+func TestIntegration_Graph_PythonSrcRootsResolvesWithoutInitPy(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"src/ns/utils.py": "def helper():\n    return 1\n",
+		"src/ns/a.py":     "from . import utils\n\ndef a():\n    return utils.helper()\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	dbPath := filepath.Join(root, ".librarian", "test.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	cfg := &config.Config{
+		DocsDir:     filepath.Join(root, "docs"),
+		DBPath:      dbPath,
+		ProjectRoot: root,
+		Chunking:    config.ChunkingConfig{MaxTokens: 512, MinTokens: 1},
+		Graph:       config.GraphConfig{HonorGitignore: false, DetectGenerated: true},
+		Python:      config.PythonConfig{SrcRoots: []string{"src"}},
+	}
+	idx := indexer.New(s, cfg, fakeEmbedder{dim: 4})
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	node, err := s.GetNode("sym:ns.utils")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if node == nil {
+		nodes, _ := s.ListNodes()
+		var syms []string
+		for _, n := range nodes {
+			if n.Kind == "symbol" {
+				syms = append(syms, n.ID)
+			}
+		}
+		t.Errorf("sym:ns.utils not found; symbol nodes: %v", syms)
+	}
+}

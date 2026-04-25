@@ -10,6 +10,7 @@ type Config struct {
 	Office           OfficeConfig    `mapstructure:"office"`
 	PDF              PDFConfig       `mapstructure:"pdf"`
 	Graph            GraphConfig     `mapstructure:"graph"`
+	Python           PythonConfig    `mapstructure:"python"`
 	CodeFilePatterns []string        `mapstructure:"code_file_patterns"`
 	ExcludePatterns  []string        `mapstructure:"exclude_patterns"`
 
@@ -95,6 +96,21 @@ type OfficeConfig struct {
 // thousands of pages can dominate the index otherwise.
 type PDFConfig struct {
 	MaxPages int `mapstructure:"max_pages"`
+}
+
+// PythonConfig controls Python-specific indexing behaviour. Today only the
+// relative-import resolver consumes it; future Python-specific knobs land here.
+type PythonConfig struct {
+	// SrcRoots lists directories (relative to ProjectRoot) whose immediate
+	// children are top-level Python packages. Files under a listed prefix
+	// skip the __init__.py walk and anchor at the src_root boundary — covers
+	// PEP 420 namespace packages and src-layout projects. Example:
+	//   python.src_roots: ["src"]   → src/mypkg/sub/a.py has package mypkg.sub
+	// Empty (default): fall back to __init__.py walk, then a virtual directory
+	// package as last resort. Prefixes match after filepath.Clean; src_roots
+	// themselves are not recursive — only files under an immediate child of
+	// the listed directory are resolved by this rule.
+	SrcRoots []string `mapstructure:"src_roots"`
 }
 
 func Load() *Config {

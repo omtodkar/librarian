@@ -123,6 +123,16 @@ type extraSignalsExtractor interface {
 	SymbolExtraSignals(node *sitter.Node, source []byte) []indexer.Signal
 }
 
+// importResolver is an optional interface a Grammar implements when its
+// extracted import References need a post-parse rewrite informed by the
+// file's on-disk location — today only Python, to resolve relative imports
+// against the containing package. code.ParseCtx invokes it after
+// grammar.Imports() has produced bare References and before they're finalised
+// on the ParsedDoc. Grammars that don't implement it are unaffected.
+type importResolver interface {
+	ResolveImports(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
+}
+
 // CodeHandler implements indexer.FileHandler for a single Grammar.
 type CodeHandler struct {
 	grammar Grammar
@@ -131,7 +141,10 @@ type CodeHandler struct {
 // New returns a CodeHandler backed by the given Grammar.
 func New(g Grammar) *CodeHandler { return &CodeHandler{grammar: g} }
 
-var _ indexer.FileHandler = (*CodeHandler)(nil)
+var (
+	_ indexer.FileHandler    = (*CodeHandler)(nil)
+	_ indexer.FileHandlerCtx = (*CodeHandler)(nil)
+)
 
 // Name implements indexer.FileHandler.
 func (h *CodeHandler) Name() string { return h.grammar.Name() }
@@ -139,10 +152,22 @@ func (h *CodeHandler) Name() string { return h.grammar.Name() }
 // Extensions implements indexer.FileHandler.
 func (h *CodeHandler) Extensions() []string { return h.grammar.Extensions() }
 
-// Parse implements indexer.FileHandler. Builds the AST via tree-sitter then
-// walks it extracting symbol Units (with docstrings), import References, and
-// rationale Signals.
+// Parse implements indexer.FileHandler. Thin wrapper over ParseCtx with an
+// empty ParseContext — grammars that implement importResolver (Python)
+// therefore skip resolution when callers use the legacy Parse path. Used by
+// grammar-level tests that want to inspect raw AST output without standing up
+// a filesystem fixture; production code paths go through the indexer's
+// FileHandlerCtx dispatch.
 func (h *CodeHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, error) {
+	return h.ParseCtx(path, content, indexer.ParseContext{})
+}
+
+// ParseCtx implements indexer.FileHandlerCtx. Builds the AST via tree-sitter
+// then walks it extracting symbol Units (with docstrings), import References,
+// and rationale Signals. If the Grammar implements importResolver, import
+// References are rewritten using ctx (Python uses this to resolve relative
+// imports against the file's containing package).
+func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseContext) (*indexer.ParsedDoc, error) {
 	parser := sitter.NewParser()
 	defer parser.Close()
 	parser.SetLanguage(h.grammar.Language())
@@ -185,6 +210,9 @@ func (h *CodeHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, er
 	// stem in every Unit.Path. For Go, title == pkg; behaviour unchanged.
 	h.extractUnits(root, content, title, "", symbolKinds, containerKinds, commentSet, doc, nil)
 	h.extractImports(root, content, doc)
+	if r, ok := h.grammar.(importResolver); ok {
+		doc.Refs = r.ResolveImports(doc.Refs, path, ctx)
+	}
 	doc.Signals = extractAllCommentSignals(root, content, commentSet)
 
 	return doc, nil
