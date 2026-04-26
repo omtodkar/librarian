@@ -190,6 +190,47 @@ Whenever you add or modify a migration, also:
 - [ ] Update the version history table in `docs/upgrading.md`.
 - [ ] If the change affects vector storage or the `embedding_meta` guard, update [docs/embedding.md](embedding.md) and [docs/storage.md](storage.md) accordingly.
 
+## Running integration tests
+
+Most tests run without external services. A small set are tag-gated for use when you have the real dependency available.
+
+### Fake-server embedding tests
+
+The `internal/embedding/` package includes tests that spin up an in-process fake HTTP server mimicking Infinity's `/embeddings` endpoint. These run as part of `go test ./...` with no extra setup — no real embedding server needed.
+
+Key protection: the fake server only answers `/embeddings` (not `/v1/embeddings`), so any accidental change to the path construction in the client causes these tests to fail immediately.
+
+### Real Infinity integration test (tag-gated)
+
+Requires [Infinity](https://github.com/michaelfeil/infinity) running locally (see `scripts/infinity.sh start`).
+
+```sh
+go test -tags=infinity ./internal/embedding/...
+```
+
+Tests tagged with `//go:build infinity` are skipped in normal CI runs. To add one, guard the file with the build tag and look up the Infinity server URL from the `INFINITY_BASE_URL` environment variable (defaulting to `http://localhost:7997`):
+
+```go
+//go:build infinity
+
+package embedding_test
+
+import (
+    "os"
+    "testing"
+)
+
+func TestRealInfinityEmbed(t *testing.T) {
+    baseURL := os.Getenv("INFINITY_BASE_URL")
+    if baseURL == "" {
+        baseURL = "http://localhost:7997"
+    }
+    // ... use NewOpenAIEmbedder(baseURL, model, "", 100)
+}
+```
+
+Note: Infinity uses `/embeddings` (no `/v1` prefix). Set `baseURL` to the bare host/port — the client appends `/embeddings` automatically.
+
 ## Beads issue tracker
 
 The project uses **bd (beads)** for work tracking. `bd prime` in a fresh session prints the full command reference. Issues live in `.beads/issues.jsonl` (committed). Any new work should have a matching bd issue so the backlog stays navigable.
