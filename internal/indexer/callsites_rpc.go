@@ -145,10 +145,25 @@ func (idx *Indexer) buildCallRPCEdges(result *GraphResult) {
 			// query return results without special-casing lowerCamelCase.
 			protoEdges, err := idx.store.Neighbors(stubID, "out", store.EdgeKindImplementsRPC)
 			if err != nil || len(protoEdges) == 0 {
-				// Stub has no implements_rpc link (proto not yet indexed or no match).
-				// Skip rather than emit a dangling call_rpc to a non-rpc node.
+				// Two distinct cases both produce an empty protoEdges set:
+				//   (a) The .proto file has not been indexed yet (expected; the
+				//       next full re-index will emit the edge once the proto is
+				//       present). Nothing to surface.
+				//   (b) The proto was indexed, buildImplementsRPCEdges ran, but
+				//       no naming-convention match was found for this stub
+				//       (resolver gap or naming mismatch). This is worth
+				//       investigating, but we can't distinguish (a) from (b)
+				//       cheaply here — the store lookup cost is the same.
+				// Skip in both cases; the next re-index will succeed once (a)
+				// resolves, and (b) is best diagnosed via the implements_rpc
+				// resolver separately.
 				continue
 			}
+			// protoEdges[0].To is the proto rpc node. In degenerate cases where
+			// two proto files declare the same fully-qualified service+method,
+			// multiple implements_rpc edges would exist — we take the first one
+			// consistently (same stable ordering as Neighbors returns), which is
+			// the correct target in all non-degenerate projects.
 			protoRPCID := protoEdges[0].To
 
 			if err := idx.store.UpsertEdge(store.Edge{

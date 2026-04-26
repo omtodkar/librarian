@@ -1651,24 +1651,19 @@ export default function Page() {
 		t.Fatalf("expected call_rpc edge into auth.v1.AuthService.Login; none found (check callsites_rpc.go)")
 	}
 
-	// trace_rpc must surface the call_rpc caller in result.Callers.
-	if len(result.Callers) == 0 {
-		t.Fatalf("runTraceRPC Callers = empty, expected call_rpc caller to be surfaced")
+	// trace_rpc must surface exactly one call_rpc caller in result.Callers.
+	if len(result.Callers) != 1 {
+		t.Fatalf("runTraceRPC Callers = %d, want exactly 1 (page.Page via call_rpc); got %+v", len(result.Callers), result.Callers)
 	}
-	found := false
-	for _, c := range result.Callers {
-		if c.SymbolPath == "page.Page" {
-			found = true
-			if c.Language != "ts" {
-				t.Errorf("caller language = %q, want %q", c.Language, "ts")
-			}
-			if c.Depth != 1 {
-				t.Errorf("caller depth = %d, want 1 (direct call_rpc caller)", c.Depth)
-			}
-		}
+	c := result.Callers[0]
+	if c.SymbolPath != "page.Page" {
+		t.Errorf("Callers[0].SymbolPath = %q, want %q", c.SymbolPath, "page.Page")
 	}
-	if !found {
-		t.Errorf("result.Callers does not contain page.Page; got %+v", result.Callers)
+	if c.Language != "ts" {
+		t.Errorf("Callers[0].Language = %q, want %q", c.Language, "ts")
+	}
+	if c.Depth != 1 {
+		t.Errorf("Callers[0].Depth = %d, want 1 (direct call_rpc caller)", c.Depth)
 	}
 	// CallersNote must be empty when callers are present.
 	if result.CallersNote != "" {
