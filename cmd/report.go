@@ -77,13 +77,17 @@ func runReport(cmd *cobra.Command, args []string) error {
 		GeneratedAt: time.Now(),
 	}
 
+	jsonBytes, err := report.RenderJSON(in)
+	if err != nil {
+		return fmt.Errorf("rendering graph.json: %w", err)
+	}
 	outputs := []struct {
 		name string
 		path string
 		data []byte
 	}{
 		{"GRAPH_REPORT.md", filepath.Join(ws.OutDir(), "GRAPH_REPORT.md"), report.RenderMarkdown(in)},
-		{"graph.json", filepath.Join(ws.OutDir(), "graph.json"), report.RenderJSON(in)},
+		{"graph.json", filepath.Join(ws.OutDir(), "graph.json"), jsonBytes},
 		{"graph.html", filepath.Join(ws.OutDir(), "graph.html"), report.RenderHTML(in)},
 	}
 

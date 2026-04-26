@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
@@ -14,19 +15,33 @@ import (
 	"librarian/db"
 )
 
+var (
+	dialectOnce sync.Once
+	dialectErr  error
+)
+
+// initDialect sets the goose SQL dialect exactly once per process. Called at
+// the top of Open so callers receive a returned error instead of a panic.
+// "sqlite3" is a well-known goose dialect, so dialectErr is nil in practice;
+// the error path guards against a future goose API change.
+func initDialect() error {
+	dialectOnce.Do(func() {
+		dialectErr = goose.SetDialect("sqlite3")
+	})
+	if dialectErr != nil {
+		return fmt.Errorf("goose.SetDialect: %w", dialectErr)
+	}
+	return nil
+}
+
 func init() {
 	sqlite_vec.Auto()
-	// goose.SetBaseFS/SetDialect/SetLogger write to package-level globals.
-	// Set them here rather than on each Open so parallel Opens can't race.
-	// Dialect and FS never vary for librarian — always sqlite3 + our embed.
+	// goose.SetBaseFS/SetLogger write to package-level globals.
+	// Set them here so parallel Opens can't race on them.
+	// goose.SetDialect is called once in Open via initDialect (sync.Once)
+	// so that errors return rather than panic.
 	goose.SetLogger(goose.NopLogger())
 	goose.SetBaseFS(db.MigrationsFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		// SetDialect only errors on an unknown dialect string; "sqlite3"
-		// is known. A panic here means a goose-version change broke the
-		// API, which surfaces at import time — what we want.
-		panic(fmt.Sprintf("goose.SetDialect: %v", err))
-	}
 }
 
 type Store struct {
@@ -49,6 +64,9 @@ type embedMetaCache struct {
 // goose migrations from db.MigrationsFS. Returns an error for pre-goose
 // databases — see detectLegacyPreGooseDB.
 func Open(dbPath string) (*Store, error) {
+	if err := initDialect(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}

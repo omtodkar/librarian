@@ -123,7 +123,10 @@ func TestRenderMarkdown_Deterministic(t *testing.T) {
 }
 
 func TestRenderJSON_Parseable(t *testing.T) {
-	out := report.RenderJSON(sampleInput())
+	out, err := report.RenderJSON(sampleInput())
+	if err != nil {
+		t.Fatalf("RenderJSON: %v", err)
+	}
 
 	var got map[string]any
 	if err := json.Unmarshal(out, &got); err != nil {
@@ -192,8 +195,14 @@ func TestRenderJSON_Parseable(t *testing.T) {
 
 func TestRenderJSON_Deterministic(t *testing.T) {
 	in := sampleInput()
-	a := report.RenderJSON(in)
-	b := report.RenderJSON(in)
+	a, err := report.RenderJSON(in)
+	if err != nil {
+		t.Fatalf("RenderJSON first call: %v", err)
+	}
+	b, err := report.RenderJSON(in)
+	if err != nil {
+		t.Fatalf("RenderJSON second call: %v", err)
+	}
 	if !bytes.Equal(a, b) {
 		t.Errorf("RenderJSON produced different output on identical input")
 	}

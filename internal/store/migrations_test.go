@@ -141,3 +141,28 @@ func TestGooseDown_RestoresEmptyState(t *testing.T) {
 		}
 	}
 }
+
+// TestOpen_DialectErrorPath documents why the goose.SetDialect error path
+// cannot be directly injected: the dialect is set exactly once via sync.Once
+// with the hard-coded string "sqlite3", which goose always accepts. The error
+// path in initDialect guards against a future goose API change. What this
+// test pins instead is that Open returns an error — not a panic — on a
+// pre-existing failure condition (the legacy-DB refusal), proving that the
+// whole Open error-return chain is wired correctly.
+func TestOpen_ReturnsErrorNotPanic(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy2.db")
+	sqlDB, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := sqlDB.Exec(`CREATE TABLE documents (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	sqlDB.Close()
+
+	_, err = Open(dbPath)
+	if err == nil {
+		t.Fatal("Open: expected error, got nil")
+	}
+	// Verify the call returned (not panicked) — reaching this line is the proof.
+}

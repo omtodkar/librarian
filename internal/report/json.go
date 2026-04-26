@@ -6,6 +6,10 @@ import (
 	"librarian/internal/analytics"
 )
 
+// jsonMarshalIndent is the function used to marshal the report document.
+// Replaced in tests to exercise the error-return path.
+var jsonMarshalIndent = json.MarshalIndent
+
 // SchemaVersion is the version tag stamped into every graph.json. Bump
 // when the on-disk shape changes in a way consumers need to notice.
 // Downstream tooling (lib-652 install commands, lib-e49 platform
@@ -76,7 +80,7 @@ type jsonAnalytics struct {
 
 // RenderJSON produces graph.json content. Fully deterministic given
 // in.GeneratedAt, in.Nodes/Edges, and the analytics report.
-func RenderJSON(in *Input) []byte {
+func RenderJSON(in *Input) ([]byte, error) {
 	r := in.Analytics
 
 	nodeToCommunity := buildNodeToCommunity(r.Communities)
@@ -130,12 +134,11 @@ func RenderJSON(in *Input) []byte {
 		})
 	}
 
-	b, err := json.MarshalIndent(doc, "", "  ")
+	b, err := jsonMarshalIndent(doc, "", "  ")
 	if err != nil {
-		// Unreachable — every field is a concrete type.
-		panic(err)
+		return nil, err
 	}
-	return append(b, '\n')
+	return append(b, '\n'), nil
 }
 
 // enrichCommunities converts analytics.Community{Nodes []string} into

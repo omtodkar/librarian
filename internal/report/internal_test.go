@@ -1,6 +1,35 @@
 package report
 
-import "testing"
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"librarian/internal/analytics"
+)
+
+// TestRenderJSON_MarshalError exercises the error-return path added when the
+// panic(err) at internal/report/json.go was converted. The jsonMarshalIndent
+// package variable allows injecting a failure; all jsonDoc fields are concrete
+// types so the path is unreachable through the public Input API otherwise.
+func TestRenderJSON_MarshalError(t *testing.T) {
+	orig := jsonMarshalIndent
+	defer func() { jsonMarshalIndent = orig }()
+
+	injected := errors.New("synthetic marshal failure")
+	jsonMarshalIndent = func(v any, prefix, indent string) ([]byte, error) {
+		return nil, injected
+	}
+
+	in := &Input{
+		Analytics:   &analytics.Report{},
+		GeneratedAt: time.Now(),
+	}
+	_, err := RenderJSON(in)
+	if !errors.Is(err, injected) {
+		t.Fatalf("RenderJSON: got error %v, want injected marshal failure", err)
+	}
+}
 
 func TestCommunityColor(t *testing.T) {
 	cases := []struct {
