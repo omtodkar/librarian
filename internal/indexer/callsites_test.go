@@ -68,13 +68,16 @@ export default function Page() {
 		t.Fatalf("IndexProjectGraph: %v", err)
 	}
 
-	rpcID := store.SymbolNodeID("auth.v1.AuthService.login")
+	// call_rpc edges target the proto rpc node (PascalCase), not the
+	// lowerCamelCase connect-es stub. buildCallRPCEdges follows the stub's
+	// implements_rpc edge to find the proto rpc before emitting.
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
 	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
 	if err != nil {
 		t.Fatalf("Neighbors(call_rpc): %v", err)
 	}
 	if len(edges) != 1 {
-		t.Fatalf("expected 1 call_rpc edge into auth.v1.AuthService.login; got %d: %+v", len(edges), edges)
+		t.Fatalf("expected 1 call_rpc edge into auth.v1.AuthService.Login; got %d: %+v", len(edges), edges)
 	}
 	e := edges[0]
 	wantCaller := store.SymbolNodeID("page.Page")
@@ -129,10 +132,11 @@ export function Dashboard() {
 	}
 
 	callerID := store.SymbolNodeID("dashboard.Dashboard")
+	// call_rpc targets the proto rpc (PascalCase), not the stub (lowerCamelCase).
 	wantRPCs := []string{
-		"auth.v1.AuthService.login",
-		"auth.v1.AuthService.logout",
-		"auth.v1.AuthService.whoami",
+		"auth.v1.AuthService.Login",
+		"auth.v1.AuthService.Logout",
+		"auth.v1.AuthService.Whoami",
 	}
 	for _, rpcPath := range wantRPCs {
 		rpcID := store.SymbolNodeID(rpcPath)
@@ -208,7 +212,8 @@ export function handleAuth() {
 	}
 
 	callerID := store.SymbolNodeID("auth_handler.handleAuth")
-	for _, rpcPath := range []string{"auth.v1.AuthService.login", "auth.v1.AuthService.logout"} {
+	// call_rpc targets proto rpc (PascalCase).
+	for _, rpcPath := range []string{"auth.v1.AuthService.Login", "auth.v1.AuthService.Logout"} {
 		rpcID := store.SymbolNodeID(rpcPath)
 		edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
 		if err != nil {
@@ -263,7 +268,8 @@ export function LoginPage() {
 		t.Fatalf("IndexProjectGraph: %v", err)
 	}
 
-	rpcID := store.SymbolNodeID("auth.v1.AuthService.login")
+	// call_rpc targets proto rpc (PascalCase).
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
 	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
 	if err != nil {
 		t.Fatalf("Neighbors(call_rpc): %v", err)
@@ -320,16 +326,17 @@ export function Page() {
 		t.Fatalf("IndexProjectGraph: %v", err)
 	}
 
-	rpcID := store.SymbolNodeID("auth.v1.AuthService.login")
-	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
-	if err != nil {
-		t.Fatalf("Neighbors(call_rpc): %v", err)
-	}
-	// v1: only file-scoped bindings; cross-file client not linked.
-	// lib/clients.ts constructs the client at module scope (no enclosing named
-	// function), so even in that file no edge is emitted (anonymous enclosure skip).
-	if len(edges) != 0 {
-		t.Errorf("v1 cross-file: expected 0 call_rpc edges; got %d: %+v", len(edges), edges)
+	// Check both the proto rpc (PascalCase, canonical target) and the stub
+	// (lowerCamelCase) — neither should have a call_rpc edge.
+	for _, rpcPath := range []string{"auth.v1.AuthService.Login", "auth.v1.AuthService.login"} {
+		rpcID := store.SymbolNodeID(rpcPath)
+		edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+		if err != nil {
+			t.Fatalf("Neighbors(call_rpc, %s): %v", rpcPath, err)
+		}
+		if len(edges) != 0 {
+			t.Errorf("v1 cross-file: expected 0 call_rpc edges on %s; got %d: %+v", rpcPath, len(edges), edges)
+		}
 	}
 }
 
@@ -369,13 +376,16 @@ export function doSomething() {
 		t.Fatalf("IndexProjectGraph: %v", err)
 	}
 
-	rpcID := store.SymbolNodeID("auth.v1.AuthService.login")
-	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
-	if err != nil {
-		t.Fatalf("Neighbors(call_rpc): %v", err)
-	}
-	if len(edges) != 0 {
-		t.Errorf("expected 0 call_rpc edges for non-connect usage; got %d: %+v", len(edges), edges)
+	// Check both nodes — neither should have call_rpc edges.
+	for _, rpcPath := range []string{"auth.v1.AuthService.Login", "auth.v1.AuthService.login"} {
+		rpcID := store.SymbolNodeID(rpcPath)
+		edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+		if err != nil {
+			t.Fatalf("Neighbors(call_rpc, %s): %v", rpcPath, err)
+		}
+		if len(edges) != 0 {
+			t.Errorf("expected 0 call_rpc edges for non-connect usage on %s; got %d: %+v", rpcPath, len(edges), edges)
+		}
 	}
 }
 
@@ -416,13 +426,15 @@ const result = client.login({});
 		t.Fatalf("IndexProjectGraph: %v", err)
 	}
 
-	rpcID := store.SymbolNodeID("auth.v1.AuthService.login")
-	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
-	if err != nil {
-		t.Fatalf("Neighbors(call_rpc): %v", err)
-	}
-	// Anonymous enclosure → no edge.
-	if len(edges) != 0 {
-		t.Errorf("expected 0 call_rpc edges for anonymous enclosure; got %d: %+v", len(edges), edges)
+	// Check both nodes — anonymous enclosure skips the edge regardless of target.
+	for _, rpcPath := range []string{"auth.v1.AuthService.Login", "auth.v1.AuthService.login"} {
+		rpcID := store.SymbolNodeID(rpcPath)
+		edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+		if err != nil {
+			t.Fatalf("Neighbors(call_rpc, %s): %v", rpcPath, err)
+		}
+		if len(edges) != 0 {
+			t.Errorf("expected 0 call_rpc edges for anonymous enclosure on %s; got %d: %+v", rpcPath, len(edges), edges)
+		}
 	}
 }

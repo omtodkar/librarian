@@ -129,23 +129,34 @@ func (idx *Indexer) buildCallRPCEdges(result *GraphResult) {
 		edges := parseCallSites(path, content, index)
 		for _, e := range edges {
 			callerID := store.SymbolNodeID(e.callerPath)
-			rpcID := store.SymbolNodeID(e.rpcPath)
+			stubID := store.SymbolNodeID(e.rpcPath) // lowerCamelCase stub symbol
 
 			callerNode, err := idx.store.GetNode(callerID)
 			if err != nil || callerNode == nil {
 				continue
 			}
-			rpcNode, err := idx.store.GetNode(rpcID)
-			if err != nil || rpcNode == nil {
+
+			// Resolve the connect-es stub (lowerCamelCase) to its proto rpc
+			// (PascalCase) via the implements_rpc outgoing edge. The stub node
+			// auth.v1.AuthService.login carries an implements_rpc edge to the
+			// proto rpc auth.v1.AuthService.Login. Emitting call_rpc to the proto
+			// rpc keeps the edge semantics (sym:<caller> → sym:<proto_rpc>) and
+			// makes runTraceRPC's Neighbors(protoRpcID, "in", EdgeKindCallRPC)
+			// query return results without special-casing lowerCamelCase.
+			protoEdges, err := idx.store.Neighbors(stubID, "out", store.EdgeKindImplementsRPC)
+			if err != nil || len(protoEdges) == 0 {
+				// Stub has no implements_rpc link (proto not yet indexed or no match).
+				// Skip rather than emit a dangling call_rpc to a non-rpc node.
 				continue
 			}
+			protoRPCID := protoEdges[0].To
 
 			if err := idx.store.UpsertEdge(store.Edge{
 				From: callerID,
-				To:   rpcID,
+				To:   protoRPCID,
 				Kind: store.EdgeKindCallRPC,
 			}); err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("callsites_rpc: upsert edge %s→%s: %s", callerID, rpcID, err))
+				result.Errors = append(result.Errors, fmt.Sprintf("callsites_rpc: upsert edge %s→%s: %s", callerID, protoRPCID, err))
 				continue
 			}
 			result.EdgesAdded++
@@ -453,7 +464,8 @@ func callSiteEnclosingSymbol(node *sitter.Node, src []byte, stem string) string 
 func connectStubBasename(path string) string {
 	base := filepath.Base(path)
 	ext := filepath.Ext(base)
-	if ext == ".ts" || ext == ".js" || ext == ".tsx" || ext == ".jsx" {
+	switch ext {
+	case ".ts", ".js", ".tsx", ".jsx", ".mts", ".mjs", ".cts", ".cjs":
 		base = strings.TrimSuffix(base, ext)
 	}
 	lower := strings.ToLower(base)

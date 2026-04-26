@@ -1641,21 +1641,38 @@ export default function Page() {
 		t.Fatalf("runTraceRPC: %v", err)
 	}
 
-	// The connect-es stub handler uses lowerCamelCase method keys.
-	// The rpc is called "login" in the stub (methodKey) and "Login" in proto.
-	// The call_rpc edge target is sym:auth.v1.AuthService.login (stub method key).
-	// Verify via the store directly that the edge was emitted.
-	rpcID := store.SymbolNodeID("auth.v1.AuthService.login")
+	// call_rpc edges target the proto rpc node (PascalCase).
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
 	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
 	if err != nil {
 		t.Fatalf("Neighbors(call_rpc): %v", err)
 	}
 	if len(edges) == 0 {
-		t.Fatalf("expected call_rpc edge into auth.v1.AuthService.login; none found (check callsites_rpc.go)")
+		t.Fatalf("expected call_rpc edge into auth.v1.AuthService.Login; none found (check callsites_rpc.go)")
 	}
 
-	// trace_rpc resolves by method name suffix, so "Login" matches the proto rpc.
-	// The Callers list may include either "call" BFS callers or call_rpc callers.
-	_ = result
+	// trace_rpc must surface the call_rpc caller in result.Callers.
+	if len(result.Callers) == 0 {
+		t.Fatalf("runTraceRPC Callers = empty, expected call_rpc caller to be surfaced")
+	}
+	found := false
+	for _, c := range result.Callers {
+		if c.SymbolPath == "page.Page" {
+			found = true
+			if c.Language != "ts" {
+				t.Errorf("caller language = %q, want %q", c.Language, "ts")
+			}
+			if c.Depth != 1 {
+				t.Errorf("caller depth = %d, want 1 (direct call_rpc caller)", c.Depth)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("result.Callers does not contain page.Page; got %+v", result.Callers)
+	}
+	// CallersNote must be empty when callers are present.
+	if result.CallersNote != "" {
+		t.Errorf("CallersNote should be empty when callers present; got %q", result.CallersNote)
+	}
 }
 
