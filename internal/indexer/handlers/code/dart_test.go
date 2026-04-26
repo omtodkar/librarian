@@ -342,6 +342,9 @@ func TestDartGrammar_ExtensionTypeDeclaration(t *testing.T) {
 	if got, _ := u.Metadata["extends_type"].(string); got != "int" {
 		t.Errorf("extends_type = %q, want int", got)
 	}
+	if got, _ := u.Metadata["representation_name"].(string); got != "id" {
+		t.Errorf("representation_name = %q, want id", got)
+	}
 	// implements Object also surfaces as an inherits ref.
 	refs := inheritsRefsBySource(doc, "auth.service.UserId")
 	found := false
@@ -354,6 +357,51 @@ func TestDartGrammar_ExtensionTypeDeclaration(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected UserId implements Object, got refs %+v", refs)
+	}
+}
+
+// Extension type representation-parameter extraction across AST-shape
+// variants: generics (List<String>), nullable (int?), dotted type names
+// (foo.Bar), function types, const ctors, type parameters. Grammar emits
+// distinct child node shapes for each; the convention is that
+// extends_type collapses to the bare base name (generics/nullability
+// stripped, matching Swift/Kotlin), with dotted names preserved FQN-style.
+func TestDartGrammar_ExtensionTypeRepresentationVariants(t *testing.T) {
+	src := []byte(`extension type Box<T>(T value) {}
+extension type const Duration(int millis) {}
+extension type Email(String address) {}
+extension type Names(List<String> items) {}
+extension type Nullable(int? v) {}
+extension type Wrap(foo.Bar x) {}
+extension type Callback(void Function(int) fn) {}
+`)
+	h := code.New(code.NewDartGrammar())
+	doc, err := h.Parse("x.dart", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, tc := range []struct {
+		title, extendsType, reprName string
+	}{
+		{"Box", "T", "value"},
+		{"Duration", "int", "millis"},
+		{"Email", "String", "address"},
+		{"Names", "List", "items"},        // generics stripped
+		{"Nullable", "int", "v"},          // ? stripped
+		{"Wrap", "foo.Bar", "x"},          // dotted preserved
+		{"Callback", "void Function(int)", "fn"}, // function_type raw text
+	} {
+		u := findUnit(doc, tc.title)
+		if u == nil {
+			t.Errorf("%s Unit missing", tc.title)
+			continue
+		}
+		if got, _ := u.Metadata["extends_type"].(string); got != tc.extendsType {
+			t.Errorf("%s extends_type = %q, want %q", tc.title, got, tc.extendsType)
+		}
+		if got, _ := u.Metadata["representation_name"].(string); got != tc.reprName {
+			t.Errorf("%s representation_name = %q, want %q", tc.title, got, tc.reprName)
+		}
 	}
 }
 

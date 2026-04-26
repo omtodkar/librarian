@@ -46,7 +46,7 @@ Handlers emit these kinds into `Unit.Kind`:
 | `protocol` | Swift protocol declaration |
 | `mixin` | Dart `mixin` declaration — a reusable member bundle that can be applied with `with` |
 | `extension` | Swift extension declaration — `Title` is the target type (`extension String {}` → Title=`String`); Dart `extension Name on Target {}` — `Title` is the extension's own name, `Metadata["extends_type"]` is the target |
-| `extension_type` | Dart `extension type UserId(int id)` — a Dart 3 extension type, distinct from `extension` because it's a wrapping type (not just method injection). `Metadata["extends_type"]` is the representation type |
+| `extension_type` | Dart `extension type UserId(int id)` — a Dart 3 extension type, distinct from `extension` because it's a wrapping type (not just method injection). `Metadata["extends_type"]` is the representation type with normalization: generics stripped (`List<String>` → `"List"`), nullable marker stripped (`int?` → `"int"`), dotted names preserved (`foo.Bar` → `"foo.Bar"`), function types rendered as whitespace-collapsed raw text (`void Function(int)` → `"void Function(int)"`). `Metadata["representation_name"]` is the parameter name bound to the representation value (here `"id"`) |
 | `enum` | Enumeration (Java, TS, Kotlin — `enum class` emits Kind=class + label=enum; Swift; Dart) |
 | `record` | Java record |
 | `object` | Kotlin `object` / `companion object` declaration |

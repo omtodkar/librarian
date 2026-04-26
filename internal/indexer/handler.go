@@ -202,11 +202,19 @@ type Unit struct {
 	//	                inside `extension String { ... }` — both produce
 	//	                "String" so "all extensions of String" is a cheap
 	//	                filter regardless of language.
-	//	"extends_type" — target type a Swift extension declaration extends.
+	//	"extends_type" — target type an extension declaration extends.
 	//	                Emitted by the Swift grammar on Units of Kind
-	//	                "extension" as the complement of "receiver": the
-	//	                type the extension is extending rather than the
-	//	                receiver of an individual member.
+	//	                "extension" and the Dart grammar on Units of
+	//	                Kind "extension" (target of `extension X on Y`)
+	//	                and "extension_type" (representation type of
+	//	                `extension type UserId(int id)`). Complement of
+	//	                "receiver": the type the extension is extending
+	//	                rather than the receiver of an individual member.
+	//	"representation_name" — parameter name bound to the representation
+	//	                value of a Dart `extension type UserId(int id)` —
+	//	                here "id". Needed when calling code constructs or
+	//	                destructures the extension type; only Dart Units
+	//	                of Kind "extension_type" carry it.
 	//	"level"       — markdown section heading level (1-6). Emitted by
 	//	                the markdown handler for section Units.
 	//	"hierarchy"   — markdown section path as []string (e.g. ["Guide",

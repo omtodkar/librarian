@@ -741,10 +741,15 @@ func (*DartGrammar) ResolveParents(refs []indexer.Reference, path string, ctx in
 	return resolveInheritsRefs(refs, localTypeBindings(refs, false /* skipStatic */))
 }
 
-// SymbolMetadata implements symbolMetadataExtractor. Emits
-// Metadata["extends_type"] on extension_declaration /
-// extension_type_declaration Units so "all extensions of String" queries
-// work cross-language with Swift's convention.
+// SymbolMetadata implements symbolMetadataExtractor. Emits:
+//
+//   - Metadata["extends_type"] on extension_declaration and
+//     extension_type_declaration Units — the type the extension
+//     extends (cross-language parallel of Swift's convention).
+//   - Metadata["representation_name"] on extension_type_declaration
+//     Units — the parameter name bound to the representation value
+//     (e.g., `extension type UserId(int id)` → "id"). Callers must use
+//     this name when constructing or destructuring the extension type.
 func (*DartGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]any {
 	switch n.Kind() {
 	case "extension_declaration":
@@ -760,23 +765,84 @@ func (*DartGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]any
 			}
 		}
 	case "extension_type_declaration":
-		// extension type UserId(int id) implements Object — the "target"
-		// is the representation type inside representation_declaration.
-		for i := uint(0); i < n.NamedChildCount(); i++ {
-			c := n.NamedChild(i)
-			if c == nil || c.Kind() != "representation_declaration" {
-				continue
-			}
-			for j := uint(0); j < c.NamedChildCount(); j++ {
-				inner := c.NamedChild(j)
-				if inner != nil && inner.Kind() == "type_identifier" {
-					if name := strings.TrimSpace(inner.Utf8Text(source)); name != "" {
-						return map[string]any{"extends_type": name}
-					}
-					return nil
-				}
-			}
+		return dartExtensionTypeMetadata(n, source)
+	}
+	return nil
+}
+
+// dartExtensionTypeMetadata walks an extension_type_declaration's
+// representation_declaration child and returns both the representation
+// type and the parameter name. `extension type UserId(int id)` →
+// {extends_type: "int", representation_name: "id"}.
+//
+// Handles the AST shapes tree-sitter-dart emits for the representation
+// type:
+//   - bare `type_identifier` → "int"
+//   - consecutive `type_identifier`s (dotted name `foo.Bar`) → "foo.Bar"
+//   - `type_identifier` + `nullable_type "?"` → "int" (nullable stripped,
+//     matches Swift/Kotlin convention)
+//   - `type_identifier` + `type_arguments` (generic `List<String>`) →
+//     "List" (generic args stripped, matches convention)
+//   - `function_type` → raw Utf8Text with whitespace collapsed
+//
+// Either key is omitted if the corresponding node is absent (grammar
+// version drift guard); the whole map is nil if nothing was found.
+func dartExtensionTypeMetadata(n *sitter.Node, source []byte) map[string]any {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		c := n.NamedChild(i)
+		if c == nil || c.Kind() != "representation_declaration" {
+			continue
 		}
+		return dartRepresentationMetadata(c, source)
+	}
+	return nil
+}
+
+func dartRepresentationMetadata(rep *sitter.Node, source []byte) map[string]any {
+	var typeParts []string
+	reprName := ""
+	// Dotted qualified names like `foo.Bar` parse as consecutive
+	// `type_identifier` siblings — tree-sitter-dart's `_type_name` rule
+	// is hidden, so each segment is hoisted as a direct named child.
+	// Concatenate with "." to reconstruct the FQN. `type_arguments` and
+	// `nullable_type` siblings are ignored (generics + nullability
+	// stripped, matching Swift/Kotlin convention).
+	//
+	// `function_type` is structurally exclusive with `type_identifier`
+	// in the representation slot — the grammar emits one OR the other,
+	// never both — so the fallback appends unconditionally when seen.
+	// The len(typeParts) guard is defensive against a future grammar
+	// version that might ever emit them in sequence.
+	//
+	// For `reprName`, we overwrite on every `identifier` we see. Named
+	// constructor variants like `extension type X.named(int id)` would
+	// emit an identifier for `named` before the param-name identifier;
+	// overwriting ensures the last one (the param name) wins.
+	for j := uint(0); j < rep.NamedChildCount(); j++ {
+		inner := rep.NamedChild(j)
+		if inner == nil {
+			continue
+		}
+		switch inner.Kind() {
+		case "type_identifier":
+			typeParts = append(typeParts, strings.TrimSpace(inner.Utf8Text(source)))
+		case "function_type":
+			if len(typeParts) == 0 {
+				typeParts = append(typeParts, strings.Join(strings.Fields(inner.Utf8Text(source)), " "))
+			}
+		case "identifier":
+			reprName = strings.TrimSpace(inner.Utf8Text(source))
+		}
+	}
+	out := map[string]any{}
+	if len(typeParts) > 0 {
+		out["extends_type"] = strings.Join(typeParts, ".")
+	}
+	if reprName != "" {
+		out["representation_name"] = reprName
+	}
+	if len(out) > 0 {
+		return out
 	}
 	return nil
 }
