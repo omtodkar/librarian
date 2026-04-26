@@ -133,6 +133,7 @@ The graph spine is a generic layer: every indexed thing projects into a `graph_n
 - `import` — code_file → symbol / code_file / external_package (depending on resolver output)
 - `call` — symbol → symbol (reserved; not emitted by any grammar today)
 - `inherits` — symbol → symbol (class / interface / protocol parent relationship). `Edge.Metadata.relation` carries the flavor: `extends`, `implements`, `mixes` (Dart mixins), `conforms` (Swift protocols), `embeds` (Go interface embedding). `extends` and `implements` remain backward-compatible aliases in `graphTargetID` / `graphNodeKindFromRef` for hand-authored edges and pre-lib-wji.1 data, but new extraction emits `inherits`.
+- `implements_rpc` — symbol → symbol (generated-code method → proto rpc declaration). Materialised by the post-graph-pass resolver `buildImplementsRPCEdges` (lib-6wz) via per-language naming conventions: protoc-gen-go/grpc-go emit `pkg.SvcServer.Method` / `pkg.SvcClient.Method` / `pkg.UnimplementedSvcServer.Method`, protoc-gen-dart emits `pkg.SvcClient.methodName` / `pkg.SvcBase.methodName`, @bufbuild/protoc-gen-es emits `pkg.SvcClient.methodName` / `pkg.Svc.methodName`. Phase 3 MVP: conventions-only, accepts false positives (a hand-written `AuthServiceClient.login` still links); lib-4kb tightens via buf.gen.yaml path matching.
 
 ### Operations
 

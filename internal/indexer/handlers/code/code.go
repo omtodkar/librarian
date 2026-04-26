@@ -202,6 +202,28 @@ type importResolver interface {
 	ResolveImports(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
 }
 
+// symbolPathElementResolver is an optional interface a Grammar implements
+// to customise the Unit.Path segment of a just-matched symbol while keeping
+// Unit.Title = the bare name from SymbolName.
+//
+// The walker default joins pathPrefix + SymbolName for both Unit.Path and
+// Unit.Title. This works for most grammars because the symbol's display
+// name and its place in the path hierarchy are the same string. Go methods
+// break that: `func (s *AuthServiceServer) Login()` has display name "Login"
+// but belongs under "AuthServiceServer.Login" in the path so that two
+// methods with the same name on different receivers in the same package
+// project to distinct sym: nodes. The resolver returns "" to fall through
+// to the default (pathElement == name); a non-empty return is used as the
+// path element only.
+//
+// Invocation happens inside extractUnits (symbol-match path), AFTER
+// SymbolKindFor has settled the Unit.Kind, because the decision may depend
+// on the final kind (Go only rewrites the path for kind="method").
+// Grammars that don't implement this are unaffected.
+type symbolPathElementResolver interface {
+	SymbolPathElement(node *sitter.Node, source []byte, name, kind string) string
+}
+
 // symbolKindResolver is an optional interface a Grammar implements to
 // override the Unit.Kind of a just-matched symbol node at emission time.
 // The walker starts with the kind from SymbolKinds() and applies the
@@ -481,7 +503,18 @@ func (h *CodeHandler) extractUnits(
 			}
 			name := h.grammar.SymbolName(child, source)
 			if name != "" {
-				unit := h.buildUnit(child, source, pathPrefix, name, emittedKind, pending)
+				// Unit.Title stays the bare name; Unit.Path may be extended
+				// by a grammar that implements symbolPathElementResolver
+				// (Go uses this to include the receiver type on methods).
+				// Empty / unimplemented falls through to pathElement == name,
+				// preserving every grammar's existing path shape.
+				pathElement := name
+				if r, ok := h.grammar.(symbolPathElementResolver); ok {
+					if override := r.SymbolPathElement(child, source, name, emittedKind); override != "" {
+						pathElement = override
+					}
+				}
+				unit := h.buildUnit(child, source, pathPrefix, pathElement, name, emittedKind, pending)
 				doc.Units = append(doc.Units, unit)
 				h.extractParentRefs(child, source, unit.Path, unit.Kind, doc)
 			}
@@ -540,10 +573,10 @@ func (h *CodeHandler) extractUnits(
 func (h *CodeHandler) buildUnit(
 	n *sitter.Node,
 	source []byte,
-	pathPrefix, name, kind string,
+	pathPrefix, pathElement, title, kind string,
 	pendingComments []*sitter.Node,
 ) indexer.Unit {
-	path := joinPath(pathPrefix, name)
+	path := joinPath(pathPrefix, pathElement)
 
 	var docLines []string
 	for _, c := range pendingComments {
@@ -562,7 +595,7 @@ func (h *CodeHandler) buildUnit(
 
 	unit := indexer.Unit{
 		Kind:    kind,
-		Title:   name,
+		Title:   title,
 		Path:    path,
 		Content: content,
 		Loc: indexer.Location{

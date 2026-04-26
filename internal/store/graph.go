@@ -22,6 +22,7 @@ const (
 	EdgeKindInherits      = "inherits"        // symbol → symbol (class/interface/protocol parent; Edge.Metadata carries a "relation" of extends/implements/mixes/conforms/embeds)
 	EdgeKindRequires      = "requires"        // symbol → symbol (Dart `mixin M on Base` — use-site constraint, not an inheritance parent; kept distinct so "all parents of X" queries stay clean)
 	EdgeKindPart          = "part"            // code_file → code_file (Dart `part 'foo.dart'` / `part of 'bar.dart'` file-join; a single Dart library lives across multiple files)
+	EdgeKindImplementsRPC = "implements_rpc"  // symbol → symbol (generated-code method → proto rpc declaration; codegen derivation, not inheritance — kept distinct so "all parents of X" queries stay clean)
 )
 
 // Graph node kinds. Additional kinds will land as new handlers emit richer
@@ -246,6 +247,44 @@ func (s *Store) ListNodes() ([]Node, error) {
 		var sp sql.NullString
 		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
 			return nil, fmt.Errorf("list_nodes scan: %w", err)
+		}
+		if sp.Valid {
+			n.SourcePath = sp.String
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// ListSymbolNodesWithMetadataContaining returns every graph_node with
+// kind='symbol' whose metadata column contains the given literal substring.
+// The match is a SQL LIKE anchored with %…% and the substring's LIKE
+// wildcards (`%`, `_`, `\`) are backslash-escaped, so callers pass a plain
+// literal and get substring-match semantics without surprises.
+//
+// Narrowly useful for cross-language resolvers that need to re-find a
+// structural-kind subset of symbols after indexing (e.g. lib-6wz's
+// buildImplementsRPCEdges walks proto rpc nodes by matching the
+// `"input_type":` substring — the proto grammar is the sole emitter of
+// that key on symbol metadata). Cheaper than ListNodes + in-Go filter
+// because the LIKE predicate pushes the scan into SQLite.
+func (s *Store) ListSymbolNodesWithMetadataContaining(substring string) ([]Node, error) {
+	like := "%" + likeEscaper.Replace(substring) + "%"
+	rows, err := s.db.Query(`
+		SELECT id, kind, label, source_path, metadata
+		FROM graph_nodes
+		WHERE kind = ? AND metadata LIKE ? ESCAPE '\'`,
+		NodeKindSymbol, like)
+	if err != nil {
+		return nil, fmt.Errorf("list_symbol_nodes_with_metadata: %w", err)
+	}
+	defer rows.Close()
+	var out []Node
+	for rows.Next() {
+		var n Node
+		var sp sql.NullString
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+			return nil, fmt.Errorf("list_symbol_nodes_with_metadata scan: %w", err)
 		}
 		if sp.Valid {
 			n.SourcePath = sp.String

@@ -271,6 +271,12 @@ type Signal struct {
 //	                directive. Semantically a file-membership relation, not a
 //	                name binding — distinct from "import" so
 //	                `neighbors --edge-kind=import` stays clean. code_file → code_file.
+//	"implements_rpc" — generated-code method → proto rpc declaration (symbol →
+//	                symbol). Materialised by the post-graph-pass resolver
+//	                (buildImplementsRPCEdges) via per-language naming
+//	                conventions; not emitted directly by any grammar. Distinct
+//	                from "inherits" because the relationship is codegen
+//	                derivation, not subtype parenthood.
 //	"config-key"  — document or config referencing another config key
 //	"doc-link"    — markdown linking to another document
 //

@@ -32,7 +32,7 @@ omitted, every incident edge is returned.`,
 func init() {
 	neighborsCmd.Flags().StringVar(&neighborsDirection, "direction", "both", "Edge direction: 'out', 'in', or 'both'")
 	neighborsCmd.Flags().BoolVar(&neighborsJSON, "json", false, "Output as JSON")
-	neighborsCmd.Flags().StringSliceVar(&neighborsEdgeKinds, "edge-kind", nil, "Filter to edges of the given kind (repeatable): inherits, requires, part, contains, import, mentions, shared_code_ref, call")
+	neighborsCmd.Flags().StringSliceVar(&neighborsEdgeKinds, "edge-kind", nil, "Filter to edges of the given kind (repeatable): inherits, requires, part, implements_rpc, contains, import, mentions, shared_code_ref, call")
 	rootCmd.AddCommand(neighborsCmd)
 }
 

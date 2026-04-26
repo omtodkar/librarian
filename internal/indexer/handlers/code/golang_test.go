@@ -488,7 +488,7 @@ type Reader interface {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	refs := inheritsRefsBySource(doc,"s.Reader")
+	refs := inheritsRefsBySource(doc, "s.Reader")
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 embedded interface, got %d (%+v)", len(refs), refs)
 	}
@@ -516,7 +516,7 @@ type ReadWriter interface {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	refs := inheritsRefsBySource(doc,"s.ReadWriter")
+	refs := inheritsRefsBySource(doc, "s.ReadWriter")
 	if len(refs) != 2 {
 		t.Fatalf("expected 2 embeddings, got %d (%+v)", len(refs), refs)
 	}
@@ -549,7 +549,7 @@ type X interface {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	refs := inheritsRefsBySource(doc,"s.X")
+	refs := inheritsRefsBySource(doc, "s.X")
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 embedded interface, got %d (%+v)", len(refs), refs)
 	}
@@ -575,7 +575,7 @@ type Service struct {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	refs := inheritsRefsBySource(doc,"s.Service")
+	refs := inheritsRefsBySource(doc, "s.Service")
 	if len(refs) != 0 {
 		t.Fatalf("struct embedding should not emit inherits refs in lib-wji.1 (deferred to lib-ek3); got %+v", refs)
 	}
@@ -599,9 +599,150 @@ type MyFn func(int) int
 		if u.Kind != "type" {
 			continue
 		}
-		refs := inheritsRefsBySource(doc,u.Path)
+		refs := inheritsRefsBySource(doc, u.Path)
 		if len(refs) != 0 {
 			t.Errorf("non-interface type %q produced inherits refs: %+v", u.Path, refs)
 		}
+	}
+}
+
+// TestGoGrammar_MethodPathIncludesReceiverType pins the lib-cd5 / lib-6wz
+// invariant: Go method Units embed the receiver type in Unit.Path while
+// leaving Unit.Title as the bare method name. Two methods with the same
+// name on distinct receivers in the same package therefore project to
+// distinct sym: nodes rather than colliding on `sym:<pkg>.<method>`.
+//
+// Exercises value receivers (`(s Svc)`) and pointer receivers (`(s *Svc)`),
+// and confirms a function_declaration (no receiver) stays at the flat
+// `<pkg>.<name>` path — the resolver hook must be inert for non-methods.
+func TestGoGrammar_MethodPathIncludesReceiverType(t *testing.T) {
+	src := []byte(`package auth
+
+type AuthServiceServer struct{}
+type UnimplementedAuthServiceServer struct{}
+
+// Pointer receiver.
+func (s *AuthServiceServer) Login() error { return nil }
+
+// Value receiver.
+func (u UnimplementedAuthServiceServer) Login() error { return nil }
+
+// Plain function (no receiver) — path stays flat.
+func Helper() {}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("auth/service.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// Unique-title symbols: one Unit each, assert Path directly by looking
+	// up by (Kind, Title). The two Login methods share Title="Login" so they
+	// can't go through this map — handled as a multi-match set below.
+	pathsByKindTitle := map[string]string{}
+	for _, u := range doc.Units {
+		key := u.Kind + ":" + u.Title
+		if u.Title == "Login" {
+			continue
+		}
+		if existing, already := pathsByKindTitle[key]; already {
+			t.Fatalf("fixture bug: %s appears twice (%q and %q); this table-lookup assumes unique Kind+Title", key, existing, u.Path)
+		}
+		pathsByKindTitle[key] = u.Path
+	}
+	for _, tc := range []struct {
+		key, wantPath string
+	}{
+		{"function:Helper", "auth.Helper"},
+		{"type:AuthServiceServer", "auth.AuthServiceServer"},
+		{"type:UnimplementedAuthServiceServer", "auth.UnimplementedAuthServiceServer"},
+	} {
+		if got := pathsByKindTitle[tc.key]; got != tc.wantPath {
+			t.Errorf("%s Path = %q, want %q", tc.key, got, tc.wantPath)
+		}
+	}
+
+	// Multi-match set: Title="Login" on two distinct receivers. Both must
+	// surface as Kind="method" with receiver-qualified Paths that differ by
+	// receiver type only. The whole point of lib-6wz / lib-cd5 is that the
+	// two no longer collide on a single sym:auth.Login node.
+	wantPaths := map[string]bool{
+		"auth.AuthServiceServer.Login":              false,
+		"auth.UnimplementedAuthServiceServer.Login": false,
+	}
+	var loginPaths []string
+	for _, u := range doc.Units {
+		if u.Title != "Login" {
+			continue
+		}
+		if u.Kind != "method" {
+			t.Errorf("Login Unit Kind = %q, want method", u.Kind)
+		}
+		loginPaths = append(loginPaths, u.Path)
+		if _, ok := wantPaths[u.Path]; !ok {
+			t.Errorf("unexpected Login path %q", u.Path)
+			continue
+		}
+		wantPaths[u.Path] = true
+	}
+	if len(loginPaths) != len(wantPaths) {
+		t.Fatalf("expected %d Login method Units (one per receiver); got %d: %v",
+			len(wantPaths), len(loginPaths), loginPaths)
+	}
+	for p, seen := range wantPaths {
+		if !seen {
+			t.Errorf("missing Login Unit with Path %q; got %v", p, loginPaths)
+		}
+	}
+}
+
+// TestGoGrammar_MethodPathGenericReceiverStripsTypeArgs pins the convention
+// that `(c *Container[K, V]) Get()` emits path `pkg.Container.Get` — the
+// type arguments are stripped so generic and non-generic receivers of the
+// same type name share a sym: node (the Unit.Path identifies the declaring
+// type, not the specific instantiation). Matches the Kotlin/Swift extension
+// receiver metadata convention.
+func TestGoGrammar_MethodPathGenericReceiverStripsTypeArgs(t *testing.T) {
+	src := []byte(`package col
+
+type Container[K comparable, V any] struct{}
+
+func (c *Container[K, V]) Get(k K) V {
+	var zero V
+	return zero
+}
+
+func (c Container[K, V]) Set(k K, v V) {}
+
+// Single-arg generic — exercises the same strip logic but with exactly one
+// bracket parameter. A stripper that hand-rolled parsing of the comma-
+// separated type-arg list could pass the two-arg case and silently fail
+// here if the single-arg shape routes through a different branch.
+type Box[T any] struct{}
+
+func (b *Box[T]) Peek() T {
+	var zero T
+	return zero
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("col/container.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	paths := map[string]string{}
+	for _, u := range doc.Units {
+		if u.Kind == "method" {
+			paths[u.Title] = u.Path
+		}
+	}
+	if got := paths["Get"]; got != "col.Container.Get" {
+		t.Errorf("Get Path = %q, want col.Container.Get (pointer-generic receiver stripped)", got)
+	}
+	if got := paths["Set"]; got != "col.Container.Set" {
+		t.Errorf("Set Path = %q, want col.Container.Set (value-generic receiver stripped)", got)
+	}
+	if got := paths["Peek"]; got != "col.Box.Peek" {
+		t.Errorf("Peek Path = %q, want col.Box.Peek (single-arg generic receiver stripped)", got)
 	}
 }

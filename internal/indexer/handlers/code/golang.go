@@ -24,10 +24,10 @@ type GoGrammar struct{}
 // NewGoGrammar returns the Go grammar implementation.
 func NewGoGrammar() *GoGrammar { return &GoGrammar{} }
 
-func (*GoGrammar) Name() string                   { return "go" }
-func (*GoGrammar) Extensions() []string           { return []string{".go"} }
-func (*GoGrammar) Language() *sitter.Language     { return sitter.NewLanguage(tree_sitter_go.Language()) }
-func (*GoGrammar) CommentNodeTypes() []string     { return []string{"comment"} }
+func (*GoGrammar) Name() string                                  { return "go" }
+func (*GoGrammar) Extensions() []string                          { return []string{".go"} }
+func (*GoGrammar) Language() *sitter.Language                    { return sitter.NewLanguage(tree_sitter_go.Language()) }
+func (*GoGrammar) CommentNodeTypes() []string                    { return []string{"comment"} }
 func (*GoGrammar) DocstringFromNode(*sitter.Node, []byte) string { return "" }
 
 // SymbolKinds maps Go AST node types to generic Unit.Kind values. Note that
@@ -59,6 +59,107 @@ func (*GoGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		"type_spec", "type_alias":
 		if name := n.ChildByFieldName("name"); name != nil {
 			return name.Utf8Text(source)
+		}
+	}
+	return ""
+}
+
+// SymbolPathElement implements symbolPathElementResolver: Go methods include
+// the receiver type name in their Unit.Path so that two methods with the
+// same name on different receivers project to distinct sym: nodes (e.g.
+// `(s *AuthServiceServer) Login` vs `(u *UnimplementedAuthServiceServer) Login`
+// both in package `auth` now land as `auth.AuthServiceServer.Login` and
+// `auth.UnimplementedAuthServiceServer.Login` respectively, not a single
+// `auth.Login` whose metadata is overwritten by whichever file walks last).
+//
+// Title is handled separately by the walker and stays the bare method name.
+// Non-method kinds fall through to "" so the walker defaults to the bare
+// name, preserving existing Unit.Path shapes for function / type / type_spec.
+//
+// Pointer receivers (`*T`) and value receivers (`T`) both reduce to the bare
+// type name. Generic receivers (`T[K]`) strip the type parameters — same
+// convention Kotlin/Swift use for the extension receiver metadata key.
+func (*GoGrammar) SymbolPathElement(n *sitter.Node, source []byte, name, kind string) string {
+	if n.Kind() != "method_declaration" || kind != "method" {
+		return ""
+	}
+	recv := goReceiverTypeName(n, source)
+	if recv == "" {
+		return ""
+	}
+	return recv + "." + name
+}
+
+// goReceiverTypeName extracts the bare receiver type name from a Go
+// method_declaration. Handles both value (`(s Svc)`) and pointer
+// (`(s *Svc)`) receivers, and strips generic type arguments
+// (`(s *Container[K, V])` → `Container`).
+//
+// Returns "" if the AST shape is unexpected — callers fall through to the
+// bare-method-name default so malformed receivers don't produce a Unit.Path
+// ending in ".Method".
+func goReceiverTypeName(n *sitter.Node, source []byte) string {
+	recv := n.ChildByFieldName("receiver")
+	if recv == nil {
+		return ""
+	}
+	// `receiver` is a parameter_list; the receiver binding sits under its
+	// parameter_declaration named child. Method decls are guaranteed to
+	// have exactly one receiver param.
+	var param *sitter.Node
+	for i := uint(0); i < recv.NamedChildCount(); i++ {
+		c := recv.NamedChild(i)
+		if c != nil && c.Kind() == "parameter_declaration" {
+			param = c
+			break
+		}
+	}
+	if param == nil {
+		return ""
+	}
+	typeNode := param.ChildByFieldName("type")
+	if typeNode == nil {
+		return ""
+	}
+	return goBareTypeName(typeNode, source)
+}
+
+// goBareTypeName unwraps pointer_type → type_identifier / generic_type and
+// returns the bare type name. Deeper indirection (`**T` — invalid Go but
+// parseable) returns "" rather than a wrong guess.
+func goBareTypeName(n *sitter.Node, source []byte) string {
+	switch n.Kind() {
+	case "type_identifier":
+		return strings.TrimSpace(n.Utf8Text(source))
+	case "pointer_type":
+		// pointer_type wraps exactly one child (the pointee type).
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			if c == nil {
+				continue
+			}
+			if c.Kind() == "type_identifier" {
+				return strings.TrimSpace(c.Utf8Text(source))
+			}
+			if c.Kind() == "generic_type" {
+				// `*Container[K, V]` — unwrap the generic_type's type name.
+				return goGenericTypeName(c, source)
+			}
+		}
+		return ""
+	case "generic_type":
+		return goGenericTypeName(n, source)
+	}
+	return ""
+}
+
+// goGenericTypeName returns the bare type name from a generic_type node,
+// stripping the type-arguments list. `Container[K, V]` → `Container`.
+func goGenericTypeName(n *sitter.Node, source []byte) string {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		c := n.NamedChild(i)
+		if c != nil && c.Kind() == "type_identifier" {
+			return strings.TrimSpace(c.Utf8Text(source))
 		}
 	}
 	return ""

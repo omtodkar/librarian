@@ -275,6 +275,17 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 		idx.runAdaptiveGraphPass(files, result, force, progress)
 	}
 	progress.finish()
+
+	// Cross-language resolver pass: connect generated-code symbols back to
+	// their proto rpc declarations via naming conventions. Runs after all
+	// per-file projection has landed, so every candidate sym: node we probe
+	// exists in the store if its file was indexed this run or a prior run.
+	// Works off persisted rpc nodes (no proto-file re-parse), so incremental
+	// re-indexes where the .proto was hash-skipped still link newly added
+	// Go/Dart/TS implementers. Counted as edges on the shared result;
+	// per-file counters are unchanged.
+	idx.buildImplementsRPCEdges(result)
+
 	return result, nil
 }
 
@@ -655,17 +666,17 @@ func isSymbolKind(kind string) bool {
 	case "function", "method", "constructor",
 		"class", "interface", "enum", "record",
 		"type", "field",
-		"object",          // Kotlin object / companion object declarations
-		"property",        // Kotlin property (val / var declarations)
-		"struct",          // Swift struct declarations
-		"extension",       // Swift extension declarations (target type as Title)
-		"protocol",        // Swift protocol declarations
-		"mixin",           // Dart mixin declarations (lib-wji.3)
-		"extension_type",  // Dart extension type declarations (lib-wji.3)
-		"service",         // Proto service declarations (lib-cym)
-		"rpc",             // Proto service RPC methods (lib-cym)
-		"message",         // Proto message declarations (lib-cym)
-		"oneof":           // Proto oneof declarations (lib-cym)
+		"object",         // Kotlin object / companion object declarations
+		"property",       // Kotlin property (val / var declarations)
+		"struct",         // Swift struct declarations
+		"extension",      // Swift extension declarations (target type as Title)
+		"protocol",       // Swift protocol declarations
+		"mixin",          // Dart mixin declarations (lib-wji.3)
+		"extension_type", // Dart extension type declarations (lib-wji.3)
+		"service",        // Proto service declarations (lib-cym)
+		"rpc",            // Proto service RPC methods (lib-cym)
+		"message",        // Proto message declarations (lib-cym)
+		"oneof":          // Proto oneof declarations (lib-cym)
 		return true
 	}
 	return false
@@ -990,6 +1001,11 @@ func targetNodeMetadataJSON(ref Reference) string {
 // legacy aliases routing identically to sym: nodes so existing hand-authored
 // fixtures and pre-lib-wji.1 data in on-disk DBs keep working. New grammars
 // emit "inherits" with Metadata["relation"] instead.
+//
+// "implements_rpc" (lib-6wz) is a codegen derivation from a proto rpc to the
+// generated-code method that implements it (symbol → symbol). Kept distinct
+// from "inherits" because the relationship isn't subtype/parent — it's
+// derived-from-codegen — so "all parents of X" queries stay clean.
 func graphTargetID(ref Reference) string {
 	switch ref.Kind {
 	case "code-file":
@@ -1002,7 +1018,7 @@ func graphTargetID(ref Reference) string {
 			return store.ExternalPackageNodeID(ref.Target)
 		}
 		return store.SymbolNodeID(ref.Target)
-	case "call", "inherits", "requires", "extends", "implements":
+	case "call", "inherits", "requires", "implements_rpc", "extends", "implements":
 		return store.SymbolNodeID(ref.Target)
 	case "part":
 		return store.CodeFileNodeID(ref.Target)
@@ -1023,7 +1039,7 @@ func graphNodeKindFromRef(ref Reference) string {
 			return k
 		}
 		return store.NodeKindSymbol
-	case "call", "inherits", "requires", "extends", "implements":
+	case "call", "inherits", "requires", "implements_rpc", "extends", "implements":
 		return store.NodeKindSymbol
 	case "part":
 		return store.NodeKindCodeFile
