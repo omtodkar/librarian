@@ -103,6 +103,9 @@ Future<void> handleLogin(ClientChannel channel) async {
 // TestCallRPC_DartClassFieldPattern verifies the Flutter-style service class
 // pattern: _authClient field constructed in the class constructor, called from
 // a named method. Edge must come from the METHOD symbol, not the field or class.
+// Also covers the `this._authClient` field assignment form (exercises
+// dartExtractFieldNameFromAssignable's unconditional_assignable_selector branch)
+// and the `this._authClient.login(req)` call form (Pattern B in dartCollectCallEdges).
 func TestCallRPC_DartClassFieldPattern(t *testing.T) {
 	dir := t.TempDir()
 	writeImplementsRPCFixture(t, dir, map[string]string{
@@ -121,6 +124,21 @@ class AuthService {
   }
 }
 `,
+		// Variant: `this._authClient = AuthServiceClient(channel)` binding form
+		// (this. assignment) + `this._authClient.login(req)` call form (Pattern B).
+		"lib/auth_service_this.dart": `
+class AuthServiceThis {
+  late AuthServiceClient _authClient;
+
+  void setup(ClientChannel channel) {
+    this._authClient = AuthServiceClient(channel);
+  }
+
+  Future<void> doLogin() async {
+    await this._authClient.login(LoginRequest());
+  }
+}
+`,
 	})
 
 	idx, s := openImplementsRPCStore(t, dir)
@@ -133,12 +151,21 @@ class AuthService {
 	if err != nil {
 		t.Fatalf("Neighbors(call_rpc): %v", err)
 	}
-	if len(edges) != 1 {
-		t.Fatalf("expected 1 call_rpc edge into auth.v1.AuthService.Login; got %d: %+v", len(edges), edges)
+	// Two callers: performLogin (bare field) and doLogin (this.field).
+	if len(edges) != 2 {
+		t.Fatalf("expected 2 call_rpc edges (bare + this.field forms); got %d: %+v", len(edges), edges)
 	}
-	wantCaller := store.SymbolNodeID("auth_service.AuthService.performLogin")
-	if edges[0].From != wantCaller {
-		t.Errorf("edge.From = %q, want %q", edges[0].From, wantCaller)
+	callerIDs := map[string]bool{}
+	for _, e := range edges {
+		callerIDs[e.From] = true
+	}
+	for _, wantCaller := range []string{
+		"auth_service.AuthService.performLogin",
+		"auth_service_this.AuthServiceThis.doLogin",
+	} {
+		if !callerIDs[store.SymbolNodeID(wantCaller)] {
+			t.Errorf("missing call_rpc edge from %s", wantCaller)
+		}
 	}
 }
 
@@ -403,5 +430,50 @@ final _ = () { _client.login(LoginRequest()); }();
 	}
 	if len(edges) != 0 {
 		t.Errorf("anonymous enclosure: expected 0 call_rpc edges; got %d: %+v", len(edges), edges)
+	}
+}
+
+// TestCallRPC_DartAnonymousEnclosureInsideNamedMethod verifies the bubble-up
+// rule: a gRPC call inside an anonymous closure that is nested within a named
+// method IS attributed to the outer named method and an edge IS emitted.
+// The enclosing-function walk traverses through function_expression_body (the
+// anonymous closure's body) until it reaches the function_body of the named
+// method, which is the nearest named enclosure.
+func TestCallRPC_DartAnonymousEnclosureInsideNamedMethod(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto":          dartProtoFixtureAuth,
+		"gen/dart/auth.pbgrpc.dart": dartPbgrpcFixtureAuth,
+		// The gRPC call is inside a forEach callback (anonymous closure) that is
+		// nested within the named method `processUsers`. The bubble-up rule
+		// attributes the edge to `processUsers`, not the anonymous closure.
+		"lib/user_handler.dart": `
+class UserHandler {
+  void processUsers(ClientChannel channel) {
+    final client = AuthServiceClient(channel);
+    ['alice', 'bob'].forEach((_) {
+      client.login(LoginRequest());
+    });
+  }
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected 1 call_rpc edge (anonymous closure inside named method bubbles up); got %d: %+v", len(edges), edges)
+	}
+	wantCaller := store.SymbolNodeID("user_handler.UserHandler.processUsers")
+	if edges[0].From != wantCaller {
+		t.Errorf("edge.From = %q, want %q", edges[0].From, wantCaller)
 	}
 }

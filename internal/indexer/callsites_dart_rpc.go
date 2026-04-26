@@ -14,9 +14,11 @@ package indexer
 //     await client.login(req);
 //
 //  2. Class field assignment (constructor body or method):
-//     this._authClient = AuthServiceClient(channel);
-//     _authClient.logout(req);
-//     (also without `this.`)
+//     Assignment binding: `this._authClient = AuthServiceClient(channel)` or
+//     `_authClient = AuthServiceClient(channel)` (both forms are detected).
+//     Call site: bare `_authClient.logout(req)` OR explicit `this._authClient.logout(req)`.
+//     The `this.field.method(args)` call form uses a 4-sibling pattern in the
+//     Dart AST (this + selector(.field) + selector(.method) + selector(args)).
 //
 //  3. Expression-body getter returning a new client instance:
 //     FooServiceClient get _client => FooServiceClient(_channel);
@@ -484,66 +486,98 @@ func dartSelectorHasArgumentPart(n *sitter.Node) bool {
 // dartCollectCallEdges walks the AST and emits dartCallSiteEdge records for
 // every method call on a known client binding.
 //
-// The Dart tree-sitter grammar represents obj.method(args) as three consecutive
-// siblings in a parent node:
+// Two AST patterns are detected:
 //
-//	identifier(obj)  selector(unconditional_assignable_selector .method)  selector(argument_part)
+// Pattern A — bare identifier call (3-sibling):
 //
-// This pattern appears in expression_statement, await_expression,
-// return_statement, and other expression contexts — handled uniformly by
-// scanning every parent node's children for the 3-element sequence.
+//	identifier(client)  selector(.method)  selector(args)
+//
+// Pattern B — this-qualified call (4-sibling):
+//
+//	this  selector(._field)  selector(.method)  selector(args)
+//
+// Both patterns appear as consecutive siblings in expression_statement,
+// await_expression, return_statement, and other expression contexts.
 func dartCollectCallEdges(root *sitter.Node, src []byte, stem string, bindings map[string]string) []dartCallSiteEdge {
 	var edges []dartCallSiteEdge
 	seen := map[string]bool{}
 
 	dartWalkNodes(root, func(n *sitter.Node) bool {
 		cnt := n.ChildCount()
-		for i := uint(0); i+2 < cnt; i++ {
+		for i := uint(0); i < cnt; i++ {
 			c0 := n.Child(i)
-			c1 := n.Child(i + 1)
-			c2 := n.Child(i + 2)
-			if c0 == nil || c1 == nil || c2 == nil {
-				continue
-			}
-			if c0.Kind() != "identifier" {
-				continue
-			}
-			if c1.Kind() != "selector" {
-				continue
-			}
-			if c2.Kind() != "selector" {
+			if c0 == nil {
 				continue
 			}
 
-			// c1 must contain unconditional_assignable_selector (the .method part).
-			methodName := dartSelectorMethodName(c1, src)
-			if methodName == "" {
-				continue
-			}
-			// c2 must contain argument_part (the call args).
-			if !dartSelectorHasArgumentPart(c2) {
-				continue
-			}
+			switch c0.Kind() {
+			case "identifier":
+				// Pattern A: identifier(client) + selector(.method) + selector(args)
+				if i+2 >= cnt {
+					continue
+				}
+				c1 := n.Child(i + 1)
+				c2 := n.Child(i + 2)
+				if c1 == nil || c2 == nil {
+					continue
+				}
+				if c1.Kind() != "selector" || c2.Kind() != "selector" {
+					continue
+				}
+				methodName := dartSelectorMethodName(c1, src)
+				if methodName == "" || !dartSelectorHasArgumentPart(c2) {
+					continue
+				}
+				varName := strings.TrimSpace(c0.Utf8Text(src))
+				className, ok := bindings[varName]
+				if !ok {
+					continue
+				}
+				callerPath := dartEnclosingSymbol(n, src, stem)
+				if callerPath == "" {
+					continue
+				}
+				key := callerPath + "→" + className + "." + methodName
+				if !seen[key] {
+					seen[key] = true
+					edges = append(edges, dartCallSiteEdge{callerPath: callerPath, className: className, methodName: methodName})
+				}
 
-			varName := strings.TrimSpace(c0.Utf8Text(src))
-			className, ok := bindings[varName]
-			if !ok {
-				continue
-			}
-
-			callerPath := dartEnclosingSymbol(n, src, stem)
-			if callerPath == "" {
-				continue // anonymous enclosure with no named ancestor — skip
-			}
-
-			key := callerPath + "→" + className + "." + methodName
-			if !seen[key] {
-				seen[key] = true
-				edges = append(edges, dartCallSiteEdge{
-					callerPath: callerPath,
-					className:  className,
-					methodName: methodName,
-				})
+			case "this":
+				// Pattern B: this + selector(._field) + selector(.method) + selector(args)
+				if i+3 >= cnt {
+					continue
+				}
+				c1 := n.Child(i + 1)
+				c2 := n.Child(i + 2)
+				c3 := n.Child(i + 3)
+				if c1 == nil || c2 == nil || c3 == nil {
+					continue
+				}
+				if c1.Kind() != "selector" || c2.Kind() != "selector" || c3.Kind() != "selector" {
+					continue
+				}
+				fieldName := dartSelectorMethodName(c1, src) // ._field → "field"
+				if fieldName == "" {
+					continue
+				}
+				methodName := dartSelectorMethodName(c2, src)
+				if methodName == "" || !dartSelectorHasArgumentPart(c3) {
+					continue
+				}
+				className, ok := bindings[fieldName]
+				if !ok {
+					continue
+				}
+				callerPath := dartEnclosingSymbol(n, src, stem)
+				if callerPath == "" {
+					continue
+				}
+				key := callerPath + "→" + className + "." + methodName
+				if !seen[key] {
+					seen[key] = true
+					edges = append(edges, dartCallSiteEdge{callerPath: callerPath, className: className, methodName: methodName})
+				}
 			}
 		}
 		return true
