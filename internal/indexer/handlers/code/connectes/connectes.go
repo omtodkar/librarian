@@ -236,7 +236,7 @@ func parseMethods(node *sitter.Node, src []byte) []methodDef {
 		if keyNode == nil {
 			continue
 		}
-		methodKey := keyNode.Utf8Text(src)
+		methodKey := stripTSStringQuotes(keyNode.Utf8Text(src))
 		if methodKey == "" {
 			continue
 		}
