@@ -434,6 +434,14 @@ func (m *BufManifest) LookupPrefix(protoPath, language string) ([]string, bool) 
 		return nil, false
 	}
 	prefixes, ok := entry.LangPrefixes[language]
+	if len(prefixes) == 0 {
+		// Treat a non-nil but empty slice the same as a missing key — the
+		// resolver's "no prefix known, fall back to name-only" semantics
+		// depend on (nil, false), and an empty slice would otherwise cause
+		// candidateWithinCodegenTree to iterate zero times and drop the
+		// candidate rather than fall back.
+		return nil, false
+	}
 	return prefixes, ok
 }
 

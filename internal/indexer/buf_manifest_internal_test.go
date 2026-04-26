@@ -340,6 +340,39 @@ func TestCandidateWithinCodegenTree(t *testing.T) {
 			candidateNode: node("internal/customauth/x.go"),
 			wantAccepted:  false,
 		},
+		{
+			// Multi-prefix: candidate matches the SECOND prefix but not the
+			// first — must accept (ANY-prefix semantics). Covers the connect-go
+			// use-case where protoc-gen-go and protoc-gen-connect-go write to
+			// separate out-dirs under the same language key.
+			name: "multi_prefix_second_matches_accepts",
+			manifest: &BufManifest{Entries: map[string]*BufManifestEntry{
+				"api/auth.proto": {
+					LangPrefixes: map[string][]string{
+						"go": {"gen/go/authpb", "gen/connect/authpb"},
+					},
+				},
+			}},
+			rpcSourcePath: "api/auth.proto",
+			candidate:     rpcCandidate{Language: "go"},
+			candidateNode: node("gen/connect/authpb/x.go"),
+			wantAccepted:  true,
+		},
+		{
+			// Multi-prefix: candidate is outside ALL prefixes — must drop.
+			name: "multi_prefix_none_matches_drops",
+			manifest: &BufManifest{Entries: map[string]*BufManifestEntry{
+				"api/auth.proto": {
+					LangPrefixes: map[string][]string{
+						"go": {"gen/go/authpb", "gen/connect/authpb"},
+					},
+				},
+			}},
+			rpcSourcePath: "api/auth.proto",
+			candidate:     rpcCandidate{Language: "go"},
+			candidateNode: node("internal/customauth/x.go"),
+			wantAccepted:  false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

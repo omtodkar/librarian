@@ -1339,12 +1339,17 @@ type AuthServiceHandler struct{}
 
 func (s *AuthServiceHandler) Login() error { return nil }
 `,
-		// Hand-written — must be dropped by the multi-prefix tightening.
-		"internal/customauth/client.go": `package auth
+		// Hand-written unimplemented stub that is a valid derivation candidate
+		// (matches pkg.UnimplementedSvcServer.Method) but lives OUTSIDE both
+		// codegen output trees. Must be dropped by multi-prefix tightening.
+		// Using UnimplementedAuthServiceServer (not AuthServiceClient) so the
+		// negative assertion clearly exercises tightening on a name that the
+		// resolver would otherwise link.
+		"internal/customauth/unimpl.go": `package auth
 
-type AuthServiceClient struct{ endpoint string }
+type UnimplementedAuthServiceServer struct{}
 
-func (c *AuthServiceClient) Login() error { return nil }
+func (UnimplementedAuthServiceServer) Login() error { return nil }
 `,
 	})
 
@@ -1356,7 +1361,11 @@ func (c *AuthServiceClient) Login() error { return nil }
 	target := store.SymbolNodeID("auth.AuthService.Login")
 	serverSrc := store.SymbolNodeID("auth.AuthServiceServer.Login")
 	handlerSrc := store.SymbolNodeID("auth.AuthServiceHandler.Login")
-	handWritten := store.SymbolNodeID("auth.AuthServiceClient.Login")
+	// The hand-written UnimplementedAuthServiceServer matches the
+	// pkg.UnimplementedSvcServer.Method derivation — a real candidate that
+	// the resolver would link under name-only matching. With multi-prefix
+	// tightening it must be dropped because it lives outside both codegen trees.
+	outOfTree := store.SymbolNodeID("auth.UnimplementedAuthServiceServer.Login")
 
 	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
 	if err != nil {
@@ -1369,8 +1378,8 @@ func (c *AuthServiceClient) Login() error { return nil }
 	sources := map[string]bool{}
 	for _, e := range edges {
 		sources[e.From] = true
-		if e.From == handWritten {
-			t.Errorf("multi-prefix tightening regressed: hand-written %s still linked", handWritten)
+		if e.From == outOfTree {
+			t.Errorf("multi-prefix tightening regressed: out-of-tree %s (internal/customauth/unimpl.go) still linked", outOfTree)
 		}
 	}
 	if !sources[serverSrc] {
