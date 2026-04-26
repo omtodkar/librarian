@@ -15,10 +15,10 @@ import (
 func Serve(s *store.Store, cfg *config.Config, embedder embedding.Embedder) error {
 	srv := server.NewMCPServer(
 		"librarian",
-		"0.1.0",
+		"0.2.0",
 		server.WithToolCapabilities(false),
 		server.WithRecovery(),
-		server.WithInstructions("Librarian provides semantic search across project documentation. Use search_docs for quick searches, get_context for comprehensive briefings with related code files and documents, get_document to read full documents, list_documents to browse the index, update_docs to write and re-index documentation, and trace_rpc for end-to-end gRPC understanding (proto declaration + every language's implementation + input/output messages + sibling rpcs in one call)."),
+		server.WithInstructions("librarian 0.2.0. Provides semantic search across project documentation. Tools: search_docs (quick search), get_context (deep briefing + graph traversal), get_document (full file content), list_documents (enumerate index), update_docs (write + re-index), trace_rpc (gRPC end-to-end trace). Stable API: parameter names locked until v2 — see docs/mcp-tools.md for stability classifications."),
 	)
 
 	registerSearchDocs(srv, s, embedder)

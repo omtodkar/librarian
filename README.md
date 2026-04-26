@@ -33,7 +33,7 @@ Every indexed file is split into section-aware chunks (~512 tokens each), embedd
 
 ## How Librarian Helps AI Assistants
 
-Once `librarian install` wires up your tools, the assistant gains five MCP tools — each tuned for a different phase of the read-think-write loop:
+Once `librarian install` wires up your tools, the assistant gains six MCP tools — each tuned for a different phase of the read-think-write loop:
 
 | Tool | Use when | Typical tokens |
 |---|---|---|
@@ -42,6 +42,7 @@ Once `librarian install` wires up your tools, the assistant gains five MCP tools
 | `get_document` | You actually need the full doc | full file |
 | `list_documents` | Enumerate without content | tiny |
 | `update_docs` | Distill findings back into the KB | write, not read |
+| `trace_rpc` | End-to-end gRPC trace (proto + all impls) | ~3–6k |
 
 **Token efficiency compounds across four mechanisms:**
 
@@ -167,7 +168,7 @@ Full docs live under [`docs/`](docs/):
 - [Storage Layer](docs/storage.md) — SQLite schema + graph spine + re-ranking
 - [Configuration](docs/configuration.md) — `.librarian/config.yaml`, env vars
 - [Embedding](docs/embedding.md) — providers + vector handling
-- [MCP Tools](docs/mcp-tools.md) — the 5 tools exposed over stdio
+- [MCP Tools](docs/mcp-tools.md) — the 6 tools exposed over stdio, with API stability classifications
 - [Development Guide](docs/development.md) — build, test, extend
 
 Or let Librarian index itself and ask it: `librarian context "how does X work"`.

@@ -147,6 +147,8 @@ func registerTraceRPC(s *server.MCPServer, st *store.Store, cfg *config.Config) 
 		),
 		mcp.WithString("format",
 			mcp.Description("Output format: 'markdown' (default, human/TTY-friendly) or 'json' (structured)."),
+			mcp.DefaultString("markdown"),
+			mcp.Enum("markdown", "json"),
 		),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
