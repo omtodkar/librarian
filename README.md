@@ -171,6 +171,7 @@ Full docs live under [`docs/`](docs/):
 - [MCP Tools](docs/mcp-tools.md) — the 6 tools exposed over stdio, with API stability classifications
 - [Upgrading](docs/upgrading.md) — schema migrations, embedder swaps, version-to-version paths
 - [Development Guide](docs/development.md) — build, test, extend
+- [Performance](docs/benchmarks.md) — index and query latency baselines, benchmark script, community results
 
 Or let Librarian index itself and ask it: `librarian context "how does X work"`.
 
