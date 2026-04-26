@@ -535,6 +535,57 @@ func (s *Store) DeleteSymbolsForFile(filePath string) error {
 	return nil
 }
 
+// AffectedSourcePathsForFile returns the distinct source_paths of graph nodes
+// that share an edge with any symbol node belonging to filePath. Used by the
+// graph pass to identify files that hold cross-file edges pointing into
+// filePath's symbols; those files are force-reindexed after filePath is
+// reindexed so any edges lost via DeleteSymbolsForFile's FK cascade are
+// reconstructed.
+//
+// Both edge directions are checked (from_node and to_node) so the result
+// covers edges originating at filePath's symbols (e.g. a child class in
+// fileA calling a method on fileB's symbol) as well as edges terminating at
+// them (e.g. a child class in fileB inheriting from fileA's base class).
+//
+// filePath itself, nodes with a NULL/empty source_path (placeholder nodes),
+// and nodes with the same source_path as filePath are excluded so callers
+// only receive genuinely OTHER files to reconstitute.
+func (s *Store) AffectedSourcePathsForFile(filePath string) ([]string, error) {
+	rows, err := s.db.Query(`
+SELECT DISTINCT gn.source_path
+FROM graph_nodes gn
+WHERE gn.id IN (
+  SELECT ge.from_node
+  FROM graph_edges ge
+  WHERE ge.to_node IN (
+    SELECT id FROM graph_nodes WHERE source_path = ? AND kind = ?
+  )
+  UNION
+  SELECT ge.to_node
+  FROM graph_edges ge
+  WHERE ge.from_node IN (
+    SELECT id FROM graph_nodes WHERE source_path = ? AND kind = ?
+  )
+)
+AND gn.source_path IS NOT NULL
+AND gn.source_path != ''
+AND gn.source_path != ?
+`, filePath, NodeKindSymbol, filePath, NodeKindSymbol, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("affected_source_paths_for_file: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sp string
+		if err := rows.Scan(&sp); err != nil {
+			return nil, fmt.Errorf("affected_source_paths_for_file scan: %w", err)
+		}
+		out = append(out, sp)
+	}
+	return out, rows.Err()
+}
+
 // ListOrphanNodes returns every graph_node whose kind is in the given set and
 // which has neither incoming nor outgoing edges. Pass nil/empty kinds to
 // scan across every kind (matches `librarian gc --kinds=all`). Results are

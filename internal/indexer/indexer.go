@@ -532,7 +532,75 @@ var docsPassFormats = map[string]bool{
 	"pdf":      true,
 }
 
-// indexGraphFile runs one file through the graph pass:
+// indexGraphFile runs one file through the graph pass and reconstitutes
+// cross-file edges that were dropped by the FK cascade during symbol deletion.
+//
+// When a file is reindexed, DeleteSymbolsForFile removes its symbol nodes and
+// the cascade drops ALL incident edges — including edges FROM other files that
+// pointed TO this file's symbols. Those other files are never reindexed (their
+// content hash is unchanged), so their edges are permanently lost without this
+// reconstitution step.
+//
+// indexGraphFile solves this by:
+//  1. Collecting the source_paths of nodes with edges into this file's symbols
+//     BEFORE the symbol deletion cascade destroys those edges.
+//  2. Delegating the actual per-file work to indexGraphFileDirect.
+//  3. Force-reindexing each affected file via indexGraphFileDirect (NOT
+//     indexGraphFile) so the reconstitution does not recurse.
+func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force bool) error {
+	// Read content and compute hash up front so we can short-circuit without
+	// querying the store for files that will clearly be skipped.
+	handler := idx.registry.HandlerFor(file.FilePath)
+	if handler == nil {
+		return nil
+	}
+	content, err := os.ReadFile(file.AbsPath)
+	if err != nil {
+		return fmt.Errorf("reading: %w", err)
+	}
+	hash := computeHash(string(content))
+
+	existing, _ := idx.store.GetCodeFileByPath(file.FilePath)
+	willSkip := existing != nil && !force && existing.ContentHash == hash
+	willSkipGenerated := !willSkip && idx.cfg.Graph.DetectGenerated && isGeneratedFile(content)
+
+	// Collect affected paths only when we'll actually reindex (not skip).
+	// This avoids the query for unchanged files and generated-file cleanup.
+	var affected []string
+	if !willSkip && !willSkipGenerated {
+		if paths, qerr := idx.store.AffectedSourcePathsForFile(file.FilePath); qerr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: affected-paths query: %s", file.FilePath, qerr))
+		} else {
+			affected = paths
+		}
+	}
+
+	if err := idx.indexGraphFileDirect(file, result, force); err != nil {
+		return err
+	}
+
+	// Reconstitute cross-file edges for every file that held an edge into this
+	// file's (now-refreshed) symbols. indexGraphFileDirect is used — not
+	// indexGraphFile — so the reconstitution does not trigger another round.
+	for _, affPath := range affected {
+		affFile := WalkResult{
+			FilePath: affPath,
+			AbsPath:  filepath.Join(idx.cfg.ProjectRoot, affPath),
+		}
+		dummy := &GraphResult{}
+		if rerr := idx.indexGraphFileDirect(affFile, dummy, true); rerr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("reconstitute %s: %s", affPath, rerr))
+		}
+		mergeGraphResult(result, dummy)
+	}
+
+	return nil
+}
+
+// indexGraphFileDirect runs one file through the graph pass without triggering
+// cross-file edge reconstitution. This is the core implementation; callers
+// that need reconstitution should use indexGraphFile instead.
+//
 //  1. Compute content hash, skip if unchanged (incremental gate).
 //  2. Parse the file via its registered handler.
 //  3. Upsert the code_file node and refresh the stored hash.
@@ -546,7 +614,7 @@ var docsPassFormats = map[string]bool{
 // Errors during UpsertNode / UpsertEdge are treated as per-item failures
 // (logged as per-file errors, loop continues) rather than fatal so one bad
 // symbol doesn't abandon the rest of a large file.
-func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force bool) error {
+func (idx *Indexer) indexGraphFileDirect(file WalkResult, result *GraphResult, force bool) error {
 	handlers := idx.registry.HandlersFor(file.FilePath)
 	if len(handlers) == 0 {
 		return nil

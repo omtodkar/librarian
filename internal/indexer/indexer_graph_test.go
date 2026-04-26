@@ -1275,6 +1275,93 @@ extend Base {
 	})
 }
 
+// TestIntegration_Graph_CrossFileEdgeReconstitution is the regression test for
+// lib-flx: reindexing a file that defines a symbol must not permanently destroy
+// cross-file edges from OTHER unchanged files that pointed at that symbol.
+//
+// Scenario:
+//   - base.py defines class Base (in file base.py).
+//   - child.py imports Base and declares class Child(Base) (in child.py).
+//   - IndexProjectGraph creates: sym:base.Base, sym:child.Child, and an
+//     inherits edge from sym:child.Child → sym:base.Base.
+//   - base.py is modified (different content, so its hash changes).
+//   - IndexProjectGraph runs again (incremental, force=false).
+//   - Before the fix, DeleteSymbolsForFile(base.py) would cascade-delete the
+//     inherits edge. child.py's hash is unchanged so child.py is never
+//     reindexed, and the edge is gone forever.
+//   - After the fix, the indexer detects that child.py holds a cross-file edge
+//     into base.py's symbols and force-reindexes child.py to reconstitute it.
+func TestIntegration_Graph_CrossFileEdgeReconstitution(t *testing.T) {
+	root := t.TempDir()
+
+	writeFileHelper := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	// Initial content: Base declares a class, Child inherits from it.
+	writeFileHelper("base.py", "class Base:\n    pass\n")
+	writeFileHelper("child.py", "from base import Base\nclass Child(Base):\n    pass\n")
+
+	idx, s := newGraphTestIndexer(t, root)
+
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("first IndexProjectGraph: %v", err)
+	}
+
+	// Confirm the inherits edge exists before we touch base.py.
+	edges, err := s.ListEdges()
+	if err != nil {
+		t.Fatalf("ListEdges after first index: %v", err)
+	}
+	var found bool
+	for _, e := range edges {
+		if e.Kind == store.EdgeKindInherits && e.From == "sym:child.Child" && e.To == "sym:base.Base" {
+			found = true
+		}
+	}
+	if !found {
+		var syms []string
+		nodes, _ := s.ListNodes()
+		for _, n := range nodes {
+			if n.Kind == "symbol" {
+				syms = append(syms, n.ID)
+			}
+		}
+		t.Fatalf("inherits edge from sym:child.Child → sym:base.Base missing after first index; symbols=%v edges=%+v", syms, edges)
+	}
+
+	// Modify base.py so its hash changes — simulates a real upstream edit.
+	// The content is functionally equivalent; only the hash matters here.
+	writeFileHelper("base.py", "class Base:\n    \"\"\"Upstream base class.\"\"\"\n    pass\n")
+
+	// Incremental reindex: child.py is unchanged so only base.py is reindexed.
+	if _, err := idx.IndexProjectGraph(root, false); err != nil {
+		t.Fatalf("second IndexProjectGraph: %v", err)
+	}
+
+	// The reconstitution must have restored the inherits edge from child.py.
+	edges, err = s.ListEdges()
+	if err != nil {
+		t.Fatalf("ListEdges after second index: %v", err)
+	}
+	found = false
+	for _, e := range edges {
+		if e.Kind == store.EdgeKindInherits && e.From == "sym:child.Child" && e.To == "sym:base.Base" {
+			found = true
+		}
+	}
+	if !found {
+		var edgeSummary []string
+		for _, e := range edges {
+			edgeSummary = append(edgeSummary, fmt.Sprintf("%s -[%s]-> %s", e.From, e.Kind, e.To))
+		}
+		t.Errorf("inherits edge from sym:child.Child → sym:base.Base lost after reindexing base.py; all edges: %v", edgeSummary)
+	}
+}
+
 // keys returns the sorted key set of a map[string]string for stable
 // failure messages.
 func keys(m map[string]string) []string {
