@@ -318,6 +318,13 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 	// connect-es stub symbol nodes exist when the call-site resolver probes them.
 	idx.buildCallRPCEdges(result)
 
+	// Dart call-site detector: emit call_rpc edges from Flutter/Dart call sites
+	// to their proto rpc declarations. Runs after buildCallRPCEdges so the
+	// TS detector's edges are already committed (ordering within the post-pass
+	// resolvers is otherwise arbitrary, but keeping Dart after TS is consistent
+	// with the bead dependency order lib-4g2.3 → lib-4g2.4).
+	idx.buildDartCallRPCEdges(result)
+
 	return result, nil
 }
 
