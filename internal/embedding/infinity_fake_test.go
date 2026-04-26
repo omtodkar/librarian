@@ -22,13 +22,11 @@ func infinityResponse(dim int, indices ...int) openAIEmbeddingResponse {
 	return openAIEmbeddingResponse{Data: data}
 }
 
-// newInfinityFakeServer returns an httptest.Server that mimics Infinity's
-// /embeddings endpoint. It records the last request path so tests can assert
-// the client is NOT sending to /v1/embeddings.
+// infinityFakeServer mimics Infinity's /embeddings endpoint. It records the
+// last request path so tests can assert the client is NOT sending to /v1/embeddings.
 type infinityFakeServer struct {
-	dim         int
-	lastPath    string
-	requestBody []byte
+	dim      int
+	lastPath string
 }
 
 func (f *infinityFakeServer) handler(t *testing.T) http.HandlerFunc {
