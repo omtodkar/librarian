@@ -215,4 +215,6 @@ To add a migration, create `db/migrations/000N_what_you_did.sql` with the next s
 
 Pre-goose databases (created before this framework landed) are rejected at `Open` with a friendly error — users delete `.librarian/librarian.db` and re-index to rebuild from the current baseline.
 
+For the full upgrade and recovery guide, including what to do when changing embedding models, see [Upgrading](upgrading.md).
+
 The `doc_chunk_vectors` vec0 table is deliberately **not** managed by migrations: its dimension is a runtime property of the embedding model, created lazily on first insert.

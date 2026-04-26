@@ -117,6 +117,8 @@ Recover with `librarian reindex --rebuild-vectors`, which drops `doc_chunk_vecto
 
 Known limitation: if two runs use the same model name against different OpenAI-compatible endpoints (e.g. LM Studio vs. Ollama vs. Infinity serving different underlying weights under the same `model:` name), the mismatch can't be detected — the model identifier is all we have.
 
+For upgrade steps when changing providers or models, see [Upgrading → Switching embedding models](upgrading.md#switching-embedding-models).
+
 ## Pipeline flow
 
 **Indexing**: each document's chunks are batched through `EmbedBatch(texts []string) ([][]float64, error)` — one HTTP call per `embedding.batch_size` chunks (default 100). Provider implementations split larger inputs into waves internally and preserve input order. Returned vectors are converted to float32 little-endian bytes at the store boundary and inserted into `doc_chunk_vectors` alongside the chunk metadata.

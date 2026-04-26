@@ -169,6 +169,7 @@ Full docs live under [`docs/`](docs/):
 - [Configuration](docs/configuration.md) — `.librarian/config.yaml`, env vars
 - [Embedding](docs/embedding.md) — providers + vector handling
 - [MCP Tools](docs/mcp-tools.md) — the 6 tools exposed over stdio, with API stability classifications
+- [Upgrading](docs/upgrading.md) — schema migrations, embedder swaps, version-to-version paths
 - [Development Guide](docs/development.md) — build, test, extend
 
 Or let Librarian index itself and ask it: `librarian context "how does X work"`.

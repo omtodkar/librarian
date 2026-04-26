@@ -182,6 +182,14 @@ Schema changes land as numbered [goose](https://github.com/pressly/goose) migrat
 
 Keep migrations append-only: never edit a migration that's shipped, even to fix a typo. If the change is wrong, write a new migration that corrects it.
 
+### Schema migration checklist
+
+Whenever you add or modify a migration, also:
+
+- [ ] Write an upgrade note in [docs/upgrading.md](upgrading.md) — describe what changed and whether users need to run `librarian reindex --rebuild-vectors` or delete their database.
+- [ ] Update the version history table in `docs/upgrading.md`.
+- [ ] If the change affects vector storage or the `embedding_meta` guard, update [docs/embedding.md](embedding.md) and [docs/storage.md](storage.md) accordingly.
+
 ## Beads issue tracker
 
 The project uses **bd (beads)** for work tracking. `bd prime` in a fresh session prints the full command reference. Issues live in `.beads/issues.jsonl` (committed). Any new work should have a matching bd issue so the backlog stays navigable.
