@@ -1060,10 +1060,11 @@ message LoginReply {}
 	}
 
 	// Metadata must round-trip through the JSON schema the resolver expects.
+	// LangPrefixes is now map[string][]string (multi-prefix policy, lib-4g2.1).
 	var got struct {
-		ProtoPath    string            `json:"proto_path"`
-		ProtoPackage string            `json:"proto_package"`
-		LangPrefixes map[string]string `json:"lang_prefixes"`
+		ProtoPath    string              `json:"proto_path"`
+		ProtoPackage string              `json:"proto_package"`
+		LangPrefixes map[string][]string `json:"lang_prefixes"`
 	}
 	if err := json.Unmarshal([]byte(node.Metadata), &got); err != nil {
 		t.Fatalf("unmarshal metadata %q: %v", node.Metadata, err)
@@ -1074,11 +1075,13 @@ message LoginReply {}
 	if got.ProtoPackage != "auth" {
 		t.Errorf("proto_package = %q, want %q", got.ProtoPackage, "auth")
 	}
-	if got.LangPrefixes["go"] != "gen/go/authpb" {
-		t.Errorf("lang_prefixes[go] = %q, want %q", got.LangPrefixes["go"], "gen/go/authpb")
+	goPfx := got.LangPrefixes["go"]
+	if len(goPfx) != 1 || goPfx[0] != "gen/go/authpb" {
+		t.Errorf("lang_prefixes[go] = %v, want [gen/go/authpb]", goPfx)
 	}
-	if got.LangPrefixes["dart"] != "gen/dart/api" {
-		t.Errorf("lang_prefixes[dart] = %q, want %q", got.LangPrefixes["dart"], "gen/dart/api")
+	dartPfx := got.LangPrefixes["dart"]
+	if len(dartPfx) != 1 || dartPfx[0] != "gen/dart/api" {
+		t.Errorf("lang_prefixes[dart] = %v, want [gen/dart/api]", dartPfx)
 	}
 }
 
@@ -1138,10 +1141,11 @@ message LoginReply {}
 		t.Errorf("node.SourcePath = %q, want %q", node.SourcePath, "api/auth.proto")
 	}
 
+	// LangPrefixes is now map[string][]string (multi-prefix policy, lib-4g2.1).
 	var got struct {
-		ProtoPath    string            `json:"proto_path"`
-		ProtoPackage string            `json:"proto_package"`
-		LangPrefixes map[string]string `json:"lang_prefixes"`
+		ProtoPath    string              `json:"proto_path"`
+		ProtoPackage string              `json:"proto_package"`
+		LangPrefixes map[string][]string `json:"lang_prefixes"`
 	}
 	if err := json.Unmarshal([]byte(node.Metadata), &got); err != nil {
 		t.Fatalf("unmarshal metadata %q: %v", node.Metadata, err)
@@ -1156,11 +1160,12 @@ message LoginReply {}
 	}
 	// Go prefix absent — no go_package, no source_relative. Dart / TS
 	// prefixes present because their convention is source-dir-based.
-	if _, ok := got.LangPrefixes["go"]; ok {
-		t.Errorf("lang_prefixes[go] = %q present without go_package; want absent", got.LangPrefixes["go"])
+	if pfx, ok := got.LangPrefixes["go"]; ok {
+		t.Errorf("lang_prefixes[go] = %v present without go_package; want absent", pfx)
 	}
-	if got.LangPrefixes["dart"] != "gen/dart/api" {
-		t.Errorf("lang_prefixes[dart] = %q, want gen/dart/api", got.LangPrefixes["dart"])
+	dartPfx := got.LangPrefixes["dart"]
+	if len(dartPfx) != 1 || dartPfx[0] != "gen/dart/api" {
+		t.Errorf("lang_prefixes[dart] = %v, want [gen/dart/api]", dartPfx)
 	}
 	// Non-empty LangPrefixes check — a regression that emits an empty map
 	// would still round-trip the struct, so assert length explicitly.
@@ -1235,5 +1240,241 @@ func (s *ListingServer) list() error { return nil }
 	}
 	if !found {
 		t.Errorf("expected implements_rpc edge from %s to %s even with lowercase rpc name; got %+v", src, target, in)
+	}
+}
+
+// TestImplementsRPC_ConnectGoHandlerLinks pins the protoc-gen-connect-go
+// server-side interface naming: `FooServiceHandler` (not `FooServiceServer`).
+// Without the Handler candidate added by lib-4g2.1, Connect-Go server impls
+// never linked to their proto rpc — this test is the first-class guard.
+func TestImplementsRPC_ConnectGoHandlerLinks(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest { string user = 1; }
+message LoginReply { bool ok = 1; }
+`,
+		// protoc-gen-connect-go emits the server-side handler interface as
+		// FooServiceHandler; server implementors embed this, not FooServiceServer.
+		// Package name must match the proto package so Unit.Path lines up with
+		// what the resolver probes (auth.AuthServiceHandler.Login).
+		"gen/go/authpb/authpbconnect/auth.connect.go": `package auth
+
+type AuthServiceHandler struct{}
+
+func (s *AuthServiceHandler) Login() error { return nil }
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	src := store.SymbolNodeID("auth.AuthServiceHandler.Login")
+
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected exactly 1 implements_rpc edge (Handler suffix); got %d: %+v", len(edges), edges)
+	}
+	if edges[0].From != src {
+		t.Errorf("edge source = %s, want %s", edges[0].From, src)
+	}
+}
+
+// TestImplementsRPC_ConnectGoMultiPluginManifest pins the multi-prefix manifest
+// policy for the canonical Connect-Go buf.gen.yaml shape: protoc-gen-go writes
+// message types to gen/go and protoc-gen-connect-go writes service interfaces
+// to gen/connect. Both plugins classify as language "go" but output to
+// distinct directories. With the old first-wins policy, symbols under the
+// second directory would be silently dropped as false positives. lib-4g2.1
+// fixes this by collecting both prefixes; the resolver accepts a candidate
+// if it falls under ANY prefix in the slice.
+//
+// The fixture also places a hand-written Go file in internal/customauth/ to
+// confirm that the multi-prefix tightening still drops out-of-tree symbols.
+func TestImplementsRPC_ConnectGoMultiPluginManifest(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"buf.gen.yaml": `version: v2
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+  - local: protoc-gen-connect-go
+    out: gen/connect
+`,
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+option go_package = "github.com/example/authpb";
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`,
+		// grpc-go style: under gen/go/authpb (first plugin's out-dir).
+		"gen/go/authpb/auth.pb.go": `package auth
+
+type AuthServiceServer struct{}
+
+func (s *AuthServiceServer) Login() error { return nil }
+`,
+		// connect-go style: under gen/connect/authpb (second plugin's out-dir).
+		"gen/connect/authpb/auth.connect.go": `package auth
+
+type AuthServiceHandler struct{}
+
+func (s *AuthServiceHandler) Login() error { return nil }
+`,
+		// Hand-written — must be dropped by the multi-prefix tightening.
+		"internal/customauth/client.go": `package auth
+
+type AuthServiceClient struct{ endpoint string }
+
+func (c *AuthServiceClient) Login() error { return nil }
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	serverSrc := store.SymbolNodeID("auth.AuthServiceServer.Login")
+	handlerSrc := store.SymbolNodeID("auth.AuthServiceHandler.Login")
+	handWritten := store.SymbolNodeID("auth.AuthServiceClient.Login")
+
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	// Exactly 2 edges: one from gen/go/authpb and one from gen/connect/authpb.
+	if len(edges) != 2 {
+		t.Fatalf("expected exactly 2 implements_rpc edges (Server + Handler); got %d: %+v", len(edges), edges)
+	}
+	sources := map[string]bool{}
+	for _, e := range edges {
+		sources[e.From] = true
+		if e.From == handWritten {
+			t.Errorf("multi-prefix tightening regressed: hand-written %s still linked", handWritten)
+		}
+	}
+	if !sources[serverSrc] {
+		t.Errorf("missing implements_rpc edge from %s (gen/go/authpb prefix)", serverSrc)
+	}
+	if !sources[handlerSrc] {
+		t.Errorf("missing implements_rpc edge from %s (gen/connect/authpb prefix)", handlerSrc)
+	}
+
+	// Also verify that the buf_manifest node's Go lang_prefixes slice
+	// contains both out-dirs in declaration order.
+	manifestNode, err := s.GetNode(store.BufManifestNodeID("api/auth.proto"))
+	if err != nil || manifestNode == nil {
+		t.Fatalf("buf_manifest node missing: %v", err)
+	}
+	var meta struct {
+		LangPrefixes map[string][]string `json:"lang_prefixes"`
+	}
+	if err := json.Unmarshal([]byte(manifestNode.Metadata), &meta); err != nil {
+		t.Fatalf("unmarshal manifest metadata: %v", err)
+	}
+	goPfx := meta.LangPrefixes["go"]
+	if len(goPfx) != 2 {
+		t.Fatalf("manifest lang_prefixes[go] = %v, want 2 entries", goPfx)
+	}
+	if goPfx[0] != "gen/go/authpb" {
+		t.Errorf("manifest goPfx[0] = %q, want gen/go/authpb", goPfx[0])
+	}
+	if goPfx[1] != "gen/connect/authpb" {
+		t.Errorf("manifest goPfx[1] = %q, want gen/connect/authpb", goPfx[1])
+	}
+}
+
+// TestImplementsRPC_ConnectLocalPluginClassified pins that a buf.gen.yaml
+// declaring `local: protoc-gen-connect-go` (as opposed to a remote plugin
+// at buf.build/connectrpc/go) correctly classifies as language "go" in the
+// persisted buf_manifest node. Without the connect-go arm added by lib-4g2.1
+// in languageFromPluginIdentity, local connect-go plugins produce no Go
+// prefix in the manifest, causing every Go candidate for that proto to fall
+// through to name-only matching and possibly accept false positives.
+func TestImplementsRPC_ConnectLocalPluginClassified(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"buf.gen.yaml": `version: v2
+plugins:
+  - local: protoc-gen-connect-go
+    out: gen/connect
+`,
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+option go_package = "github.com/example/authpb";
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`,
+		"gen/connect/authpb/auth.connect.go": `package auth
+
+type AuthServiceHandler struct{}
+
+func (s *AuthServiceHandler) Login() error { return nil }
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	// Manifest must classify the local plugin as "go" and persist the prefix.
+	manifestNode, err := s.GetNode(store.BufManifestNodeID("api/auth.proto"))
+	if err != nil || manifestNode == nil {
+		t.Fatalf("buf_manifest node missing: %v", err)
+	}
+	var meta struct {
+		LangPrefixes map[string][]string `json:"lang_prefixes"`
+	}
+	if err := json.Unmarshal([]byte(manifestNode.Metadata), &meta); err != nil {
+		t.Fatalf("unmarshal manifest metadata: %v", err)
+	}
+	goPfx := meta.LangPrefixes["go"]
+	if len(goPfx) != 1 || goPfx[0] != "gen/connect/authpb" {
+		t.Errorf("manifest lang_prefixes[go] = %v, want [gen/connect/authpb] (local protoc-gen-connect-go should classify as go)", goPfx)
+	}
+
+	// The Handler symbol under gen/connect/authpb must link to the proto rpc.
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	src := store.SymbolNodeID("auth.AuthServiceHandler.Login")
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	found := false
+	for _, e := range edges {
+		if e.From == src {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected implements_rpc edge from %s to %s (local connect-go classified as go); got %+v", src, target, edges)
 	}
 }

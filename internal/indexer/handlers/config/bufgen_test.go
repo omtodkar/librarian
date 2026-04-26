@@ -78,6 +78,40 @@ func TestLanguageFromPluginIdentity(t *testing.T) { //nolint:revive // Lives in 
 	}
 }
 
+// TestLanguageFromPluginIdentity_LocalConnectShapes pins the explicit
+// connect-go / connect-dart / query arms added by lib-4g2.1. These are
+// distinct from the existing connect-es arm and from the generic go/dart
+// prefix rules — they must classify correctly whether the identity arrives
+// as a bare name, as a local binary (after protoc-gen- stripping), or via
+// a remote buf.build path.
+func TestLanguageFromPluginIdentity_LocalConnectShapes(t *testing.T) {
+	cases := []struct {
+		identity string
+		want     string
+	}{
+		// Local binary shapes (after protoc-gen- prefix stripping).
+		{"protoc-gen-connect-go", "go"},
+		{"protoc-gen-connect-dart", "dart"},
+		{"protoc-gen-connect-es", "ts"},  // existing arm, regression guard
+		// Bare names (v1 `name:` field).
+		{"connect-go", "go"},
+		{"connect-dart", "dart"},
+		{"connect-es", "ts"},  // existing arm, regression guard
+		// Remote buf.build paths.
+		{"buf.build/connectrpc/go", "go"},
+		{"buf.build/connectrpc/dart", "dart"},
+		// Connect-Query (TypeScript hooks generator).
+		{"query", "ts"},
+		{"protoc-gen-query", "ts"},
+		{"buf.build/connectrpc/query", "ts"},
+	}
+	for _, c := range cases {
+		if got := languageFromPluginIdentity(c.identity); got != c.want {
+			t.Errorf("languageFromPluginIdentity(%q) = %q, want %q", c.identity, got, c.want)
+		}
+	}
+}
+
 // TestParseBufGenPlugins_V1 covers buf v1 shape: top-level `plugins:` list
 // with `name:` identities and optional `opt:` (scalar or list).
 func TestParseBufGenPlugins_V1(t *testing.T) {

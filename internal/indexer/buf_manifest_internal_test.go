@@ -124,8 +124,8 @@ func TestHasSourceRelativeOpt(t *testing.T) {
 // wholesale when no buf.gen.yaml is present.
 func TestBufManifest_LookupPrefix_Nil(t *testing.T) {
 	var m *BufManifest
-	if prefix, ok := m.LookupPrefix("api/auth.proto", "go"); ok || prefix != "" {
-		t.Errorf("(nil).LookupPrefix = (%q, %v), want (\"\", false)", prefix, ok)
+	if prefixes, ok := m.LookupPrefix("api/auth.proto", "go"); ok || prefixes != nil {
+		t.Errorf("(nil).LookupPrefix = (%v, %v), want (nil, false)", prefixes, ok)
 	}
 }
 
@@ -135,20 +135,21 @@ func TestBufManifest_LookupPrefix(t *testing.T) {
 		"api/auth.proto": {
 			ProtoPath:    "api/auth.proto",
 			ProtoPackage: "auth",
-			LangPrefixes: map[string]string{"go": "gen/go/authpb"},
+			LangPrefixes: map[string][]string{"go": {"gen/go/authpb"}},
 		},
 	}}
 
-	if prefix, ok := m.LookupPrefix("api/auth.proto", "go"); !ok || prefix != "gen/go/authpb" {
-		t.Errorf("hit: got (%q, %v), want (gen/go/authpb, true)", prefix, ok)
+	prefixes, ok := m.LookupPrefix("api/auth.proto", "go")
+	if !ok || len(prefixes) != 1 || prefixes[0] != "gen/go/authpb" {
+		t.Errorf("hit: got (%v, %v), want ([gen/go/authpb], true)", prefixes, ok)
 	}
 	// Language without a prefix → miss.
-	if prefix, ok := m.LookupPrefix("api/auth.proto", "dart"); ok || prefix != "" {
-		t.Errorf("missing language: got (%q, %v), want (\"\", false)", prefix, ok)
+	if prefixes, ok := m.LookupPrefix("api/auth.proto", "dart"); ok || prefixes != nil {
+		t.Errorf("missing language: got (%v, %v), want (nil, false)", prefixes, ok)
 	}
 	// Proto file not in manifest → miss.
-	if prefix, ok := m.LookupPrefix("api/other.proto", "go"); ok || prefix != "" {
-		t.Errorf("missing proto: got (%q, %v), want (\"\", false)", prefix, ok)
+	if prefixes, ok := m.LookupPrefix("api/other.proto", "go"); ok || prefixes != nil {
+		t.Errorf("missing proto: got (%v, %v), want (nil, false)", prefixes, ok)
 	}
 }
 
@@ -168,14 +169,14 @@ func TestAssembleManifestEntry(t *testing.T) {
 			options: map[string]string{"go_package": "github.com/example/authpb"},
 			pkg:     "auth",
 		}, plugins)
-		if entry.LangPrefixes["go"] != "gen/go/authpb" {
-			t.Errorf("go prefix = %q, want gen/go/authpb", entry.LangPrefixes["go"])
+		if goPfx := entry.LangPrefixes["go"]; len(goPfx) != 1 || goPfx[0] != "gen/go/authpb" {
+			t.Errorf("go prefix = %v, want [gen/go/authpb]", goPfx)
 		}
-		if entry.LangPrefixes["dart"] != "gen/dart/api" {
-			t.Errorf("dart prefix = %q, want gen/dart/api", entry.LangPrefixes["dart"])
+		if dartPfx := entry.LangPrefixes["dart"]; len(dartPfx) != 1 || dartPfx[0] != "gen/dart/api" {
+			t.Errorf("dart prefix = %v, want [gen/dart/api]", dartPfx)
 		}
-		if entry.LangPrefixes["ts"] != "gen/ts/api" {
-			t.Errorf("ts prefix = %q, want gen/ts/api", entry.LangPrefixes["ts"])
+		if tsPfx := entry.LangPrefixes["ts"]; len(tsPfx) != 1 || tsPfx[0] != "gen/ts/api" {
+			t.Errorf("ts prefix = %v, want [gen/ts/api]", tsPfx)
 		}
 		if entry.ProtoPackage != "auth" {
 			t.Errorf("proto_package = %q, want auth", entry.ProtoPackage)
@@ -190,19 +191,19 @@ func TestAssembleManifestEntry(t *testing.T) {
 			options: map[string]string{"go_package": "github.com/example/authpb"},
 		}, pluginsSR)
 		// source_relative overrides go_package for the path convention.
-		if entry.LangPrefixes["go"] != "gen/go/api" {
-			t.Errorf("go prefix (source_relative) = %q, want gen/go/api", entry.LangPrefixes["go"])
+		if goPfx := entry.LangPrefixes["go"]; len(goPfx) != 1 || goPfx[0] != "gen/go/api" {
+			t.Errorf("go prefix (source_relative) = %v, want [gen/go/api]", goPfx)
 		}
 	})
 
 	t.Run("go_without_go_package_drops", func(t *testing.T) {
 		entry := assembleManifestEntry("api/auth.proto", protoFileEntry{options: nil}, plugins)
-		if _, ok := entry.LangPrefixes["go"]; ok {
-			t.Errorf("go prefix should be absent without go_package and without source_relative; got %q", entry.LangPrefixes["go"])
+		if pfx, ok := entry.LangPrefixes["go"]; ok {
+			t.Errorf("go prefix should be absent without go_package and without source_relative; got %v", pfx)
 		}
 		// Dart / TS still get prefixes because they don't depend on go_package.
-		if entry.LangPrefixes["dart"] != "gen/dart/api" {
-			t.Errorf("dart prefix = %q, want gen/dart/api", entry.LangPrefixes["dart"])
+		if dartPfx := entry.LangPrefixes["dart"]; len(dartPfx) != 1 || dartPfx[0] != "gen/dart/api" {
+			t.Errorf("dart prefix = %v, want [gen/dart/api]", dartPfx)
 		}
 	})
 
@@ -212,11 +213,11 @@ func TestAssembleManifestEntry(t *testing.T) {
 		entry := assembleManifestEntry("auth.proto", protoFileEntry{
 			options: map[string]string{"go_package": "github.com/example/authpb"},
 		}, plugins)
-		if entry.LangPrefixes["go"] != "gen/go/authpb" {
-			t.Errorf("go prefix = %q (go_package-based, unaffected by root-level proto)", entry.LangPrefixes["go"])
+		if goPfx := entry.LangPrefixes["go"]; len(goPfx) != 1 || goPfx[0] != "gen/go/authpb" {
+			t.Errorf("go prefix = %v (go_package-based, unaffected by root-level proto)", goPfx)
 		}
-		if entry.LangPrefixes["dart"] != "gen/dart" {
-			t.Errorf("dart prefix = %q, want gen/dart (root-level collapses subdir)", entry.LangPrefixes["dart"])
+		if dartPfx := entry.LangPrefixes["dart"]; len(dartPfx) != 1 || dartPfx[0] != "gen/dart" {
+			t.Errorf("dart prefix = %v, want [gen/dart] (root-level collapses subdir)", dartPfx)
 		}
 	})
 
@@ -228,32 +229,38 @@ func TestAssembleManifestEntry(t *testing.T) {
 		entry := assembleManifestEntry("api/auth.proto", protoFileEntry{
 			options: map[string]string{"go_package": "github.com/example/authpb"},
 		}, pluginsWithJava)
-		if _, ok := entry.LangPrefixes[""]; ok {
-			t.Errorf("empty-language entry leaked: %+v", entry.LangPrefixes)
+		if pfx, ok := entry.LangPrefixes[""]; ok {
+			t.Errorf("empty-language entry leaked: %+v", pfx)
 		}
-		if entry.LangPrefixes["go"] != "gen/go/authpb" {
-			t.Errorf("go prefix dropped when java plugin sat alongside; got %q", entry.LangPrefixes["go"])
+		if goPfx := entry.LangPrefixes["go"]; len(goPfx) != 1 || goPfx[0] != "gen/go/authpb" {
+			t.Errorf("go prefix dropped when java plugin sat alongside; got %v", goPfx)
 		}
 	})
 
-	t.Run("same_language_duplicate_first_wins", func(t *testing.T) {
-		// `go` + `go-grpc` both classify as Language="go" but commonly carry
-		// different out-dirs in combined configs (protoc-gen-go-grpc ships
-		// alongside protoc-gen-go). Manifest should yield exactly one go
-		// prefix — the first plugin's, as the godoc in assembleManifestEntry
-		// documents.
+	t.Run("same_language_two_plugins_both_collected", func(t *testing.T) {
+		// `go` + `go-grpc` (or protoc-gen-go + protoc-gen-connect-go) both
+		// classify as Language="go" but may carry different out-dirs. Both
+		// prefixes must appear in declaration order so the resolver accepts
+		// candidates under either output tree.
 		dupGo := []bufGenPluginSerialized{
 			{Language: "go", Out: "gen/go"},
-			{Language: "go", Out: "gen/grpc"},
+			{Language: "go", Out: "gen/connect"},
 		}
 		entry := assembleManifestEntry("api/auth.proto", protoFileEntry{
 			options: map[string]string{"go_package": "github.com/example/authpb"},
 		}, dupGo)
-		if entry.LangPrefixes["go"] != "gen/go/authpb" {
-			t.Errorf("first-go-wins violated: got %q, want gen/go/authpb", entry.LangPrefixes["go"])
+		goPfx := entry.LangPrefixes["go"]
+		if len(goPfx) != 2 {
+			t.Fatalf("expected 2 go prefixes; got %v", goPfx)
+		}
+		if goPfx[0] != "gen/go/authpb" {
+			t.Errorf("first go prefix = %q, want gen/go/authpb", goPfx[0])
+		}
+		if goPfx[1] != "gen/connect/authpb" {
+			t.Errorf("second go prefix = %q, want gen/connect/authpb", goPfx[1])
 		}
 		if len(entry.LangPrefixes) != 1 {
-			t.Errorf("unexpected multi-prefix result: %+v (want one go prefix)", entry.LangPrefixes)
+			t.Errorf("unexpected extra language keys: %+v", entry.LangPrefixes)
 		}
 	})
 }
@@ -264,7 +271,7 @@ func TestAssembleManifestEntry(t *testing.T) {
 func TestCandidateWithinCodegenTree(t *testing.T) {
 	manifest := &BufManifest{Entries: map[string]*BufManifestEntry{
 		"api/auth.proto": {
-			LangPrefixes: map[string]string{"go": "gen/go/authpb"},
+			LangPrefixes: map[string][]string{"go": {"gen/go/authpb"}},
 		},
 	}}
 	node := func(sp string) *storeNodeStub { return &storeNodeStub{SourcePath: sp} }
@@ -341,5 +348,62 @@ func TestCandidateWithinCodegenTree(t *testing.T) {
 				t.Errorf("candidateWithinCodegenTree = %v, want %v", got, c.wantAccepted)
 			}
 		})
+	}
+}
+
+// TestAssembleManifestEntry_MultiplePluginsSameLanguage pins that two Go
+// plugins with different out-dirs both contribute a prefix, in declaration
+// order. This covers the protoc-gen-go + protoc-gen-connect-go case where
+// message types and service interfaces land in separate output directories.
+func TestAssembleManifestEntry_MultiplePluginsSameLanguage(t *testing.T) {
+	plugins := []bufGenPluginSerialized{
+		{Language: "go", Out: "gen/go"},
+		{Language: "go", Out: "gen/connect"},
+	}
+	entry := assembleManifestEntry("api/auth.proto", protoFileEntry{
+		options: map[string]string{"go_package": "github.com/example/authpb"},
+	}, plugins)
+
+	goPfx := entry.LangPrefixes["go"]
+	if len(goPfx) != 2 {
+		t.Fatalf("expected 2 go prefixes; got %v", goPfx)
+	}
+	// Declaration order must be preserved.
+	if goPfx[0] != "gen/go/authpb" {
+		t.Errorf("goPfx[0] = %q, want gen/go/authpb", goPfx[0])
+	}
+	if goPfx[1] != "gen/connect/authpb" {
+		t.Errorf("goPfx[1] = %q, want gen/connect/authpb", goPfx[1])
+	}
+	// No other language key should be present.
+	if len(entry.LangPrefixes) != 1 {
+		t.Errorf("unexpected extra language keys: %+v", entry.LangPrefixes)
+	}
+}
+
+// TestLookupPrefix_MultiplePrefixes pins LookupPrefix's slice semantics:
+// hit returns the full slice; a missing language returns (nil, false).
+func TestLookupPrefix_MultiplePrefixes(t *testing.T) {
+	m := &BufManifest{Entries: map[string]*BufManifestEntry{
+		"api/auth.proto": {
+			LangPrefixes: map[string][]string{
+				"go": {"gen/go/authpb", "gen/connect/authpb"},
+			},
+		},
+	}}
+
+	// Hit: both prefixes returned.
+	prefixes, ok := m.LookupPrefix("api/auth.proto", "go")
+	if !ok {
+		t.Fatal("expected ok=true for existing language; got false")
+	}
+	if len(prefixes) != 2 || prefixes[0] != "gen/go/authpb" || prefixes[1] != "gen/connect/authpb" {
+		t.Errorf("prefixes = %v, want [gen/go/authpb gen/connect/authpb]", prefixes)
+	}
+
+	// Miss: language not present → nil slice + false.
+	missPfx, missOK := m.LookupPrefix("api/auth.proto", "dart")
+	if missOK || missPfx != nil {
+		t.Errorf("missing language: got (%v, %v), want (nil, false)", missPfx, missOK)
 	}
 }

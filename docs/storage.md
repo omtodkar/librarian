@@ -134,7 +134,7 @@ The graph spine is a generic layer: every indexed thing projects into a `graph_n
 - `import` — code_file → symbol / code_file / external_package (depending on resolver output)
 - `call` — symbol → symbol (reserved; not emitted by any grammar today)
 - `inherits` — symbol → symbol (class / interface / protocol parent relationship). `Edge.Metadata.relation` carries the flavor: `extends`, `implements`, `mixes` (Dart mixins), `conforms` (Swift protocols), `embeds` (Go interface embedding). `extends` and `implements` remain backward-compatible aliases in `graphTargetID` / `graphNodeKindFromRef` for hand-authored edges and pre-lib-wji.1 data, but new extraction emits `inherits`.
-- `implements_rpc` — symbol → symbol (generated-code method → proto rpc declaration). Materialised by the post-graph-pass resolver `buildImplementsRPCEdges` (lib-6wz) via per-language naming conventions: protoc-gen-go/grpc-go emit `pkg.SvcServer.Method` / `pkg.SvcClient.Method` / `pkg.UnimplementedSvcServer.Method`, protoc-gen-dart emits `pkg.SvcClient.methodName` / `pkg.SvcBase.methodName`, @bufbuild/protoc-gen-es emits `pkg.SvcClient.methodName` / `pkg.Svc.methodName`. lib-4kb tightens matching by combining `buf.gen.yaml` plugin out-dirs with per-proto `option *_package` values into a per-proto-file buf manifest (`bufgen:<proto-path>` node, kind `buf_manifest`); each candidate's `source_path` must live under the manifest's language-specific prefix. Missing `buf.gen.yaml` or no prefix for the candidate's language → graceful fallback to lib-6wz's name-only matching for that candidate, so projects without buf still get the lib-6wz behaviour (including its known false positives) unchanged.
+- `implements_rpc` — symbol → symbol (generated-code method → proto rpc declaration). Materialised by the post-graph-pass resolver `buildImplementsRPCEdges` (lib-6wz) via per-language naming conventions: protoc-gen-go/grpc-go emit `pkg.SvcServer.Method` / `pkg.SvcClient.Method` / `pkg.UnimplementedSvcServer.Method`; protoc-gen-connect-go emits `pkg.SvcHandler.Method` (server-side handler interface); protoc-gen-dart emits `pkg.SvcClient.methodName` / `pkg.SvcBase.methodName`; @bufbuild/protoc-gen-es emits `pkg.SvcClient.methodName` / `pkg.Svc.methodName`. lib-4kb tightens matching by combining `buf.gen.yaml` plugin out-dirs with per-proto `option *_package` values into a per-proto-file buf manifest (`bufgen:<proto-path>` node, kind `buf_manifest`); each candidate's `source_path` must live under ANY of the manifest's language-specific prefixes (slice, since protoc-gen-go and protoc-gen-connect-go can share the same language key but use different out-dirs). Missing `buf.gen.yaml` or no prefix for the candidate's language → graceful fallback to lib-6wz's name-only matching for that candidate, so projects without buf still get the lib-6wz behaviour (including its known false positives) unchanged.
 
 ### Buf codegen manifest (lib-4kb)
 
@@ -144,9 +144,11 @@ The `buf_manifest` node kind holds per-proto-file codegen path prefixes the `imp
 {
   "proto_path": "api/auth.proto",
   "proto_package": "auth",
-  "lang_prefixes": {"go": "gen/go/authpb", "dart": "gen/dart/api", "ts": "gen/ts/api"}
+  "lang_prefixes": {"go": ["gen/go/authpb", "gen/connect/authpb"], "dart": ["gen/dart/api"], "ts": ["gen/ts/api"]}
 }
 ```
+
+`lang_prefixes` values are arrays rather than scalars because a language may have more than one plugin with different output directories — for example, a repo using both protoc-gen-go (message types) and protoc-gen-connect-go (service interfaces) will have two Go output trees. The resolver accepts a candidate if its `source_path` falls under **any** prefix in the slice.
 
 Built by `buildBufManifest` (runs between the per-file graph pass and `buildImplementsRPCEdges`) by combining:
 

@@ -199,11 +199,11 @@ func languageFromPluginIdentity(identity string) string {
 	}
 	name = strings.TrimPrefix(name, "protoc-gen-")
 	switch {
-	case name == "go", strings.HasPrefix(name, "go-"):
+	case name == "go", strings.HasPrefix(name, "go-"), name == "connect-go":
 		return "go"
-	case name == "dart", strings.HasPrefix(name, "dart-"):
+	case name == "dart", strings.HasPrefix(name, "dart-"), name == "connect-dart":
 		return "dart"
-	case name == "es", strings.HasPrefix(name, "es-"), name == "connect-es":
+	case name == "es", strings.HasPrefix(name, "es-"), name == "connect-es", name == "query":
 		return "ts"
 	}
 	return ""

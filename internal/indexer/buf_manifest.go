@@ -20,15 +20,17 @@ import (
 // matches the dotted-prefix the resolver derives candidates under.
 //
 // LangPrefixes maps language keys ("go" / "dart" / "ts") to workspace-relative
-// codegen path prefixes. Values are directory paths without a trailing slash
-// so callers use hasPathPrefix uniformly regardless of which language the
-// candidate came from. A language absent from the map means no tight prefix
-// is known for it — the resolver falls through to name-only for THAT
-// language's candidates, preserving lib-6wz's behaviour.
+// codegen path prefix slices. Values are directory paths without a trailing
+// slash so callers use hasPathPrefix uniformly regardless of which language the
+// candidate came from. Multiple plugins for the same language (e.g.
+// protoc-gen-go and protoc-gen-connect-go, which write to separate out-dirs)
+// produce multiple prefixes in declaration order. A language absent from the
+// map means no tight prefix is known for it — the resolver falls through to
+// name-only for THAT language's candidates, preserving lib-6wz's behaviour.
 type BufManifestEntry struct {
-	ProtoPath    string            `json:"proto_path"`
-	ProtoPackage string            `json:"proto_package,omitempty"`
-	LangPrefixes map[string]string `json:"lang_prefixes"`
+	ProtoPath    string              `json:"proto_path"`
+	ProtoPackage string              `json:"proto_package,omitempty"`
+	LangPrefixes map[string][]string `json:"lang_prefixes"`
 }
 
 // BufManifest is the whole-project manifest assembled from every indexed
@@ -319,7 +321,7 @@ func assembleManifestEntry(protoPath string, pf protoFileEntry, plugins []bufGen
 	entry := &BufManifestEntry{
 		ProtoPath:    protoPath,
 		ProtoPackage: pf.pkg,
-		LangPrefixes: map[string]string{},
+		LangPrefixes: map[string][]string{},
 	}
 	// path.Dir expects forward-slash-separated input. filepath.ToSlash is a
 	// no-op on unix but collapses `\` into `/` on Windows where the walker
@@ -335,19 +337,16 @@ func assembleManifestEntry(protoPath string, pf protoFileEntry, plugins []bufGen
 		if p.Language == "" || p.Out == "" {
 			continue
 		}
-		// First plugin per language wins; the resolver only needs one
-		// prefix per language per proto file. This means a repo with both
-		// `go` and `go-grpc` plugins listed (which share the same out-dir
-		// in virtually every real config) gets a stable prefix either way.
-		if _, ok := entry.LangPrefixes[p.Language]; ok {
-			continue
-		}
-
+		// All plugins for the same language are collected in declaration
+		// order. A typical Connect setup declares both protoc-gen-go (message
+		// types) and protoc-gen-connect-go (service interfaces) with different
+		// out-dirs; collecting both lets the resolver accept symbols from
+		// either output tree.
 		prefix := computeLangPrefix(p, protoDir, pf.options)
 		if prefix == "" {
 			continue
 		}
-		entry.LangPrefixes[p.Language] = prefix
+		entry.LangPrefixes[p.Language] = append(entry.LangPrefixes[p.Language], prefix)
 	}
 	return entry
 }
@@ -420,20 +419,22 @@ func goPackageLastSegment(val string) string {
 	return pathPart
 }
 
-// LookupPrefix returns the codegen path prefix for a given proto file and
-// language, or ("", false) when no manifest entry or language-specific
-// prefix exists. A nil manifest always returns ("", false) so callers can
-// dispatch their no-manifest fallback without a separate nil check.
-func (m *BufManifest) LookupPrefix(protoPath, language string) (string, bool) {
+// LookupPrefix returns the codegen path prefix slice for a given proto file and
+// language, or (nil, false) when no manifest entry or language-specific prefix
+// exists. A nil manifest always returns (nil, false) so callers can dispatch
+// their no-manifest fallback without a separate nil check. The slice preserves
+// declaration order from buf.gen.yaml; a single-plugin language has a
+// one-element slice.
+func (m *BufManifest) LookupPrefix(protoPath, language string) ([]string, bool) {
 	if m == nil {
-		return "", false
+		return nil, false
 	}
 	entry, ok := m.Entries[protoPath]
 	if !ok {
-		return "", false
+		return nil, false
 	}
-	prefix, ok := entry.LangPrefixes[language]
-	return prefix, ok
+	prefixes, ok := entry.LangPrefixes[language]
+	return prefixes, ok
 }
 
 // hasPathPrefix reports whether sourcePath is rooted at prefix — i.e. matches

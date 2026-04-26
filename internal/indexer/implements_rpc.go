@@ -45,9 +45,12 @@ type rpcCandidate struct {
 // Per-language derivations (all share the proto package as the namespace
 // prefix):
 //
-//   - Go (protoc-gen-go + grpc-go):
+//   - Go (protoc-gen-go + grpc-go + protoc-gen-connect-go):
 //     `pkg.SvcServer.Method`, `pkg.SvcClient.Method`,
-//     `pkg.UnimplementedSvcServer.Method` — method PascalCase (same as proto).
+//     `pkg.UnimplementedSvcServer.Method`, `pkg.SvcHandler.Method` —
+//     method PascalCase (same as proto). The Handler suffix is
+//     protoc-gen-connect-go's server-side interface (Connect-Go RPC servers
+//     implement `FooServiceHandler`, not `FooServiceServer`).
 //   - Dart (protoc-gen-dart):
 //     `pkg.SvcClient.methodName`, `pkg.SvcBase.methodName` — method
 //     lowerCamelCase.
@@ -134,12 +137,13 @@ func (idx *Indexer) linkRPCImplementations(rpcPath, rpcSourcePath string) int {
 	// Order matters for stable edge iteration during tests; dedupe via `seen`
 	// in the loop below catches SvcClient collisions between Dart and TS.
 	candidates := []rpcCandidate{
-		// Go (protoc-gen-go + grpc-go): PascalCase method, three surface
-		// types per service (server interface, client interface, default
-		// unimplemented server struct).
+		// Go (protoc-gen-go + grpc-go + protoc-gen-connect-go): PascalCase
+		// method. grpc-go emits SvcServer / SvcClient / UnimplementedSvcServer;
+		// connect-go emits SvcHandler as its server-side interface.
 		{pkg + "." + svc + "Server." + method, "go"},
 		{pkg + "." + svc + "Client." + method, "go"},
 		{pkg + ".Unimplemented" + svc + "Server." + method, "go"},
+		{pkg + "." + svc + "Handler." + method, "go"},
 		// Dart (protoc-gen-dart): lowerCamelCase method, client + base types.
 		{pkg + "." + svc + "Client." + lcMethod, "dart"},
 		{pkg + "." + svc + "Base." + lcMethod, "dart"},
@@ -205,14 +209,19 @@ func candidateWithinCodegenTree(node *store.Node, cand rpcCandidate, rpcSourcePa
 	if manifest == nil || rpcSourcePath == "" {
 		return true
 	}
-	prefix, ok := manifest.LookupPrefix(rpcSourcePath, cand.Language)
+	prefixes, ok := manifest.LookupPrefix(rpcSourcePath, cand.Language)
 	if !ok {
 		return true
 	}
 	if node.SourcePath == "" {
 		return true
 	}
-	return hasPathPrefix(node.SourcePath, prefix)
+	for _, prefix := range prefixes {
+		if hasPathPrefix(node.SourcePath, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // lowerFirst returns s with its first rune lowercased. Used for PascalCase →
