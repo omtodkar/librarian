@@ -23,6 +23,7 @@ const (
 	EdgeKindRequires      = "requires"        // symbol → symbol (Dart `mixin M on Base` — use-site constraint, not an inheritance parent; kept distinct so "all parents of X" queries stay clean)
 	EdgeKindPart          = "part"            // code_file → code_file (Dart `part 'foo.dart'` / `part of 'bar.dart'` file-join; a single Dart library lives across multiple files)
 	EdgeKindImplementsRPC = "implements_rpc"  // symbol → symbol (generated-code method → proto rpc declaration; codegen derivation, not inheritance — kept distinct so "all parents of X" queries stay clean)
+	EdgeKindCallRPC       = "call_rpc"        // symbol → symbol (call site in hand-written code → proto rpc declaration; runtime invocation, not codegen derivation — kept distinct from implements_rpc so derivation and invocation queries stay clean)
 )
 
 // Graph node kinds. Additional kinds will land as new handlers emit richer
@@ -305,6 +306,31 @@ func (s *Store) ListNodesByKindWithMetadataContaining(kind, substring string) ([
 		var sp sql.NullString
 		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
 			return nil, fmt.Errorf("list_nodes_by_kind_with_metadata scan: %w", err)
+		}
+		if sp.Valid {
+			n.SourcePath = sp.String
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// ListNodesByKind returns every graph_node row with the given kind. Companion
+// to ListNodesByKindWithMetadataContaining for callers that need all nodes of
+// a kind regardless of metadata content.
+func (s *Store) ListNodesByKind(kind string) ([]Node, error) {
+	rows, err := s.db.Query(
+		`SELECT id, kind, label, source_path, metadata FROM graph_nodes WHERE kind = ?`, kind)
+	if err != nil {
+		return nil, fmt.Errorf("list_nodes_by_kind: %w", err)
+	}
+	defer rows.Close()
+	var out []Node
+	for rows.Next() {
+		var n Node
+		var sp sql.NullString
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+			return nil, fmt.Errorf("list_nodes_by_kind scan: %w", err)
 		}
 		if sp.Valid {
 			n.SourcePath = sp.String

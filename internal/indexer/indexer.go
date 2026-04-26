@@ -313,6 +313,11 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 	// per-file counters are unchanged.
 	idx.buildImplementsRPCEdges(result)
 
+	// Call-site detector: emit call_rpc edges from TS/JS call sites to their
+	// proto rpc declarations. Runs after buildImplementsRPCEdges so all
+	// connect-es stub symbol nodes exist when the call-site resolver probes them.
+	idx.buildCallRPCEdges(result)
+
 	return result, nil
 }
 

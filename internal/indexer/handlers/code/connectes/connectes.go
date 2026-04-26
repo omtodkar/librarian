@@ -102,8 +102,9 @@ func hasConnectSuffix(path string) bool {
 
 // serviceDef is the in-memory representation of one parsed service export.
 type serviceDef struct {
-	typeName string
-	methods  []methodDef
+	constName string // exported const identifier (e.g. "AuthService")
+	typeName  string
+	methods   []methodDef
 }
 
 // methodDef represents one entry under `methods: { ... }`.
@@ -160,12 +161,16 @@ func parseExportStatement(node *sitter.Node, src []byte) (serviceDef, bool) {
 
 // parseLexicalDeclaration extracts a service definition from
 // `const X = { typeName: "...", methods: { ... } }` (possibly `as const`).
+// The exported const name (X) is stored in serviceDef.constName and included
+// in unit metadata as "const_name" so callers that need to match the exported
+// symbol name (e.g. the callsites resolver) can do so without re-parsing.
 func parseLexicalDeclaration(node *sitter.Node, src []byte) (serviceDef, bool) {
 	for i := uint(0); i < node.NamedChildCount(); i++ {
 		child := node.NamedChild(i)
 		if child == nil || child.Kind() != "variable_declarator" {
 			continue
 		}
+		nameNode := child.ChildByFieldName("name")
 		valueNode := child.ChildByFieldName("value")
 		if valueNode == nil {
 			continue
@@ -181,6 +186,9 @@ func parseLexicalDeclaration(node *sitter.Node, src []byte) (serviceDef, bool) {
 		}
 		def, ok := parseServiceObject(valueNode, src)
 		if ok {
+			if nameNode != nil {
+				def.constName = nameNode.Utf8Text(src)
+			}
 			return def, true
 		}
 	}
@@ -293,6 +301,7 @@ func unitsFromDefs(defs []serviceDef) []indexer.Unit {
 				Metadata: map[string]any{
 					"connect_es_stub":  true,
 					"service_typename": def.typeName,
+					"const_name":       def.constName,
 					"method_key":       m.key,
 					"streaming_kind":   m.kind,
 				},

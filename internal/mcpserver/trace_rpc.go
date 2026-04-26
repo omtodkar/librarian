@@ -273,19 +273,66 @@ func runTraceRPC(st *store.Store, projectRoot, rpcInput string) (*traceRPCResult
 		result.OutputMessage = &m
 	}
 
-	// Callers: transitive incoming "call" edges seeded from every
-	// implementation and walked BFS up to traceRPCMaxCallerBFSDepth hops.
-	// Walking from each implementation (not the proto rpc) matches the common
-	// question "who calls the Go server / Dart client of this rpc" — the
-	// proto rpc itself is not the call target in any language. No grammar
-	// emits call edges at this indexing pass; when the seed set's BFS turns
-	// up nothing, the response carries an explanatory CallersNote so absence
-	// isn't misread as "no callers exist".
+	// Callers: two sources, merged before the final sort.
+	//
+	// (1) Transitive incoming "call" edges seeded from every implementation
+	//     symbol, walked BFS up to traceRPCMaxCallerBFSDepth hops. This covers
+	//     Go/Dart server-side callers that invoke the implementation via "call"
+	//     edges.
+	//
+	// (2) Direct incoming "call_rpc" edges on the proto rpc node itself (lib-4g2.3).
+	//     These are emitted by the TS/JS Connect-ES call-site detector for
+	//     Next.js callers that use createPromiseClient / createClient. Depth=1
+	//     since the edge directly joins caller → proto rpc.
 	seeds := make([]string, 0, len(result.Implementations))
 	for _, impl := range result.Implementations {
 		seeds = append(seeds, impl.SymbolID)
 	}
 	result.Callers = walkTraceRPCCallers(st, seeds, traceRPCMaxCallerBFSDepth, projectRoot, &result.Warnings)
+
+	// Collect call_rpc direct callers on the proto rpc node, deduplicating
+	// against any already surfaced via the "call" BFS.
+	callRPCEdges, err := st.Neighbors(node.ID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("trace_rpc: neighbors(call_rpc) on %s: %v", node.ID, err))
+	} else {
+		seenPaths := make(map[string]bool, len(result.Callers))
+		for _, c := range result.Callers {
+			seenPaths[c.SymbolPath] = true
+		}
+		for _, e := range callRPCEdges {
+			callerNode, err := st.GetNode(e.From)
+			if err != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("trace_rpc: failed to load call_rpc caller %s: %v", e.From, err))
+				continue
+			}
+			if callerNode == nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("trace_rpc: call_rpc caller node %s missing (dangling edge)", e.From))
+				continue
+			}
+			symPath := strings.TrimPrefix(callerNode.ID, "sym:")
+			if seenPaths[symPath] {
+				continue
+			}
+			seenPaths[symPath] = true
+			line := 0
+			if callerNode.SourcePath != "" {
+				symName := symPath
+				if idx := strings.LastIndex(symPath, "."); idx >= 0 {
+					symName = symPath[idx+1:]
+				}
+				line = scanTraceRPCMethodLine(resolveTraceRPCPath(projectRoot, callerNode.SourcePath), symName)
+			}
+			result.Callers = append(result.Callers, traceRPCCaller{
+				Language:   traceRPCLanguageFromSourcePath(callerNode.SourcePath),
+				SymbolPath: symPath,
+				File:       callerNode.SourcePath,
+				LineNumber: line,
+				Depth:      1,
+			})
+		}
+	}
+
 	if len(result.Callers) == 0 {
 		result.CallersNote = "No call edges found. The indexer does not emit call edges at this pass, so caller trace is unavailable — absence does not imply the rpc has no callers."
 	}
