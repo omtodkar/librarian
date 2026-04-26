@@ -45,6 +45,17 @@ type Indexer struct {
 	// run is cheaper than threading allocation decisions through the call
 	// graph and makes concurrent access safe by default.
 	pythonPackageCache sync.Map
+
+	// currentBufManifest holds the per-run buf codegen manifest while the
+	// post-graph-pass resolvers run. Populated by IndexProjectGraph just
+	// before buildImplementsRPCEdges and cleared immediately after so no
+	// stale data leaks into a later call. Nil when no buf.gen.yaml was
+	// discovered — the resolver treats nil as "no manifest" and falls
+	// back to name-only matching.
+	//
+	// Kept here rather than added to buildImplementsRPCEdges' signature so
+	// lib-6wz's API stays unchanged — per the lib-4kb scope discipline.
+	currentBufManifest *BufManifest
 }
 
 // SetProgressOverride forces the progress-reporting mode for subsequent
@@ -275,6 +286,22 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 		idx.runAdaptiveGraphPass(files, result, force, progress)
 	}
 	progress.finish()
+
+	// Buf codegen manifest: harvest buf.gen.yaml plugin lists and proto
+	// file-level options (both persisted on code_file graph_node metadata
+	// during the per-file pass) to compute per-proto-file codegen path
+	// prefixes. Runs before the implements_rpc resolver so the resolver can
+	// consult it via idx.currentBufManifest for per-candidate source-path
+	// tightening (lib-4kb). nil manifest means no buf.gen.yaml in the
+	// project — the resolver falls back to lib-6wz's name-only matching
+	// without losing edges.
+	//
+	// The manifest is stashed on the Indexer rather than threaded through
+	// buildImplementsRPCEdges' signature so lib-6wz's resolver API stays
+	// unchanged (scope discipline from the lib-4kb bead). Cleared after
+	// the resolver runs so no stale data leaks into a later invocation.
+	idx.currentBufManifest = idx.buildBufManifest(result)
+	defer func() { idx.currentBufManifest = nil }()
 
 	// Cross-language resolver pass: connect generated-code symbols back to
 	// their proto rpc declarations via naming conventions. Runs after all
@@ -559,6 +586,7 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 		Kind:       store.NodeKindCodeFile,
 		Label:      file.FilePath,
 		SourcePath: file.FilePath,
+		Metadata:   codeFileNodeMetadataJSON(parsed),
 	}); err != nil {
 		return fmt.Errorf("upserting code file node: %w", err)
 	}
@@ -924,6 +952,37 @@ func refMetadataJSON(ref Reference) string {
 	}
 	b.WriteByte('}')
 	return b.String()
+}
+
+// codeFileNodeMetadataJSON filters a parsed.Metadata map down to the keys the
+// graph-pass's code_file node is allowed to carry, then serialises to a
+// sorted-key JSON string. Non-empty only for the handful of files whose
+// handlers stash cross-pass state on ParsedDoc.Metadata:
+//
+//   - "buf_gen"  — buf.gen.yaml plugin list (lib-4kb, config/yaml.go)
+//   - "options"  — proto file-level *_package options (lib-cym, code/proto.go)
+//
+// Both feed the buf manifest builder (buildBufManifest). Any other parsed
+// metadata keys stay off the graph_nodes row — the column is a narrow
+// resolver-input channel, not a dumping ground for handler state that would
+// churn the DB on every reindex.
+//
+// Returns "" (UpsertNode interprets as "{}") when neither key is present so
+// files without relevant metadata don't write a non-trivial metadata string.
+func codeFileNodeMetadataJSON(parsed *ParsedDoc) string {
+	if parsed == nil || len(parsed.Metadata) == 0 {
+		return ""
+	}
+	sub := map[string]any{}
+	for _, k := range []string{"buf_gen", "options"} {
+		if v, ok := parsed.Metadata[k]; ok {
+			sub[k] = v
+		}
+	}
+	if len(sub) == 0 {
+		return ""
+	}
+	return unitMetadataJSON(sub)
 }
 
 // unitMetadataJSON serialises a Unit.Metadata map to the sorted-key JSON

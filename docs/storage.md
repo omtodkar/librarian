@@ -122,6 +122,7 @@ The graph spine is a generic layer: every indexed thing projects into a `graph_n
 | `sym:` | `SymbolNodeID(fqn)` | `sym:com.acme.Auth.validate` |
 | `key:` | `ConfigKeyNodeID(path)` | `key:spring.datasource.url` |
 | `ext:` | `ExternalPackageNodeID(spec)` | `ext:lodash`, `ext:@scope/pkg` |
+| `bufgen:` | `BufManifestNodeID(protoPath)` | `bufgen:api/auth.proto` |
 
 `NodeIDPrefixes()` is the single source of truth; CLI commands that accept user input (`librarian neighbors X`) use it to auto-expand unqualified names.
 
@@ -133,7 +134,33 @@ The graph spine is a generic layer: every indexed thing projects into a `graph_n
 - `import` — code_file → symbol / code_file / external_package (depending on resolver output)
 - `call` — symbol → symbol (reserved; not emitted by any grammar today)
 - `inherits` — symbol → symbol (class / interface / protocol parent relationship). `Edge.Metadata.relation` carries the flavor: `extends`, `implements`, `mixes` (Dart mixins), `conforms` (Swift protocols), `embeds` (Go interface embedding). `extends` and `implements` remain backward-compatible aliases in `graphTargetID` / `graphNodeKindFromRef` for hand-authored edges and pre-lib-wji.1 data, but new extraction emits `inherits`.
-- `implements_rpc` — symbol → symbol (generated-code method → proto rpc declaration). Materialised by the post-graph-pass resolver `buildImplementsRPCEdges` (lib-6wz) via per-language naming conventions: protoc-gen-go/grpc-go emit `pkg.SvcServer.Method` / `pkg.SvcClient.Method` / `pkg.UnimplementedSvcServer.Method`, protoc-gen-dart emits `pkg.SvcClient.methodName` / `pkg.SvcBase.methodName`, @bufbuild/protoc-gen-es emits `pkg.SvcClient.methodName` / `pkg.Svc.methodName`. Phase 3 MVP: conventions-only, accepts false positives (a hand-written `AuthServiceClient.login` still links); lib-4kb tightens via buf.gen.yaml path matching.
+- `implements_rpc` — symbol → symbol (generated-code method → proto rpc declaration). Materialised by the post-graph-pass resolver `buildImplementsRPCEdges` (lib-6wz) via per-language naming conventions: protoc-gen-go/grpc-go emit `pkg.SvcServer.Method` / `pkg.SvcClient.Method` / `pkg.UnimplementedSvcServer.Method`, protoc-gen-dart emits `pkg.SvcClient.methodName` / `pkg.SvcBase.methodName`, @bufbuild/protoc-gen-es emits `pkg.SvcClient.methodName` / `pkg.Svc.methodName`. lib-4kb tightens matching by combining `buf.gen.yaml` plugin out-dirs with per-proto `option *_package` values into a per-proto-file buf manifest (`bufgen:<proto-path>` node, kind `buf_manifest`); each candidate's `source_path` must live under the manifest's language-specific prefix. Missing `buf.gen.yaml` or no prefix for the candidate's language → graceful fallback to lib-6wz's name-only matching for that candidate, so projects without buf still get the lib-6wz behaviour (including its known false positives) unchanged.
+
+### Buf codegen manifest (lib-4kb)
+
+The `buf_manifest` node kind holds per-proto-file codegen path prefixes the `implements_rpc` resolver uses to tighten matching. One node per `.proto` in the project, keyed by `bufgen:<proto-path>`. Metadata shape:
+
+```json
+{
+  "proto_path": "api/auth.proto",
+  "proto_package": "auth",
+  "lang_prefixes": {"go": "gen/go/authpb", "dart": "gen/dart/api", "ts": "gen/ts/api"}
+}
+```
+
+Built by `buildBufManifest` (runs between the per-file graph pass and `buildImplementsRPCEdges`) by combining:
+
+- Per-buf.gen.yaml plugin lists — stashed on the yaml file's `code_file` graph_node metadata under `buf_gen` by the yaml handler on detection of a `buf.gen.yaml` / `buf.gen.yml` filename.
+- Per-proto file-level `option *_package` values — stashed on the proto file's `code_file` graph_node metadata under `options` by the proto grammar's `PostProcess` hook (lib-cym).
+
+Prefix computation per language:
+
+- `go` with `paths=source_relative` → `<out>/<proto-source-dir>`
+- `go` without `paths=source_relative` and with `option go_package` → `<out>/<last-path-segment-of-go_package>`
+- `go` with neither → no prefix (resolver falls back to name-only for this language)
+- `dart`, `ts` → `<out>/<proto-source-dir>` (both generators mirror the source tree regardless of opts)
+
+Absent a `buf.gen.yaml` anywhere in the project, no `buf_manifest` nodes are emitted and the resolver falls back wholesale to lib-6wz's name-only matching.
 
 ### Operations
 
@@ -145,6 +172,7 @@ The graph spine is a generic layer: every indexed thing projects into a `graph_n
 | `Neighbors(id, direction)` | Edges incident to a node (`in` / `out` / both) |
 | `ShortestPath(from, to, maxDepth)` | BFS in Go code (not CTE) — avoids CTE escape hazards from ids containing `%`, `_`, `,` |
 | `ListNodes` / `ListEdges` | Full dump; used by `librarian report` for community detection + centrality |
+| `ListNodesByKindWithMetadataContaining` | Kind-scoped SQL LIKE over `metadata`; backs the buf manifest harvest (`kind=code_file`, substring=`"buf_gen"` or `"options"`) and the implements_rpc rpc-node scan (`kind=symbol`, substring=`"input_type":`). |
 
 ## Vector format
 

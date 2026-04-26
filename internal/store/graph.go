@@ -28,11 +28,12 @@ const (
 // Graph node kinds. Additional kinds will land as new handlers emit richer
 // structural information.
 const (
-	NodeKindDocument  = "document"
-	NodeKindCodeFile  = "code_file"
-	NodeKindSymbol    = "symbol"     // tree-sitter method/class/function nodes
-	NodeKindConfigKey = "config_key" // YAML/TOML/properties key paths
-	NodeKindExternal  = "external"   // external packages (npm, crates.io, PyPI) referenced but not in-project
+	NodeKindDocument    = "document"
+	NodeKindCodeFile    = "code_file"
+	NodeKindSymbol      = "symbol"       // tree-sitter method/class/function nodes
+	NodeKindConfigKey   = "config_key"   // YAML/TOML/properties key paths
+	NodeKindExternal    = "external"     // external packages (npm, crates.io, PyPI) referenced but not in-project
+	NodeKindBufManifest = "buf_manifest" // one per proto file: per-language codegen path prefixes (lib-4kb), consumed by the implements_rpc resolver
 )
 
 // Node is a row in graph_nodes.
@@ -81,18 +82,25 @@ func ConfigKeyNodeID(target string) string { return "key:" + target }
 // them from in-project symbols keeps the sym: namespace clean.
 func ExternalPackageNodeID(spec string) string { return "ext:" + spec }
 
+// BufManifestNodeID returns the stable graph node id for a per-proto-file
+// buf codegen manifest (lib-4kb). Keyed by the proto file's workspace-relative
+// path so each .proto has its own manifest node — a layout that lets the
+// implements_rpc resolver GetNode(BufManifestNodeID(protoPath)) directly when
+// tightening candidate matches.
+func BufManifestNodeID(protoPath string) string { return "bufgen:" + protoPath }
+
 // NodeIDPrefixes returns the namespaced id prefixes used by the built-in node
 // id constructors. Callers that resolve user input against all known node
 // kinds (e.g. the CLI's resolveNode) iterate this list rather than hardcoding
 // a parallel copy.
 func NodeIDPrefixes() []string {
-	return []string{"doc:", "file:", "sym:", "key:", "ext:"}
+	return []string{"doc:", "file:", "sym:", "key:", "ext:", "bufgen:"}
 }
 
 // NodeKinds returns every built-in node kind. Used by the orphan sweep
 // command to expand --kinds=all without hardcoding a parallel copy.
 func NodeKinds() []string {
-	return []string{NodeKindDocument, NodeKindCodeFile, NodeKindSymbol, NodeKindConfigKey, NodeKindExternal}
+	return []string{NodeKindDocument, NodeKindCodeFile, NodeKindSymbol, NodeKindConfigKey, NodeKindExternal, NodeKindBufManifest}
 }
 
 // UpsertNode inserts or updates a graph node. Idempotent — safe to call on
@@ -268,15 +276,27 @@ func (s *Store) ListNodes() ([]Node, error) {
 // `"input_type":` substring — the proto grammar is the sole emitter of
 // that key on symbol metadata). Cheaper than ListNodes + in-Go filter
 // because the LIKE predicate pushes the scan into SQLite.
+//
+// Thin wrapper over ListNodesByKindWithMetadataContaining kept for
+// backwards compatibility with existing callers.
 func (s *Store) ListSymbolNodesWithMetadataContaining(substring string) ([]Node, error) {
+	return s.ListNodesByKindWithMetadataContaining(NodeKindSymbol, substring)
+}
+
+// ListNodesByKindWithMetadataContaining is the kind-parameterised form of the
+// symbol-only helper above. Used by the buf manifest builder (lib-4kb) to
+// pull every code_file node whose metadata stashes either a buf.gen.yaml
+// plugin list or a proto file's `option *_package` map — two different
+// substring markers ("buf_gen" / "options") against the same kind filter.
+func (s *Store) ListNodesByKindWithMetadataContaining(kind, substring string) ([]Node, error) {
 	like := "%" + likeEscaper.Replace(substring) + "%"
 	rows, err := s.db.Query(`
 		SELECT id, kind, label, source_path, metadata
 		FROM graph_nodes
 		WHERE kind = ? AND metadata LIKE ? ESCAPE '\'`,
-		NodeKindSymbol, like)
+		kind, like)
 	if err != nil {
-		return nil, fmt.Errorf("list_symbol_nodes_with_metadata: %w", err)
+		return nil, fmt.Errorf("list_nodes_by_kind_with_metadata: %w", err)
 	}
 	defer rows.Close()
 	var out []Node
@@ -284,7 +304,7 @@ func (s *Store) ListSymbolNodesWithMetadataContaining(substring string) ([]Node,
 		var n Node
 		var sp sql.NullString
 		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
-			return nil, fmt.Errorf("list_symbol_nodes_with_metadata scan: %w", err)
+			return nil, fmt.Errorf("list_nodes_by_kind_with_metadata scan: %w", err)
 		}
 		if sp.Valid {
 			n.SourcePath = sp.String

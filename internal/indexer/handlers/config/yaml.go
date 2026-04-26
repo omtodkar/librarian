@@ -57,6 +57,16 @@ func (*YAMLHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, erro
 		root = *root.Content[0]
 	}
 
+	// Buf codegen config gets a semantic pass alongside the normal key-path
+	// Units so the implements_rpc resolver (lib-4kb) can learn where each
+	// plugin outputs. Attached as a structured slice rather than reserialised
+	// YAML so the graph pass can JSON-marshal it without re-parsing.
+	if IsBufGenFile(path) {
+		if plugins := ParseBufGenPlugins(&root); len(plugins) > 0 {
+			doc.Metadata["buf_gen"] = plugins
+		}
+	}
+
 	// Mapping root: per top-level key Units. Other roots: single Unit.
 	if root.Kind != yaml.MappingNode || len(root.Content)%2 != 0 {
 		doc.Units = []indexer.Unit{{
@@ -107,7 +117,6 @@ func (*YAMLHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, erro
 func (*YAMLHandler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	return chunkFromUnits(doc, opts), nil
 }
-
 
 // gatherComments concatenates head / line / foot comments from a key/value pair
 // into a single string for signal extraction. Empty if no comments.
