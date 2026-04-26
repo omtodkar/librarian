@@ -271,19 +271,26 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 
 	progress := newIndexProgress(len(files), idx.progressMode())
 
+	// affected accumulates source_paths of files that held cross-file edges
+	// into any reindexed file's symbols. After the parallel pass completes,
+	// those files are force-reindexed serially in runGraphWorkers to reconstitute
+	// edges that DeleteSymbolsForFile's FK cascade destroyed. Using a sync.Map
+	// lets workers write concurrently without a mutex in the hot path.
+	var affected sync.Map
+
 	configuredWorkers := idx.cfg.Graph.MaxWorkers
 	switch {
 	case configuredWorkers >= 1:
 		// Explicit worker count from config/CLI.
-		idx.runGraphWorkers(files, result, force, configuredWorkers, progress)
+		idx.runGraphWorkers(files, result, force, configuredWorkers, progress, &affected)
 	case len(files) < graphParallelismThreshold:
 		// Small project: serial, no sampling overhead.
-		idx.runGraphWorkers(files, result, force, 1, progress)
+		idx.runGraphWorkers(files, result, force, 1, progress, &affected)
 	default:
 		// Auto mode on a non-trivial file count: sample the first few
 		// files to measure per-file wall time, then parallelize the rest
 		// with a worker count sized to the measured cost profile.
-		idx.runAdaptiveGraphPass(files, result, force, progress)
+		idx.runAdaptiveGraphPass(files, result, force, progress, &affected)
 	}
 	progress.finish()
 
@@ -400,7 +407,7 @@ func capWorkers(requested int) int {
 //     workers for the remainder. Only include actually-parsed files
 //     when computing the per-file average; if none parsed, fall back to
 //     the full worker cap because we have no cost signal to go on.
-func (idx *Indexer) runAdaptiveGraphPass(files []WalkResult, shared *GraphResult, force bool, progress *indexProgress) {
+func (idx *Indexer) runAdaptiveGraphPass(files []WalkResult, shared *GraphResult, force bool, progress *indexProgress, affected *sync.Map) {
 	sampleSize := adaptiveSampleSize
 	if sampleSize > len(files) {
 		sampleSize = len(files)
@@ -416,7 +423,7 @@ func (idx *Indexer) runAdaptiveGraphPass(files []WalkResult, shared *GraphResult
 	for i := 0; i < sampleSize; i++ {
 		file := files[i]
 		t0 := time.Now()
-		err := idx.indexGraphFile(file, sample, force)
+		err := idx.indexGraphFile(file, sample, force, affected)
 		parsedElapsed += time.Since(t0)
 		if err != nil {
 			sample.Errors = append(sample.Errors, fmt.Sprintf("%s: %s", file.FilePath, err))
@@ -440,7 +447,7 @@ func (idx *Indexer) runAdaptiveGraphPass(files []WalkResult, shared *GraphResult
 		avgPerFile := parsedElapsed / time.Duration(sample.FilesScanned)
 		workers = adaptiveWorkersForAvg(avgPerFile)
 	}
-	idx.runGraphWorkers(files[sampleSize:], shared, force, workers, progress)
+	idx.runGraphWorkers(files[sampleSize:], shared, force, workers, progress, affected)
 }
 
 // mergeGraphResult adds src's counters and errors into dst. Shared between
@@ -463,6 +470,13 @@ func mergeGraphResult(dst, src *GraphResult) {
 // under one lock. The progress reporter is shared across workers; its
 // internal mutex serialises ticks.
 //
+// After the parallel pass, a serial reconstitution post-pass iterates the
+// paths collected in `affected` and force-reindexes each one via
+// indexGraphFileDirect. This restores cross-file edges that
+// DeleteSymbolsForFile's FK cascade destroyed during the parallel walk.
+// Affected paths from the adaptive sample phase (populated before this
+// function is called) are included in the same sweep.
+//
 // Falls through to a straight serial loop when workers <= 1 — same cost as
 // the pre-parallel code path, no goroutine overhead.
 //
@@ -473,52 +487,72 @@ func mergeGraphResult(dst, src *GraphResult) {
 //     shared AST state across workers.
 //   - os.ReadFile, sha256.Sum256, regexp.Regexp.Match (isGeneratedFile)
 //     are all stateless.
-func (idx *Indexer) runGraphWorkers(files []WalkResult, shared *GraphResult, force bool, workers int, progress *indexProgress) {
+//   - affected is a *sync.Map; concurrent Store calls from workers are safe.
+func (idx *Indexer) runGraphWorkers(files []WalkResult, shared *GraphResult, force bool, workers int, progress *indexProgress, affected *sync.Map) {
 	if workers <= 1 {
 		for _, file := range files {
-			err := idx.indexGraphFile(file, shared, force)
+			err := idx.indexGraphFile(file, shared, force, affected)
 			if err != nil {
 				shared.Errors = append(shared.Errors, fmt.Sprintf("%s: %s", file.FilePath, err))
 				shared.FilesErrored++
 			}
 			progress.tick(file.FilePath, err != nil)
 		}
-		return
-	}
+	} else {
+		jobs := make(chan WalkResult, workers)
+		locals := make([]*GraphResult, workers)
 
-	jobs := make(chan WalkResult, workers)
-	locals := make([]*GraphResult, workers)
-
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		local := &GraphResult{}
-		locals[w] = local
-		go func(local *GraphResult) {
-			defer wg.Done()
-			for file := range jobs {
-				err := idx.indexGraphFile(file, local, force)
-				if err != nil {
-					local.Errors = append(local.Errors, fmt.Sprintf("%s: %s", file.FilePath, err))
-					local.FilesErrored++
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			local := &GraphResult{}
+			locals[w] = local
+			go func(local *GraphResult) {
+				defer wg.Done()
+				for file := range jobs {
+					err := idx.indexGraphFile(file, local, force, affected)
+					if err != nil {
+						local.Errors = append(local.Errors, fmt.Sprintf("%s: %s", file.FilePath, err))
+						local.FilesErrored++
+					}
+					progress.tick(file.FilePath, err != nil)
 				}
-				progress.tick(file.FilePath, err != nil)
-			}
-		}(local)
+			}(local)
+		}
+
+		for _, f := range files {
+			jobs <- f
+		}
+		close(jobs)
+		wg.Wait()
+
+		// Merge locals into the shared result. Per-counter sums are correct
+		// because each worker only touched its own local; the shared result
+		// carried zeroes in (caller checks after we return).
+		for _, local := range locals {
+			mergeGraphResult(shared, local)
+		}
 	}
 
-	for _, f := range files {
-		jobs <- f
-	}
-	close(jobs)
-	wg.Wait()
-
-	// Merge locals into the shared result. Per-counter sums are correct
-	// because each worker only touched its own local; the shared result
-	// carried zeroes in (caller checks after we return).
-	for _, local := range locals {
-		mergeGraphResult(shared, local)
-	}
+	// Serial reconstitution post-pass: force-reindex every file that held a
+	// cross-file edge into a reindexed file's symbols. All parallel work has
+	// landed at this point, so the DB reflects the freshly projected symbols
+	// and the reconstitution writes are safe to do sequentially.
+	// indexGraphFileDirect is used (not indexGraphFile) so this pass does not
+	// itself collect new affected paths or trigger another reconstitution round.
+	affected.Range(func(key, _ any) bool {
+		affPath := key.(string)
+		affFile := WalkResult{
+			FilePath: affPath,
+			AbsPath:  filepath.Join(idx.cfg.ProjectRoot, affPath),
+		}
+		dummy := &GraphResult{}
+		if err := idx.indexGraphFileDirect(affFile, dummy, true); err != nil {
+			shared.Errors = append(shared.Errors, fmt.Sprintf("reconstitute %s: %s", affPath, err))
+		}
+		mergeGraphResult(shared, dummy)
+		return true
+	})
 }
 
 // docsPassFormats is the set of handler.Name() values the graph pass skips
@@ -532,24 +566,18 @@ var docsPassFormats = map[string]bool{
 	"pdf":      true,
 }
 
-// indexGraphFile runs one file through the graph pass and reconstitutes
-// cross-file edges that were dropped by the FK cascade during symbol deletion.
+// indexGraphFile runs one file through the graph pass and records any
+// source_paths that hold cross-file edges into this file's symbols in
+// `affected`. The caller (runGraphWorkers) drains `affected` in a serial
+// post-pass after all parallel workers complete, force-reindexing those files
+// to reconstitute edges that DeleteSymbolsForFile's FK cascade destroyed.
 //
-// When a file is reindexed, DeleteSymbolsForFile removes its symbol nodes and
-// the cascade drops ALL incident edges — including edges FROM other files that
-// pointed TO this file's symbols. Those other files are never reindexed (their
-// content hash is unchanged), so their edges are permanently lost without this
-// reconstitution step.
-//
-// indexGraphFile solves this by:
-//  1. Collecting the source_paths of nodes with edges into this file's symbols
-//     BEFORE the symbol deletion cascade destroys those edges.
-//  2. Delegating the actual per-file work to indexGraphFileDirect.
-//  3. Force-reindexing each affected file via indexGraphFileDirect (NOT
-//     indexGraphFile) so the reconstitution does not recurse.
-func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force bool) error {
-	// Read content and compute hash up front so we can short-circuit without
-	// querying the store for files that will clearly be skipped.
+// Affected paths are collected only when the file will actually be reindexed
+// (i.e., after the hash gate and generated-file detection). `affected` is a
+// *sync.Map so concurrent workers can write to it without a mutex.
+func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force bool, affected *sync.Map) error {
+	// Read content and compute hash up front to short-circuit without a store
+	// query for files that will clearly be skipped.
 	handler := idx.registry.HandlerFor(file.FilePath)
 	if handler == nil {
 		return nil
@@ -560,41 +588,26 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 	}
 	hash := computeHash(string(content))
 
-	existing, _ := idx.store.GetCodeFileByPath(file.FilePath)
+	existing, err := idx.store.GetCodeFileByPath(file.FilePath)
+	if err != nil {
+		return fmt.Errorf("checking existing code file: %w", err)
+	}
 	willSkip := existing != nil && !force && existing.ContentHash == hash
 	willSkipGenerated := !willSkip && idx.cfg.Graph.DetectGenerated && isGeneratedFile(content)
 
-	// Collect affected paths only when we'll actually reindex (not skip).
-	// This avoids the query for unchanged files and generated-file cleanup.
-	var affected []string
+	// Collect affected paths only when we'll actually reindex (after skip gates)
+	// so we don't pay the query cost for unchanged or generated files.
 	if !willSkip && !willSkipGenerated {
 		if paths, qerr := idx.store.AffectedSourcePathsForFile(file.FilePath); qerr != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: affected-paths query: %s", file.FilePath, qerr))
 		} else {
-			affected = paths
+			for _, p := range paths {
+				affected.Store(p, struct{}{})
+			}
 		}
 	}
 
-	if err := idx.indexGraphFileDirect(file, result, force); err != nil {
-		return err
-	}
-
-	// Reconstitute cross-file edges for every file that held an edge into this
-	// file's (now-refreshed) symbols. indexGraphFileDirect is used — not
-	// indexGraphFile — so the reconstitution does not trigger another round.
-	for _, affPath := range affected {
-		affFile := WalkResult{
-			FilePath: affPath,
-			AbsPath:  filepath.Join(idx.cfg.ProjectRoot, affPath),
-		}
-		dummy := &GraphResult{}
-		if rerr := idx.indexGraphFileDirect(affFile, dummy, true); rerr != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("reconstitute %s: %s", affPath, rerr))
-		}
-		mergeGraphResult(result, dummy)
-	}
-
-	return nil
+	return idx.indexGraphFileDirect(file, result, force)
 }
 
 // indexGraphFileDirect runs one file through the graph pass without triggering
@@ -628,7 +641,10 @@ func (idx *Indexer) indexGraphFileDirect(file WalkResult, result *GraphResult, f
 
 	hash := computeHash(string(content))
 
-	existing, _ := idx.store.GetCodeFileByPath(file.FilePath)
+	existing, err := idx.store.GetCodeFileByPath(file.FilePath)
+	if err != nil {
+		return fmt.Errorf("checking existing code file: %w", err)
+	}
 	if existing != nil && !force && existing.ContentHash == hash {
 		result.FilesSkipped++
 		return nil

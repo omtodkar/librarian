@@ -238,6 +238,17 @@ The per-run CLI override `--workers N` on `librarian index` takes the same value
 
 Writes to SQLite serialise via the connection mutex, so the upper-cap of 8 is where extra workers start queuing on the DB lock without gaining throughput. Symbol and edge counts produced by parallel or adaptive runs are identical to serial runs (idempotent `UpsertNode` / `UpsertEdge` + per-worker-local counters merged at the end).
 
+### Cross-file edge reconstitution
+
+`graph_edges` has `ON DELETE CASCADE` on `graph_nodes.id`. When a file is reindexed, `DeleteSymbolsForFile` removes its stale symbol nodes and the cascade drops all incident edges — including edges from *other unchanged files* that pointed at the reindexed file's symbols. Because unchanged files are hash-skipped and never reindexed, those cross-file edges would be permanently lost.
+
+The graph pass handles this via a **serial reconstitution post-pass** that runs after all parallel workers complete:
+
+1. **Collection phase** (parallel): each worker calls `AffectedSourcePathsForFile` before the symbol deletion and records the `source_path` values of nodes with edges into the file's symbols into a shared `sync.Map`.
+2. **Reconstitution phase** (serial, after `wg.Wait()`): each collected path is force-reindexed via the core per-file logic (`indexGraphFileDirect`). This replays the file's edges against the freshly projected symbols of the upstream file.
+
+The reconstitution phase is serial to avoid racing on the same downstream file from multiple reconstitution goroutines. It uses `indexGraphFileDirect` (not the collection-aware `indexGraphFile`) so the post-pass does not itself trigger another reconstitution round.
+
 See [Configuration](configuration.md#graph) for the full config schema.
 
 ### Incremental graph indexing

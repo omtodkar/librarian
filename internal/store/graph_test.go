@@ -342,3 +342,87 @@ func TestGraph_Neighbors_KindFilter(t *testing.T) {
 		t.Errorf("part filter = %+v, want single part edge", parts)
 	}
 }
+
+// TestAffectedSourcePathsForFile pins the three behavioural guarantees of
+// AffectedSourcePathsForFile: empty result when no cross-file edges exist,
+// correct multi-file results when multiple other files hold edges, and
+// self-exclusion (the queried file's own path never appears in the result).
+func TestAffectedSourcePathsForFile(t *testing.T) {
+	t.Run("empty when no edges", func(t *testing.T) {
+		s := newTestStore(t)
+		// base.py has a symbol but no edges connecting it to any other file.
+		s.UpsertNode(Node{ID: "file:base.py", Kind: NodeKindCodeFile, SourcePath: "base.py"})
+		s.UpsertNode(Node{ID: "sym:base.Base", Kind: NodeKindSymbol, SourcePath: "base.py"})
+		s.UpsertEdge(Edge{From: "file:base.py", To: "sym:base.Base", Kind: EdgeKindContains})
+
+		paths, err := s.AffectedSourcePathsForFile("base.py")
+		if err != nil {
+			t.Fatalf("AffectedSourcePathsForFile: %v", err)
+		}
+		if len(paths) != 0 {
+			t.Errorf("expected empty result, got %v", paths)
+		}
+	})
+
+	t.Run("returns multiple affected files", func(t *testing.T) {
+		s := newTestStore(t)
+		// base.py defines sym:base.Base; child_a.py and child_b.py both inherit.
+		s.UpsertNode(Node{ID: "sym:base.Base", Kind: NodeKindSymbol, SourcePath: "base.py"})
+		s.UpsertNode(Node{ID: "sym:child_a.ChildA", Kind: NodeKindSymbol, SourcePath: "child_a.py"})
+		s.UpsertNode(Node{ID: "sym:child_b.ChildB", Kind: NodeKindSymbol, SourcePath: "child_b.py"})
+		// Both children have inherits edges pointing at base.py's symbol.
+		s.UpsertEdge(Edge{From: "sym:child_a.ChildA", To: "sym:base.Base", Kind: EdgeKindInherits})
+		s.UpsertEdge(Edge{From: "sym:child_b.ChildB", To: "sym:base.Base", Kind: EdgeKindInherits})
+
+		paths, err := s.AffectedSourcePathsForFile("base.py")
+		if err != nil {
+			t.Fatalf("AffectedSourcePathsForFile: %v", err)
+		}
+		got := make(map[string]bool, len(paths))
+		for _, p := range paths {
+			got[p] = true
+		}
+		for _, want := range []string{"child_a.py", "child_b.py"} {
+			if !got[want] {
+				t.Errorf("expected %s in result; got %v", want, paths)
+			}
+		}
+		if len(paths) != 2 {
+			t.Errorf("expected 2 paths, got %d: %v", len(paths), paths)
+		}
+	})
+
+	t.Run("self-exclusion", func(t *testing.T) {
+		s := newTestStore(t)
+		// both.py has symbols that form an intra-file edge (e.g. contains).
+		// The file's own source_path must never appear in the result.
+		s.UpsertNode(Node{ID: "file:both.py", Kind: NodeKindCodeFile, SourcePath: "both.py"})
+		s.UpsertNode(Node{ID: "sym:both.Parent", Kind: NodeKindSymbol, SourcePath: "both.py"})
+		s.UpsertNode(Node{ID: "sym:both.Child", Kind: NodeKindSymbol, SourcePath: "both.py"})
+		s.UpsertEdge(Edge{From: "file:both.py", To: "sym:both.Parent", Kind: EdgeKindContains})
+		s.UpsertEdge(Edge{From: "sym:both.Child", To: "sym:both.Parent", Kind: EdgeKindInherits})
+		// Also a cross-file edge to confirm the query still returns other files.
+		s.UpsertNode(Node{ID: "sym:other.X", Kind: NodeKindSymbol, SourcePath: "other.py"})
+		s.UpsertEdge(Edge{From: "sym:other.X", To: "sym:both.Parent", Kind: EdgeKindInherits})
+
+		paths, err := s.AffectedSourcePathsForFile("both.py")
+		if err != nil {
+			t.Fatalf("AffectedSourcePathsForFile: %v", err)
+		}
+		for _, p := range paths {
+			if p == "both.py" {
+				t.Errorf("self-exclusion failed: both.py appears in result %v", paths)
+			}
+		}
+		// other.py must be present.
+		found := false
+		for _, p := range paths {
+			if p == "other.py" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected other.py in result; got %v", paths)
+		}
+	})
+}
