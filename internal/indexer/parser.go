@@ -214,15 +214,10 @@ func extractText(node ast.Node, source []byte) string {
 }
 
 func extractInlineText(node ast.Node, source []byte, buf *bytes.Buffer) {
-	// Only block-level nodes support Lines(); inline nodes panic
-	if node.Type() == ast.TypeBlock {
-		for i := 0; i < node.Lines().Len(); i++ {
-			line := node.Lines().At(i)
-			buf.Write(line.Value(source))
-		}
-	}
-
-	// Recurse into children
+	// Walk inline children only. Block-level Lines() are intentionally skipped:
+	// heading nodes have both Lines() (raw source) and inline child Text/Code
+	// nodes (parsed content) for the same text — writing both doubles the heading.
+	// extractBlockText has its own Lines() loop for block contexts.
 	for child := node.FirstChild(); child != nil; child = child.NextSibling() {
 		if t, ok := child.(*ast.Text); ok {
 			buf.Write(t.Segment.Value(source))
