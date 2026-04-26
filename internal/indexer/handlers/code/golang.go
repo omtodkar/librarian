@@ -3,8 +3,8 @@ package code
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/golang"
+	sitter "github.com/tree-sitter/go-tree-sitter"
+	"github.com/tree-sitter/tree-sitter-go/bindings/go"
 
 	"librarian/internal/indexer"
 )
@@ -26,7 +26,7 @@ func NewGoGrammar() *GoGrammar { return &GoGrammar{} }
 
 func (*GoGrammar) Name() string                   { return "go" }
 func (*GoGrammar) Extensions() []string           { return []string{".go"} }
-func (*GoGrammar) Language() *sitter.Language     { return golang.GetLanguage() }
+func (*GoGrammar) Language() *sitter.Language     { return sitter.NewLanguage(tree_sitter_go.Language()) }
 func (*GoGrammar) CommentNodeTypes() []string     { return []string{"comment"} }
 func (*GoGrammar) DocstringFromNode(*sitter.Node, []byte) string { return "" }
 
@@ -54,11 +54,11 @@ func (*GoGrammar) ContainerKinds() map[string]bool {
 // and methods have an identifier under field "name"; type_spec / type_alias
 // nodes have their name under "name" as well.
 func (*GoGrammar) SymbolName(n *sitter.Node, source []byte) string {
-	switch n.Type() {
+	switch n.Kind() {
 	case "function_declaration", "method_declaration",
 		"type_spec", "type_alias":
 		if name := n.ChildByFieldName("name"); name != nil {
-			return name.Content(source)
+			return name.Utf8Text(source)
 		}
 	}
 	return ""
@@ -66,15 +66,15 @@ func (*GoGrammar) SymbolName(n *sitter.Node, source []byte) string {
 
 // PackageName returns the file's package identifier, or "" if none.
 func (*GoGrammar) PackageName(root *sitter.Node, source []byte) string {
-	for i := 0; i < int(root.NamedChildCount()); i++ {
+	for i := uint(0); i < root.NamedChildCount(); i++ {
 		c := root.NamedChild(i)
-		if c == nil || c.Type() != "package_clause" {
+		if c == nil || c.Kind() != "package_clause" {
 			continue
 		}
-		for j := 0; j < int(c.NamedChildCount()); j++ {
+		for j := uint(0); j < c.NamedChildCount(); j++ {
 			cc := c.NamedChild(j)
-			if cc != nil && cc.Type() == "package_identifier" {
-				return cc.Content(source)
+			if cc != nil && cc.Kind() == "package_identifier" {
+				return cc.Utf8Text(source)
 			}
 		}
 	}
@@ -94,11 +94,11 @@ func (*GoGrammar) PackageName(root *sitter.Node, source []byte) string {
 // any Unit with Kind="type" (per classFamilyUnitKinds gating) but only
 // interface embedding yields parents.
 func (*GoGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
-	if n.Type() != "type_spec" {
+	if n.Kind() != "type_spec" {
 		return nil
 	}
 	typeField := n.ChildByFieldName("type")
-	if typeField == nil || typeField.Type() != "interface_type" {
+	if typeField == nil || typeField.Kind() != "interface_type" {
 		return nil
 	}
 	return goInterfaceEmbeddings(typeField, source)
@@ -123,23 +123,23 @@ func goInterfaceEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 			Loc:      loc,
 		})
 	}
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
 		loc := indexer.Location{
-			Line:       int(c.StartPoint().Row) + 1,
-			Column:     int(c.StartPoint().Column) + 1,
+			Line:       int(c.StartPosition().Row) + 1,
+			Column:     int(c.StartPosition().Column) + 1,
 			ByteOffset: int(c.StartByte()),
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "method_elem", "method_spec":
 			// Interface's own method set — not embedding.
 		case "type_identifier":
-			add(c.Content(source), loc)
+			add(c.Utf8Text(source), loc)
 		case "qualified_type":
-			add(c.Content(source), loc)
+			add(c.Utf8Text(source), loc)
 		case "type_elem":
 			// Go 1.18+ grammar variant: a type_elem wraps the embedded
 			// type. Only treat it as embedding when it wraps exactly one
@@ -153,13 +153,13 @@ func goInterfaceEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 				continue
 			}
 			innerLoc := indexer.Location{
-				Line:       int(inner.StartPoint().Row) + 1,
-				Column:     int(inner.StartPoint().Column) + 1,
+				Line:       int(inner.StartPosition().Row) + 1,
+				Column:     int(inner.StartPosition().Column) + 1,
 				ByteOffset: int(inner.StartByte()),
 			}
-			switch inner.Type() {
+			switch inner.Kind() {
 			case "type_identifier", "qualified_type":
-				add(inner.Content(source), innerLoc)
+				add(inner.Utf8Text(source), innerLoc)
 			}
 		}
 	}
@@ -176,15 +176,15 @@ func goInterfaceEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 func (*GoGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
-		if n.Type() != "import_spec" {
+		if n.Kind() != "import_spec" {
 			return true
 		}
 		ref := ImportRef{}
 		if path := n.ChildByFieldName("path"); path != nil {
-			ref.Path = strings.Trim(path.Content(source), "\"`")
+			ref.Path = strings.Trim(path.Utf8Text(source), "\"`")
 		}
 		if name := n.ChildByFieldName("name"); name != nil {
-			ref.Alias = name.Content(source)
+			ref.Alias = name.Utf8Text(source)
 		}
 		if ref.Path != "" {
 			out = append(out, ref)

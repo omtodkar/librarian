@@ -13,10 +13,11 @@ package code
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 
 	"librarian/internal/indexer"
 )
@@ -299,11 +300,13 @@ func (h *CodeHandler) Parse(path string, content []byte) (*indexer.ParsedDoc, er
 func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseContext) (*indexer.ParsedDoc, error) {
 	parser := sitter.NewParser()
 	defer parser.Close()
-	parser.SetLanguage(h.grammar.Language())
-
-	tree, err := parser.ParseCtx(context.Background(), nil, content)
-	if err != nil {
+	if err := parser.SetLanguage(h.grammar.Language()); err != nil {
 		return nil, err
+	}
+
+	tree := parser.ParseCtx(context.Background(), content, nil)
+	if tree == nil {
+		return nil, fmt.Errorf("parse returned nil tree (language load or ABI mismatch)")
 	}
 	defer tree.Close()
 
@@ -407,12 +410,12 @@ func (h *CodeHandler) extractUnits(
 ) []*sitter.Node {
 	pending := inheritedPending
 
-	for i := 0; i < int(node.NamedChildCount()); i++ {
+	for i := uint(0); i < node.NamedChildCount(); i++ {
 		child := node.NamedChild(i)
 		if child == nil {
 			continue
 		}
-		typ := child.Type()
+		typ := child.Kind()
 
 		if commentSet[typ] {
 			// Restart the buffer if this comment is separated from the
@@ -517,14 +520,14 @@ func (h *CodeHandler) buildUnit(
 
 	var docLines []string
 	for _, c := range pendingComments {
-		docLines = append(docLines, stripCommentMarkers(c.Content(source)))
+		docLines = append(docLines, stripCommentMarkers(c.Utf8Text(source)))
 	}
 	if inner := h.grammar.DocstringFromNode(n, source); inner != "" {
 		docLines = append(docLines, inner)
 	}
 	docstring := strings.TrimSpace(strings.Join(docLines, "\n"))
 
-	body := n.Content(source)
+	body := n.Utf8Text(source)
 	content := body
 	if docstring != "" {
 		content = docstring + "\n\n" + body
@@ -536,8 +539,8 @@ func (h *CodeHandler) buildUnit(
 		Path:    path,
 		Content: content,
 		Loc: indexer.Location{
-			Line:       int(n.StartPoint().Row) + 1,
-			Column:     int(n.StartPoint().Column) + 1,
+			Line:       int(n.StartPosition().Row) + 1,
+			Column:     int(n.StartPosition().Column) + 1,
 			ByteOffset: int(n.StartByte()),
 		},
 	}
@@ -712,9 +715,9 @@ func resolveInheritsRefs(refs []indexer.Reference, local map[string]string) []in
 // annotations, and access/mutation modifiers in a shared `modifiers` node
 // whose presence is optional.
 func modifiersNode(n *sitter.Node) *sitter.Node {
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
-		if c != nil && c.Type() == "modifiers" {
+		if c != nil && c.Kind() == "modifiers" {
 			return c
 		}
 	}
@@ -751,8 +754,8 @@ func (h *CodeHandler) extractImports(root *sitter.Node, source []byte, doc *inde
 func extractAllCommentSignals(root *sitter.Node, source []byte, commentSet map[string]bool) []indexer.Signal {
 	var all strings.Builder
 	walk(root, func(n *sitter.Node) bool {
-		if commentSet[n.Type()] {
-			all.WriteString(stripCommentMarkers(n.Content(source)))
+		if commentSet[n.Kind()] {
+			all.WriteString(stripCommentMarkers(n.Utf8Text(source)))
 			all.WriteByte('\n')
 			return false
 		}
@@ -766,7 +769,7 @@ func extractAllCommentSignals(root *sitter.Node, source []byte, commentSet map[s
 // emit whitespace nodes, so this is the only way to detect blank-line breaks
 // between comment groups.
 func commentsAreConsecutive(a, b *sitter.Node) bool {
-	return int(b.StartPoint().Row) <= int(a.EndPoint().Row)+1
+	return int(b.StartPosition().Row) <= int(a.EndPosition().Row)+1
 }
 
 // stripCommentMarkers removes common comment leaders from a raw comment
@@ -796,7 +799,7 @@ func walk(root *sitter.Node, visit func(*sitter.Node) bool) {
 	if root == nil || !visit(root) {
 		return
 	}
-	for i := 0; i < int(root.ChildCount()); i++ {
+	for i := uint(0); i < root.ChildCount(); i++ {
 		walk(root.Child(i), visit)
 	}
 }
@@ -810,7 +813,7 @@ func walk(root *sitter.Node, visit func(*sitter.Node) bool) {
 func findAncestor(n *sitter.Node, types ...string) *sitter.Node {
 	for p := n.Parent(); p != nil; p = p.Parent() {
 		for _, t := range types {
-			if p.Type() == t {
+			if p.Kind() == t {
 				return p
 			}
 		}

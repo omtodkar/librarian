@@ -3,10 +3,10 @@ package code
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/swift"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 
 	"librarian/internal/indexer"
+	"librarian/internal/indexer/handlers/code/tree_sitter_swift"
 )
 
 // SwiftGrammar indexes .swift source files.
@@ -43,7 +43,7 @@ func NewSwiftGrammar() *SwiftGrammar { return &SwiftGrammar{} }
 
 func (*SwiftGrammar) Name() string               { return "swift" }
 func (*SwiftGrammar) Extensions() []string       { return []string{".swift"} }
-func (*SwiftGrammar) Language() *sitter.Language { return swift.GetLanguage() }
+func (*SwiftGrammar) Language() *sitter.Language { return sitter.NewLanguage(tree_sitter_swift.Language()) }
 
 func (*SwiftGrammar) CommentNodeTypes() []string {
 	return []string{"comment", "multiline_comment"}
@@ -79,8 +79,8 @@ func (*SwiftGrammar) ContainerKinds() map[string]bool {
 // SymbolKindFor refines Kind for Swift's lumped class_declaration via the
 // anonymous keyword child. Returns "" for other node types to leave the
 // walker's existing Kind intact.
-func (g *SwiftGrammar) SymbolKindFor(n *sitter.Node, source []byte, declaredKind string) string {
-	if n.Type() != "class_declaration" {
+func (g *SwiftGrammar) SymbolKindFor(n *sitter.Node, _ []byte, _ string) string {
+	if n.Kind() != "class_declaration" {
 		return ""
 	}
 	return swiftClassFlavor(n)
@@ -115,24 +115,24 @@ func swiftClassFlavor(n *sitter.Node) string {
 // For function / init / property / protocol requirements: standard
 // simple_identifier.
 func (*SwiftGrammar) SymbolName(n *sitter.Node, source []byte) string {
-	switch n.Type() {
+	switch n.Kind() {
 	case "class_declaration":
 		if swiftClassFlavor(n) == "extension" {
 			return swiftExtensionTargetName(n, source)
 		}
 		// Regular class / struct / enum — name is a type_identifier.
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c != nil && c.Type() == "type_identifier" {
-				return strings.TrimSpace(c.Content(source))
+			if c != nil && c.Kind() == "type_identifier" {
+				return strings.TrimSpace(c.Utf8Text(source))
 			}
 		}
 	case "protocol_declaration", "typealias_declaration",
 		"associatedtype_declaration":
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c != nil && c.Type() == "type_identifier" {
-				return strings.TrimSpace(c.Content(source))
+			if c != nil && c.Kind() == "type_identifier" {
+				return strings.TrimSpace(c.Utf8Text(source))
 			}
 		}
 	case "subscript_declaration":
@@ -144,10 +144,10 @@ func (*SwiftGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		return "subscript"
 	case "function_declaration", "protocol_function_declaration",
 		"protocol_property_declaration":
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c != nil && c.Type() == "simple_identifier" {
-				return c.Content(source)
+			if c != nil && c.Kind() == "simple_identifier" {
+				return c.Utf8Text(source)
 			}
 		}
 	case "init_declaration":
@@ -161,21 +161,21 @@ func (*SwiftGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		// as a simple_identifier child depending on the declaration
 		// shape. Dig one level: pattern → simple_identifier. If no
 		// pattern, look at direct simple_identifier.
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			if c.Type() == "pattern" {
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+			if c.Kind() == "pattern" {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					cc := c.NamedChild(j)
-					if cc != nil && cc.Type() == "simple_identifier" {
-						return cc.Content(source)
+					if cc != nil && cc.Kind() == "simple_identifier" {
+						return cc.Utf8Text(source)
 					}
 				}
 			}
-			if c.Type() == "simple_identifier" {
-				return c.Content(source)
+			if c.Kind() == "simple_identifier" {
+				return c.Utf8Text(source)
 			}
 		}
 	}
@@ -197,7 +197,7 @@ func (*SwiftGrammar) PackageName(*sitter.Node, []byte) string { return "" }
 func (*SwiftGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
-		if n.Type() != "import_declaration" {
+		if n.Kind() != "import_declaration" {
 			return true
 		}
 		ref := ImportRef{}
@@ -206,12 +206,12 @@ func (*SwiftGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 		//   - modifiers → attribute → user_type → type_identifier "testable"
 		//   - identifier (the module path), possibly dotted via
 		//     nested simple_identifier children
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			switch c.Type() {
+			switch c.Kind() {
 			case "modifiers":
 				if swiftHasAttribute(c, source, "testable") {
 					testable = true
@@ -219,16 +219,16 @@ func (*SwiftGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 			case "identifier":
 				// Collect dotted path from simple_identifier children.
 				var parts []string
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					cc := c.NamedChild(j)
-					if cc != nil && cc.Type() == "simple_identifier" {
-						parts = append(parts, cc.Content(source))
+					if cc != nil && cc.Kind() == "simple_identifier" {
+						parts = append(parts, cc.Utf8Text(source))
 					}
 				}
 				if len(parts) > 0 {
 					ref.Path = strings.Join(parts, ".")
 				} else {
-					ref.Path = strings.TrimSpace(c.Content(source))
+					ref.Path = strings.TrimSpace(c.Utf8Text(source))
 				}
 			}
 		}
@@ -255,9 +255,9 @@ func (*SwiftGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string {
 		return nil
 	}
 	var out []string
-	for i := 0; i < int(mods.NamedChildCount()); i++ {
+	for i := uint(0); i < mods.NamedChildCount(); i++ {
 		c := mods.NamedChild(i)
-		if c == nil || c.Type() != "attribute" {
+		if c == nil || c.Kind() != "attribute" {
 			continue
 		}
 		if name := swiftAttributeName(c, source); name != "" {
@@ -289,7 +289,7 @@ func (*SwiftGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string {
 // class_declaration.
 func (g *SwiftGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexer.Signal {
 	var out []indexer.Signal
-	if n.Type() == "class_declaration" {
+	if n.Kind() == "class_declaration" {
 		switch swiftClassFlavor(n) {
 		case "struct":
 			out = append(out, indexer.Signal{Kind: "label", Value: "struct"})
@@ -309,12 +309,12 @@ func (g *SwiftGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []index
 	if mods == nil {
 		return out
 	}
-	for i := 0; i < int(mods.NamedChildCount()); i++ {
+	for i := uint(0); i < mods.NamedChildCount(); i++ {
 		c := mods.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		// Swift's tree-sitter splits modifiers across several node
 		// categories. We include `visibility_modifier` here specifically
 		// so `open` (which Swift treats as a stricter-than-public visibility)
@@ -326,7 +326,7 @@ func (g *SwiftGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []index
 			"inheritance_modifier", "mutation_modifier",
 			"ownership_modifier", "parameter_modifier",
 			"visibility_modifier":
-			keyword := strings.TrimSpace(c.Content(source))
+			keyword := strings.TrimSpace(c.Utf8Text(source))
 			if keyword == "" {
 				continue
 			}
@@ -374,7 +374,7 @@ var swiftLabelModifiers = map[string]bool{
 // package doc.
 func (*SwiftGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 	var flavor string
-	switch n.Type() {
+	switch n.Kind() {
 	case "class_declaration":
 		flavor = swiftClassFlavor(n)
 	case "protocol_declaration":
@@ -385,20 +385,20 @@ func (*SwiftGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 
 	var out []ParentRef
 	seen := 0 // index of inheritance_specifier encountered so far (0 = first)
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
-		if c == nil || c.Type() != "inheritance_specifier" {
+		if c == nil || c.Kind() != "inheritance_specifier" {
 			continue
 		}
 		// Extract the user_type inside the specifier; ignore generic
 		// constraints / attributes attached to the conformance.
 		var typeNode *sitter.Node
-		for j := 0; j < int(c.NamedChildCount()); j++ {
+		for j := uint(0); j < c.NamedChildCount(); j++ {
 			cc := c.NamedChild(j)
 			if cc == nil {
 				continue
 			}
-			if cc.Type() == "user_type" {
+			if cc.Kind() == "user_type" {
 				typeNode = cc
 				break
 			}
@@ -419,8 +419,8 @@ func (*SwiftGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 			Name:     name,
 			Relation: relation,
 			Loc: indexer.Location{
-				Line:       int(typeNode.StartPoint().Row) + 1,
-				Column:     int(typeNode.StartPoint().Column) + 1,
+				Line:       int(typeNode.StartPosition().Row) + 1,
+				Column:     int(typeNode.StartPosition().Column) + 1,
 				ByteOffset: int(typeNode.StartByte()),
 			},
 			Metadata: meta,
@@ -468,10 +468,11 @@ func (*SwiftGrammar) ResolveParents(refs []indexer.Reference, path string, ctx i
 // extensions of String" work uniformly. Detected by walking up to the
 // enclosing class_declaration with `extension` flavor.
 func (*SwiftGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]any {
-	switch n.Type() {
+	switch n.Kind() {
 	case "function_declaration", "property_declaration",
 		"init_declaration", "protocol_function_declaration",
-		"protocol_property_declaration", "subscript_declaration":
+		"protocol_property_declaration", "subscript_declaration",
+		"typealias_declaration":
 		ext := findAncestor(n, "class_declaration")
 		if ext == nil || swiftClassFlavor(ext) != "extension" {
 			return nil
@@ -498,9 +499,9 @@ func swiftExtensionTargetName(ext *sitter.Node, source []byte) string {
 	if ext == nil {
 		return ""
 	}
-	for i := 0; i < int(ext.NamedChildCount()); i++ {
+	for i := uint(0); i < ext.NamedChildCount(); i++ {
 		c := ext.NamedChild(i)
-		if c != nil && c.Type() == "user_type" {
+		if c != nil && c.Kind() == "user_type" {
 			return swiftUserTypeName(c, source)
 		}
 	}
@@ -522,27 +523,27 @@ func swiftUserTypeWithGenerics(n *sitter.Node, source []byte) (string, []string)
 	}
 	var name string
 	var args []string
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "type_identifier":
 			if name == "" {
-				name = strings.TrimSpace(c.Content(source))
+				name = strings.TrimSpace(c.Utf8Text(source))
 			}
 		case "nested_type_identifier":
 			if name == "" {
-				name = strings.TrimSpace(c.Content(source))
+				name = strings.TrimSpace(c.Utf8Text(source))
 			}
 		case "type_arguments":
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				a := c.NamedChild(j)
 				if a == nil {
 					continue
 				}
-				if t := strings.TrimSpace(a.Content(source)); t != "" {
+				if t := strings.TrimSpace(a.Utf8Text(source)); t != "" {
 					args = append(args, t)
 				}
 			}
@@ -553,7 +554,7 @@ func swiftUserTypeWithGenerics(n *sitter.Node, source []byte) (string, []string)
 		// a grammar-version gap (e.g., tree-sitter-swift emits an unfamiliar
 		// inner node type). Fall back to the raw bytes with generics stripped
 		// so the caller still gets a usable name rather than "".
-		raw := strings.TrimSpace(n.Content(source))
+		raw := strings.TrimSpace(n.Utf8Text(source))
 		if idx := strings.Index(raw, "<"); idx > 0 {
 			raw = raw[:idx]
 		}
@@ -566,25 +567,25 @@ func swiftUserTypeWithGenerics(n *sitter.Node, source []byte) (string, []string)
 // `@Published` → "Published"; `@available(iOS 14, *)` → "available";
 // `@objc(Foo)` → "objc".
 func swiftAttributeName(n *sitter.Node, source []byte) string {
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "user_type":
 			return swiftUserTypeName(c, source)
 		case "simple_identifier", "type_identifier":
-			return strings.TrimSpace(c.Content(source))
+			return strings.TrimSpace(c.Utf8Text(source))
 		}
 	}
 	return ""
 }
 
 func swiftHasAttribute(mods *sitter.Node, source []byte, target string) bool {
-	for i := 0; i < int(mods.NamedChildCount()); i++ {
+	for i := uint(0); i < mods.NamedChildCount(); i++ {
 		c := mods.NamedChild(i)
-		if c == nil || c.Type() != "attribute" {
+		if c == nil || c.Kind() != "attribute" {
 			continue
 		}
 		if swiftAttributeName(c, source) == target {

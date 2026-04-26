@@ -44,7 +44,7 @@ Most packages are unit-testable without network or filesystem setup. A few integ
 |---|---|
 | Indexer orchestration | `internal/indexer/integration_test.go`, `walker_test.go` |
 | Markdown processing | `internal/indexer/diagrams_test.go`, `emphasis_test.go`, `tables_test.go` |
-| Code grammars | `internal/indexer/handlers/code/{golang,python,java,javascript}_test.go` + `testhelpers_test.go` |
+| Code grammars | `internal/indexer/handlers/code/{golang,python,java,javascript,kotlin,swift}_test.go` + `testhelpers_test.go`; vendor sanity: `tree_sitter_dart/binding_test.go` |
 | Config handlers | `internal/indexer/handlers/config/config_test.go` |
 | Office handlers | `internal/indexer/handlers/office/{docx,xlsx,pptx}_test.go` + `zipfixture_test.go` |
 | PDF handler | `internal/indexer/handlers/pdf/{convert,handler}_test.go` (fixtures under `testdata/`) |
@@ -85,7 +85,7 @@ internal/
     references.go                 # Code-path regex extraction
     handlers/
       markdown/                   # .md, .markdown
-      code/                       # Tree-sitter grammars: go, python, java, js, ts, tsx
+      code/                       # Tree-sitter grammars: go, python, java, js, ts, tsx, kotlin, swift (+ dart vendor pending lib-wji.3)
       config/                     # yaml, json, toml, xml, properties, env
       office/                     # docx, xlsx, pptx
       pdf/                        # pdf (go-pdfium WebAssembly)
@@ -112,7 +112,7 @@ docs/                             # This documentation (librarian indexes itself
 | `github.com/mattn/go-sqlite3` | SQLite driver (CGo) |
 | `github.com/asg017/sqlite-vec-go-bindings` | sqlite-vec extension |
 | `github.com/yuin/goldmark` + `goldmark-meta` | Markdown parsing + frontmatter |
-| `github.com/smacker/go-tree-sitter` | Tree-sitter bindings for code grammars |
+| `github.com/tree-sitter/go-tree-sitter` | Tree-sitter runtime (ABI 13-15); grammar packages imported per-language |
 | `github.com/xuri/excelize/v2` | XLSX parser |
 | `github.com/klippa-app/go-pdfium` | PDFium binding (WebAssembly via wazero) |
 | `github.com/pelletier/go-toml/v2` | TOML parsing |

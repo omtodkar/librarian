@@ -3,8 +3,8 @@ package code
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/python"
+	sitter "github.com/tree-sitter/go-tree-sitter"
+	"github.com/tree-sitter/tree-sitter-python/bindings/go"
 
 	"librarian/internal/indexer"
 )
@@ -37,7 +37,7 @@ func NewPythonGrammar() *PythonGrammar { return &PythonGrammar{} }
 
 func (*PythonGrammar) Name() string               { return "python" }
 func (*PythonGrammar) Extensions() []string       { return []string{".py"} }
-func (*PythonGrammar) Language() *sitter.Language { return python.GetLanguage() }
+func (*PythonGrammar) Language() *sitter.Language { return sitter.NewLanguage(tree_sitter_python.Language()) }
 
 // CommentNodeTypes includes "decorator" alongside the real comment type. The
 // walker treats decorators as comments so `@dataclass` text flows into the
@@ -89,10 +89,10 @@ func (*PythonGrammar) ContainerKinds() map[string]bool {
 // the walker doesn't inject spurious segments into Unit.Path when descending
 // through them.
 func (*PythonGrammar) SymbolName(n *sitter.Node, source []byte) string {
-	switch n.Type() {
+	switch n.Kind() {
 	case "function_definition", "class_definition":
 		if name := n.ChildByFieldName("name"); name != nil {
-			return name.Content(source)
+			return name.Utf8Text(source)
 		}
 	case "type_alias_statement":
 		// tree-sitter-python models this as two unnamed `type` children: the
@@ -102,7 +102,7 @@ func (*PythonGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		// grammar change that inserts a new first named child doesn't get
 		// mis-interpreted as the LHS.
 		lhs := n.NamedChild(0)
-		if lhs == nil || lhs.Type() != "type" {
+		if lhs == nil || lhs.Kind() != "type" {
 			return ""
 		}
 		return aliasIdentifier(lhs, source)
@@ -128,19 +128,19 @@ func pep613AliasName(n *sitter.Node, source []byte) string {
 		return ""
 	}
 	assign := n.NamedChild(0)
-	if assign == nil || assign.Type() != "assignment" {
+	if assign == nil || assign.Kind() != "assignment" {
 		return ""
 	}
 	ann := assign.ChildByFieldName("type")
 	left := assign.ChildByFieldName("left")
-	if ann == nil || left == nil || left.Type() != "identifier" {
+	if ann == nil || left == nil || left.Kind() != "identifier" {
 		return ""
 	}
-	annText := strings.Trim(ann.Content(source), `"' `)
+	annText := strings.Trim(ann.Utf8Text(source), `"' `)
 	if annText != "TypeAlias" && !strings.HasSuffix(annText, ".TypeAlias") {
 		return ""
 	}
-	return left.Content(source)
+	return left.Utf8Text(source)
 }
 
 // aliasIdentifier returns the identifier buried inside a PEP 695 alias LHS.
@@ -156,11 +156,11 @@ func aliasIdentifier(lhs *sitter.Node, source []byte) string {
 	if inner == nil {
 		return ""
 	}
-	if inner.Type() == "identifier" {
-		return inner.Content(source)
+	if inner.Kind() == "identifier" {
+		return inner.Utf8Text(source)
 	}
-	if name := inner.NamedChild(0); name != nil && name.Type() == "identifier" {
-		return name.Content(source)
+	if name := inner.NamedChild(0); name != nil && name.Kind() == "identifier" {
+		return name.Utf8Text(source)
 	}
 	return ""
 }
@@ -176,7 +176,7 @@ func (*PythonGrammar) PackageName(*sitter.Node, []byte) string { return "" }
 // them as docstrings either, and including them would corrupt Unit text with
 // binary-looking content.
 func (*PythonGrammar) DocstringFromNode(n *sitter.Node, source []byte) string {
-	switch n.Type() {
+	switch n.Kind() {
 	case "function_definition", "class_definition":
 	default:
 		return ""
@@ -186,11 +186,11 @@ func (*PythonGrammar) DocstringFromNode(n *sitter.Node, source []byte) string {
 		return ""
 	}
 	first := body.NamedChild(0)
-	if first == nil || first.Type() != "expression_statement" || first.NamedChildCount() == 0 {
+	if first == nil || first.Kind() != "expression_statement" || first.NamedChildCount() == 0 {
 		return ""
 	}
 	str := first.NamedChild(0)
-	if str == nil || str.Type() != "string" {
+	if str == nil || str.Kind() != "string" {
 		return ""
 	}
 	if isBytesStringLiteral(str, source) {
@@ -203,16 +203,12 @@ func (*PythonGrammar) DocstringFromNode(n *sitter.Node, source []byte) string {
 // literal (prefix includes `b` / `B`). CPython rejects these as docstrings,
 // and their raw bytes are neither searchable nor informative.
 func isBytesStringLiteral(str *sitter.Node, source []byte) bool {
-	for i := 0; i < int(str.NamedChildCount()); i++ {
+	for i := uint(0); i < str.NamedChildCount(); i++ {
 		c := str.NamedChild(i)
-		if c == nil || c.Type() != "string_start" {
+		if c == nil || c.Kind() != "string_start" {
 			continue
 		}
-		prefix := strings.ToLower(c.Content(source))
-		return strings.ContainsAny(prefix, "bB") ||
-			strings.HasPrefix(prefix, "b") ||
-			strings.HasPrefix(prefix, "rb") ||
-			strings.HasPrefix(prefix, "br")
+		return strings.Contains(strings.ToLower(c.Utf8Text(source)), "b")
 	}
 	return false
 }
@@ -228,16 +224,16 @@ func isBytesStringLiteral(str *sitter.Node, source []byte) bool {
 // docstrings (PEP 257 discourages them) and acceptable for search.
 func extractPythonStringContent(str *sitter.Node, source []byte) string {
 	var out strings.Builder
-	for i := 0; i < int(str.NamedChildCount()); i++ {
+	for i := uint(0); i < str.NamedChildCount(); i++ {
 		c := str.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "string_start", "string_end":
 			// Delimiters — skip.
 		default:
-			out.WriteString(c.Content(source))
+			out.WriteString(c.Utf8Text(source))
 		}
 	}
 	return strings.TrimSpace(out.String())
@@ -258,7 +254,7 @@ func extractPythonStringContent(str *sitter.Node, source []byte) string {
 func (*PythonGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
-		switch n.Type() {
+		switch n.Kind() {
 		case "import_statement":
 			out = append(out, extractPlainImports(n, source)...)
 			return false
@@ -276,21 +272,21 @@ func (*PythonGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 // pair) becomes one ImportRef.
 func extractPlainImports(n *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "dotted_name":
-			out = append(out, ImportRef{Path: c.Content(source)})
+			out = append(out, ImportRef{Path: c.Utf8Text(source)})
 		case "aliased_import":
 			ref := ImportRef{}
 			if p := c.ChildByFieldName("name"); p != nil {
-				ref.Path = p.Content(source)
+				ref.Path = p.Utf8Text(source)
 			}
 			if a := c.ChildByFieldName("alias"); a != nil {
-				ref.Alias = a.Content(source)
+				ref.Alias = a.Utf8Text(source)
 			}
 			if ref.Path != "" {
 				out = append(out, ref)
@@ -326,33 +322,33 @@ func extractFromImports(n *sitter.Node, source []byte) []ImportRef {
 	// anonymous `import` keyword token that separates the FROM clause from
 	// the imported names. A named-child iteration would skip it.
 	sawImportKeyword := false
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint(0); i < n.ChildCount(); i++ {
 		c := n.Child(i)
 		if c == nil {
 			continue
 		}
-		typ := c.Type()
+		typ := c.Kind()
 		if !sawImportKeyword {
 			// Before "import" keyword we're in the FROM clause.
 			switch typ {
 			case "import":
 				sawImportKeyword = true
 			case "dotted_name":
-				module = c.Content(source)
+				module = c.Utf8Text(source)
 			case "relative_import":
 				isRelative = true
 				// A relative_import has import_prefix (the dots) and
 				// optionally a dotted_name (the package after the dots).
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					cc := c.NamedChild(j)
 					if cc == nil {
 						continue
 					}
-					switch cc.Type() {
+					switch cc.Kind() {
 					case "import_prefix":
-						dots = cc.Content(source)
+						dots = cc.Utf8Text(source)
 					case "dotted_name":
-						module = cc.Content(source)
+						module = cc.Utf8Text(source)
 					}
 				}
 			}
@@ -361,14 +357,14 @@ func extractFromImports(n *sitter.Node, source []byte) []ImportRef {
 		// After "import": collect imported names + aliases (or the wildcard).
 		switch typ {
 		case "dotted_name":
-			names = append(names, struct{ name, alias string }{name: c.Content(source)})
+			names = append(names, struct{ name, alias string }{name: c.Utf8Text(source)})
 		case "aliased_import":
 			pair := struct{ name, alias string }{}
 			if p := c.ChildByFieldName("name"); p != nil {
-				pair.name = p.Content(source)
+				pair.name = p.Utf8Text(source)
 			}
 			if a := c.ChildByFieldName("alias"); a != nil {
-				pair.alias = a.Content(source)
+				pair.alias = a.Utf8Text(source)
 			}
 			if pair.name != "" {
 				names = append(names, pair)
@@ -412,7 +408,7 @@ func extractFromImports(n *sitter.Node, source []byte) []ImportRef {
 // directive; the best-effort identifier fallback here keeps something in the
 // graph without pretending the resolution is complete.
 func (*PythonGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
-	if n.Type() != "class_definition" {
+	if n.Kind() != "class_definition" {
 		return nil
 	}
 	supers := n.ChildByFieldName("superclasses")
@@ -420,13 +416,13 @@ func (*PythonGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 		return nil
 	}
 	var out []ParentRef
-	for i := 0; i < int(supers.NamedChildCount()); i++ {
+	for i := uint(0); i < supers.NamedChildCount(); i++ {
 		c := supers.NamedChild(i)
 		if c == nil {
 			continue
 		}
 		// Keyword arguments (metaclass=, total=) are not parents.
-		if c.Type() == "keyword_argument" {
+		if c.Kind() == "keyword_argument" {
 			continue
 		}
 		ref := extractPythonBase(c, source)
@@ -442,14 +438,14 @@ func (*PythonGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 // (dictionary_splat, list_splat, etc.).
 func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 	loc := indexer.Location{
-		Line:       int(c.StartPoint().Row) + 1,
-		Column:     int(c.StartPoint().Column) + 1,
+		Line:       int(c.StartPosition().Row) + 1,
+		Column:     int(c.StartPosition().Column) + 1,
 		ByteOffset: int(c.StartByte()),
 	}
-	switch c.Type() {
+	switch c.Kind() {
 	case "identifier", "attribute":
 		return &ParentRef{
-			Name:     strings.TrimSpace(c.Content(source)),
+			Name:     strings.TrimSpace(c.Utf8Text(source)),
 			Relation: "extends",
 			Loc:      loc,
 		}
@@ -460,18 +456,18 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 		if value == nil {
 			return nil
 		}
-		name := strings.TrimSpace(value.Content(source))
+		name := strings.TrimSpace(value.Utf8Text(source))
 		if name == "" {
 			return nil
 		}
 		meta := map[string]any{}
 		var args []string
-		for i := 0; i < int(c.NamedChildCount()); i++ {
+		for i := uint(0); i < c.NamedChildCount(); i++ {
 			cc := c.NamedChild(i)
-			if cc == nil || cc == value {
+			if cc == nil || cc.Equals(*value) {
 				continue
 			}
-			if t := strings.TrimSpace(cc.Content(source)); t != "" {
+			if t := strings.TrimSpace(cc.Utf8Text(source)); t != "" {
 				args = append(args, t)
 			}
 		}
@@ -491,7 +487,7 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 		if fn == nil {
 			return nil
 		}
-		name := strings.TrimSpace(fn.Content(source))
+		name := strings.TrimSpace(fn.Utf8Text(source))
 		if name == "" {
 			return nil
 		}

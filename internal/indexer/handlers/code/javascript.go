@@ -4,12 +4,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/javascript"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
+	sitter "github.com/tree-sitter/go-tree-sitter"
+	"github.com/tree-sitter/tree-sitter-javascript/bindings/go"
 
 	"librarian/internal/indexer"
+	"librarian/internal/indexer/handlers/code/tree_sitter_typescript/tsx"
+	"librarian/internal/indexer/handlers/code/tree_sitter_typescript/typescript"
 )
 
 // jsLikeGrammar is the shared implementation for JavaScript, TypeScript, and
@@ -63,7 +63,7 @@ func NewJavaScriptGrammar() Grammar {
 	return &jsLikeGrammar{
 		name:       "javascript",
 		extensions: []string{".js", ".jsx", ".mjs", ".cjs"},
-		lang:       javascript.GetLanguage(),
+		lang:       sitter.NewLanguage(tree_sitter_javascript.Language()),
 	}
 }
 
@@ -74,7 +74,7 @@ func NewTypeScriptGrammar() Grammar {
 	return &jsLikeGrammar{
 		name:          "typescript",
 		extensions:    []string{".ts", ".mts", ".cts"},
-		lang:          typescript.GetLanguage(),
+		lang:          sitter.NewLanguage(tree_sitter_typescript.Language()),
 		supportsTypes: true,
 	}
 }
@@ -85,7 +85,7 @@ func NewTSXGrammar() Grammar {
 	return &jsLikeGrammar{
 		name:          "tsx",
 		extensions:    []string{".tsx"},
-		lang:          tsx.GetLanguage(),
+		lang:          sitter.NewLanguage(tree_sitter_tsx.Language()),
 		supportsTypes: true,
 	}
 }
@@ -154,22 +154,22 @@ func (g *jsLikeGrammar) ContainerKinds() map[string]bool {
 // additionally gates on the value being an arrow_function so `const x = 5`
 // doesn't mint a spurious Unit at module scope.
 func (*jsLikeGrammar) SymbolName(n *sitter.Node, source []byte) string {
-	switch n.Type() {
+	switch n.Kind() {
 	case "function_declaration",
 		"class_declaration", "abstract_class_declaration",
 		"interface_declaration", "enum_declaration", "type_alias_declaration",
 		"method_definition", "method_signature", "abstract_method_signature",
 		"property_signature":
 		if name := n.ChildByFieldName("name"); name != nil {
-			return name.Content(source)
+			return name.Utf8Text(source)
 		}
 	case "variable_declarator":
 		value := n.ChildByFieldName("value")
-		if value == nil || value.Type() != "arrow_function" {
+		if value == nil || value.Kind() != "arrow_function" {
 			return ""
 		}
 		if name := n.ChildByFieldName("name"); name != nil {
-			return name.Content(source)
+			return name.Utf8Text(source)
 		}
 	}
 	return ""
@@ -198,7 +198,7 @@ func (*jsLikeGrammar) PackageName(*sitter.Node, []byte) string { return "" }
 func (*jsLikeGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
-		if n.Type() != "import_statement" {
+		if n.Kind() != "import_statement" {
 			return true
 		}
 		out = append(out, extractJSImports(n, source)...)
@@ -215,19 +215,19 @@ func extractJSImports(n *sitter.Node, source []byte) []ImportRef {
 
 	var module string
 	var clause *sitter.Node
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint(0); i < n.ChildCount(); i++ {
 		c := n.Child(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "import_clause":
 			clause = c
 		case "string":
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				cc := c.NamedChild(j)
-				if cc != nil && cc.Type() == "string_fragment" {
-					module = cc.Content(source)
+				if cc != nil && cc.Kind() == "string_fragment" {
+					module = cc.Utf8Text(source)
 					break
 				}
 			}
@@ -242,25 +242,25 @@ func extractJSImports(n *sitter.Node, source []byte) []ImportRef {
 		// Side-effect import: `import "side-effects";`.
 		out = append(out, ImportRef{Path: module})
 	} else {
-		for i := 0; i < int(clause.NamedChildCount()); i++ {
+		for i := uint(0); i < clause.NamedChildCount(); i++ {
 			c := clause.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			switch c.Type() {
+			switch c.Kind() {
 			case "identifier":
 				// Default import: `import foo from "m"`.
 				out = append(out, ImportRef{
 					Path:     module,
-					Alias:    c.Content(source),
+					Alias:    c.Utf8Text(source),
 					Metadata: map[string]any{"default": true},
 				})
 			case "namespace_import":
 				alias := ""
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					id := c.NamedChild(j)
-					if id != nil && id.Type() == "identifier" {
-						alias = id.Content(source)
+					if id != nil && id.Kind() == "identifier" {
+						alias = id.Utf8Text(source)
 						break
 					}
 				}
@@ -270,17 +270,17 @@ func extractJSImports(n *sitter.Node, source []byte) []ImportRef {
 					Metadata: map[string]any{"namespace": true},
 				})
 			case "named_imports":
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					spec := c.NamedChild(j)
-					if spec == nil || spec.Type() != "import_specifier" {
+					if spec == nil || spec.Kind() != "import_specifier" {
 						continue
 					}
 					var name, alias string
 					if nm := spec.ChildByFieldName("name"); nm != nil {
-						name = nm.Content(source)
+						name = nm.Utf8Text(source)
 					}
 					if al := spec.ChildByFieldName("alias"); al != nil {
-						alias = al.Content(source)
+						alias = al.Utf8Text(source)
 					}
 					if name == "" {
 						continue
@@ -321,7 +321,7 @@ func extractJSImports(n *sitter.Node, source []byte) []ImportRef {
 // callee identifier with unresolved_expression=true when the parent is a
 // call (full mixin handling is deferred to lib-ap8).
 func (g *jsLikeGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
-	switch n.Type() {
+	switch n.Kind() {
 	case "class_declaration", "abstract_class_declaration":
 		return jsClassParents(n, source)
 	case "interface_declaration":
@@ -347,27 +347,27 @@ func (g *jsLikeGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef
 // the child itself as an extends parent (JS case).
 func jsClassParents(n *sitter.Node, source []byte) []ParentRef {
 	var out []ParentRef
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "class_heritage":
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				inner := c.NamedChild(j)
 				if inner == nil {
 					continue
 				}
-				switch inner.Type() {
+				switch inner.Kind() {
 				case "extends_clause":
-					for k := 0; k < int(inner.NamedChildCount()); k++ {
+					for k := uint(0); k < inner.NamedChildCount(); k++ {
 						if p := jsMakeParent(inner.NamedChild(k), "extends", source); p != nil {
 							out = append(out, *p)
 						}
 					}
 				case "implements_clause":
-					for k := 0; k < int(inner.NamedChildCount()); k++ {
+					for k := uint(0); k < inner.NamedChildCount(); k++ {
 						if p := jsMakeParent(inner.NamedChild(k), "implements", source); p != nil {
 							out = append(out, *p)
 						}
@@ -385,7 +385,7 @@ func jsClassParents(n *sitter.Node, source []byte) []ParentRef {
 			// Defensive: some grammar variants expose implements_clause as
 			// a sibling of class_heritage rather than a child. Handling both
 			// shapes keeps us robust across tree-sitter-typescript versions.
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				if p := jsMakeParent(c.NamedChild(j), "implements", source); p != nil {
 					out = append(out, *p)
 				}
@@ -400,15 +400,15 @@ func jsClassParents(n *sitter.Node, source []byte) []ParentRef {
 // extends_type_clause in the tree-sitter-typescript grammar.
 func jsInterfaceParents(n *sitter.Node, source []byte) []ParentRef {
 	var out []ParentRef
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		if c.Type() != "extends_type_clause" && c.Type() != "extends_clause" {
+		if c.Kind() != "extends_type_clause" && c.Kind() != "extends_clause" {
 			continue
 		}
-		for j := 0; j < int(c.NamedChildCount()); j++ {
+		for j := uint(0); j < c.NamedChildCount(); j++ {
 			if p := jsMakeParent(c.NamedChild(j), "extends", source); p != nil {
 				out = append(out, *p)
 			}
@@ -429,8 +429,8 @@ func jsMakeParent(c *sitter.Node, relation string, source []byte) *ParentRef {
 		return nil
 	}
 	loc := indexer.Location{
-		Line:       int(c.StartPoint().Row) + 1,
-		Column:     int(c.StartPoint().Column) + 1,
+		Line:       int(c.StartPosition().Row) + 1,
+		Column:     int(c.StartPosition().Column) + 1,
 		ByteOffset: int(c.StartByte()),
 	}
 	meta := map[string]any{}
@@ -449,29 +449,29 @@ func jsMakeParent(c *sitter.Node, relation string, source []byte) *ParentRef {
 // implements / interface-extends clauses; and call_expression for the
 // mixin-application fallback.
 func jsExtractParent(n *sitter.Node, source []byte) (string, []string, bool) {
-	switch n.Type() {
+	switch n.Kind() {
 	case "identifier", "type_identifier", "nested_type_identifier":
-		return strings.TrimSpace(n.Content(source)), nil, false
+		return strings.TrimSpace(n.Utf8Text(source)), nil, false
 	case "member_expression":
 		// JS `extends pkg.Foo` — dotted identifier chain. Content includes
 		// the full chain; consumers treat dotted targets as already-qualified.
-		return strings.TrimSpace(n.Content(source)), nil, false
+		return strings.TrimSpace(n.Utf8Text(source)), nil, false
 	case "generic_type":
 		// TS `Foo<T, U>` — named "name" field carries the type identifier,
 		// and type_arguments hold the args.
 		var name string
 		var args []string
 		if nm := n.ChildByFieldName("name"); nm != nil {
-			name = strings.TrimSpace(nm.Content(source))
+			name = strings.TrimSpace(nm.Utf8Text(source))
 		}
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c == nil || c.Type() != "type_arguments" {
+			if c == nil || c.Kind() != "type_arguments" {
 				continue
 			}
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				if a := c.NamedChild(j); a != nil {
-					if t := strings.TrimSpace(a.Content(source)); t != "" {
+					if t := strings.TrimSpace(a.Utf8Text(source)); t != "" {
 						args = append(args, t)
 					}
 				}
@@ -480,13 +480,13 @@ func jsExtractParent(n *sitter.Node, source []byte) (string, []string, bool) {
 		if name == "" {
 			// Grammar variant: name may not be a field. Fall back to first
 			// type_identifier / nested_type_identifier child.
-			for i := 0; i < int(n.NamedChildCount()); i++ {
+			for i := uint(0); i < n.NamedChildCount(); i++ {
 				c := n.NamedChild(i)
 				if c == nil {
 					continue
 				}
-				if c.Type() == "type_identifier" || c.Type() == "nested_type_identifier" {
-					name = strings.TrimSpace(c.Content(source))
+				if c.Kind() == "type_identifier" || c.Kind() == "nested_type_identifier" {
+					name = strings.TrimSpace(c.Utf8Text(source))
 					break
 				}
 			}
@@ -500,7 +500,7 @@ func jsExtractParent(n *sitter.Node, source []byte) (string, []string, bool) {
 		if fn == nil {
 			return "", nil, true
 		}
-		return strings.TrimSpace(fn.Content(source)), nil, true
+		return strings.TrimSpace(fn.Utf8Text(source)), nil, true
 	}
 	return "", nil, false
 }
@@ -591,10 +591,10 @@ func (*jsLikeGrammar) SymbolExtraSignals(n *sitter.Node, _ []byte) []indexer.Sig
 	if exportStmt == nil {
 		return nil
 	}
-	if exportStmt.Type() == "lexical_declaration" {
+	if exportStmt.Kind() == "lexical_declaration" {
 		exportStmt = exportStmt.Parent()
 	}
-	if exportStmt == nil || exportStmt.Type() != "export_statement" {
+	if exportStmt == nil || exportStmt.Kind() != "export_statement" {
 		return nil
 	}
 	signals := []indexer.Signal{{Kind: "label", Value: "exported"}}
@@ -608,9 +608,9 @@ func (*jsLikeGrammar) SymbolExtraSignals(n *sitter.Node, _ []byte) []indexer.Sig
 // typ. Used to detect tree-sitter anonymous keyword tokens (`default`,
 // `type`, `static`, …) that don't appear in NamedChild iteration.
 func hasAnonymousChild(n *sitter.Node, typ string) bool {
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := uint(0); i < n.ChildCount(); i++ {
 		c := n.Child(i)
-		if c != nil && c.Type() == typ {
+		if c != nil && c.Kind() == typ {
 			return true
 		}
 	}

@@ -68,7 +68,7 @@ internal/
     references.go            Code-path regex extraction for markdown references
     handlers/
       markdown/              .md, .markdown — baseline goldmark handler
-      code/                  Tree-sitter grammars: Go, Python, Java, JS, TS, TSX
+      code/                  Tree-sitter grammars: Go, Python, Java, JS, TS, TSX, Kotlin, Swift (+ Dart binding vendored for lib-wji.3)
       config/                YAML / JSON / TOML / XML / properties / env
       office/                DOCX / XLSX / PPTX
       pdf/                   PDF via go-pdfium (WebAssembly)

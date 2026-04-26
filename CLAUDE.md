@@ -64,6 +64,7 @@ Short version:
 ## Adding new components
 
 - **New file handler**: create `internal/indexer/handlers/<format>/`, implement the `FileHandler` interface (`handler.go`), call `indexer.RegisterDefault(...)` from a package `init()`, and add one blank-import line to `internal/indexer/handlers/defaults/defaults.go`. No other changes needed — walker, store, signals, and MCP are handler-agnostic. See `docs/handlers.md`.
+- **New code grammar** (subset of the above for languages parsed via tree-sitter): the runtime is `github.com/tree-sitter/go-tree-sitter` (ABI 13–15). For the grammar's parser, prefer `go get github.com/tree-sitter/tree-sitter-<lang>/bindings/go` when an official binding exists (ABI 15 typically). Otherwise vendor under `internal/indexer/handlers/code/tree_sitter_<lang>/` following the existing Dart/Swift/TypeScript pattern — every vendor binding.go documents its source repo, commit SHA, and ABI version.
 - **New embedding provider**: implement `Embedder` in `internal/embedding/`, add a case to `NewEmbedder()` in `provider.go`.
 - **New MCP tool**: create a file in `internal/mcpserver/`, register in `Serve()` in `server.go`.
 

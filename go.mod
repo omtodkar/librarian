@@ -4,6 +4,7 @@ go 1.25.7
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/fwcd/tree-sitter-kotlin v0.0.0-20260411204054-55622a49bd59
 	github.com/google/uuid v1.6.0
 	github.com/klippa-app/go-pdfium v1.19.2
 	github.com/mark3labs/mcp-go v0.44.0
@@ -11,9 +12,13 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
-	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
+	github.com/tree-sitter/go-tree-sitter v0.25.0
+	github.com/tree-sitter/tree-sitter-go v0.25.0
+	github.com/tree-sitter/tree-sitter-java v0.23.5
+	github.com/tree-sitter/tree-sitter-javascript v0.25.0
+	github.com/tree-sitter/tree-sitter-python v0.25.0
 	github.com/xuri/excelize/v2 v2.10.1
 	github.com/yuin/goldmark v1.7.16
 	github.com/yuin/goldmark-meta v1.1.0
@@ -32,6 +37,7 @@ require (
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/jolestar/go-commons-pool/v2 v2.1.2 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
+	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/richardlehane/mscfb v1.0.6 // indirect
 	github.com/richardlehane/msoleps v1.0.6 // indirect

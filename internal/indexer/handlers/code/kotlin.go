@@ -3,8 +3,8 @@ package code
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/kotlin"
+	sitter "github.com/tree-sitter/go-tree-sitter"
+	"github.com/fwcd/tree-sitter-kotlin/bindings/go"
 
 	"librarian/internal/indexer"
 )
@@ -60,7 +60,7 @@ import (
 //     function. Working around this would require teaching the walker to
 //     peek at call_expression bodies, which is language-specific pollution.
 //
-// Both unblock once the upstream smacker/go-tree-sitter kotlin grammar
+// Both unblock once the upstream fwcd/tree-sitter-kotlin grammar
 // adds support. Tracked in lib-ljn.
 type KotlinGrammar struct{}
 
@@ -107,7 +107,7 @@ var kotlinLabelModifiers = map[string]bool{
 
 func (*KotlinGrammar) Name() string               { return "kotlin" }
 func (*KotlinGrammar) Extensions() []string       { return []string{".kt"} }
-func (*KotlinGrammar) Language() *sitter.Language { return kotlin.GetLanguage() }
+func (*KotlinGrammar) Language() *sitter.Language { return sitter.NewLanguage(tree_sitter_kotlin.Language()) }
 
 func (*KotlinGrammar) CommentNodeTypes() []string {
 	return []string{"line_comment", "multiline_comment"}
@@ -182,7 +182,7 @@ func (*KotlinGrammar) ContainerKinds() map[string]bool {
 // fall back to scanning for `simple_identifier` when the grammar version
 // varies.
 func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
-	switch n.Type() {
+	switch n.Kind() {
 	case "secondary_constructor":
 		// Kotlin's secondary_constructor has no `name` field and no
 		// simple_identifier name — `constructor` is a keyword token. The
@@ -194,12 +194,12 @@ func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 			return ""
 		}
 		if name := p.ChildByFieldName("name"); name != nil {
-			return name.Content(source)
+			return name.Utf8Text(source)
 		}
-		for i := 0; i < int(p.NamedChildCount()); i++ {
+		for i := uint(0); i < p.NamedChildCount(); i++ {
 			c := p.NamedChild(i)
-			if c != nil && (c.Type() == "simple_identifier" || c.Type() == "type_identifier") {
-				return c.Content(source)
+			if c != nil && (c.Kind() == "simple_identifier" || c.Kind() == "type_identifier") {
+				return c.Utf8Text(source)
 			}
 		}
 		return ""
@@ -209,15 +209,15 @@ func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		// type_identifier child (the typealias grammar variant exposes the
 		// alias name as type_identifier without a field tag).
 		if name := n.ChildByFieldName("name"); name != nil {
-			return name.Content(source)
+			return name.Utf8Text(source)
 		}
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			if c.Type() == "simple_identifier" || c.Type() == "type_identifier" {
-				return c.Content(source)
+			if c.Kind() == "simple_identifier" || c.Kind() == "type_identifier" {
+				return c.Utf8Text(source)
 			}
 		}
 	case "property_declaration":
@@ -225,15 +225,15 @@ func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		// the first. Kotlin allows `val (a, b) = pair` which produces
 		// multi_variable_declaration — skip those for v1 (users can still
 		// grep Unit.Content for the destructuring pattern).
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c == nil || c.Type() != "variable_declaration" {
+			if c == nil || c.Kind() != "variable_declaration" {
 				continue
 			}
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				cc := c.NamedChild(j)
-				if cc != nil && cc.Type() == "simple_identifier" {
-					return cc.Content(source)
+				if cc != nil && cc.Kind() == "simple_identifier" {
+					return cc.Utf8Text(source)
 				}
 			}
 		}
@@ -244,9 +244,9 @@ func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		// presence of binding_pattern_kind — return "" to skip plain
 		// params (the walker treats empty as "not a symbol to emit").
 		hasBinding := false
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c != nil && c.Type() == "binding_pattern_kind" {
+			if c != nil && c.Kind() == "binding_pattern_kind" {
 				hasBinding = true
 				break
 			}
@@ -254,20 +254,20 @@ func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 		if !hasBinding {
 			return ""
 		}
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c != nil && c.Type() == "simple_identifier" {
-				return c.Content(source)
+			if c != nil && c.Kind() == "simple_identifier" {
+				return c.Utf8Text(source)
 			}
 		}
 	case "companion_object":
 		// `companion object` without a name defaults to "Companion" in
 		// Kotlin; `companion object Factory` has an explicit identifier.
 		// Return the explicit name if present, else the implicit default.
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c != nil && (c.Type() == "simple_identifier" || c.Type() == "type_identifier") {
-				return c.Content(source)
+			if c != nil && (c.Kind() == "simple_identifier" || c.Kind() == "type_identifier") {
+				return c.Utf8Text(source)
 			}
 		}
 		return "Companion"
@@ -279,25 +279,25 @@ func (*KotlinGrammar) SymbolName(n *sitter.Node, source []byte) string {
 // package_header is the first statement in a file when present; return "" if
 // absent (matches Python / JS stem fallback).
 func (*KotlinGrammar) PackageName(root *sitter.Node, source []byte) string {
-	for i := 0; i < int(root.NamedChildCount()); i++ {
+	for i := uint(0); i < root.NamedChildCount(); i++ {
 		c := root.NamedChild(i)
-		if c == nil || c.Type() != "package_header" {
+		if c == nil || c.Kind() != "package_header" {
 			continue
 		}
 		// package_header's child is an identifier (possibly dotted — Kotlin's
 		// grammar flattens `foo.bar.baz` into a single identifier node in
 		// this context).
-		for j := 0; j < int(c.NamedChildCount()); j++ {
+		for j := uint(0); j < c.NamedChildCount(); j++ {
 			cc := c.NamedChild(j)
 			if cc == nil {
 				continue
 			}
-			if cc.Type() == "identifier" || cc.Type() == "simple_identifier" {
-				return strings.TrimSpace(cc.Content(source))
+			if cc.Kind() == "identifier" || cc.Kind() == "simple_identifier" {
+				return strings.TrimSpace(cc.Utf8Text(source))
 			}
 		}
 		// Fallback: content minus the leading "package " keyword.
-		txt := strings.TrimSpace(c.Content(source))
+		txt := strings.TrimSpace(c.Utf8Text(source))
 		txt = strings.TrimPrefix(txt, "package")
 		return strings.TrimSpace(txt)
 	}
@@ -311,28 +311,28 @@ func (*KotlinGrammar) PackageName(root *sitter.Node, source []byte) string {
 func (*KotlinGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
-		if n.Type() != "import_header" {
+		if n.Kind() != "import_header" {
 			return true
 		}
 		ref := ImportRef{}
 		wildcard := false
 		var path string
 		var alias string
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			switch c.Type() {
+			switch c.Kind() {
 			case "identifier", "simple_identifier":
 				if path == "" {
-					path = strings.TrimSpace(c.Content(source))
+					path = strings.TrimSpace(c.Utf8Text(source))
 				}
 			case "import_alias":
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					cc := c.NamedChild(j)
-					if cc != nil && (cc.Type() == "simple_identifier" || cc.Type() == "type_identifier") {
-						alias = cc.Content(source)
+					if cc != nil && (cc.Kind() == "simple_identifier" || cc.Kind() == "type_identifier") {
+						alias = cc.Utf8Text(source)
 						break
 					}
 				}
@@ -367,9 +367,9 @@ func (*KotlinGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string 
 		return nil
 	}
 	var out []string
-	for i := 0; i < int(mods.NamedChildCount()); i++ {
+	for i := uint(0); i < mods.NamedChildCount(); i++ {
 		c := mods.NamedChild(i)
-		if c == nil || c.Type() != "annotation" {
+		if c == nil || c.Kind() != "annotation" {
 			continue
 		}
 		if name := kotlinAnnotationName(c, source); name != "" {
@@ -414,7 +414,7 @@ func (*KotlinGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string 
 // a `companion` label.
 func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexer.Signal {
 	var out []indexer.Signal
-	if n.Type() == "class_declaration" {
+	if n.Kind() == "class_declaration" {
 		if hasAnonymousChild(n, "interface") {
 			out = append(out, indexer.Signal{Kind: "label", Value: "interface"})
 		}
@@ -426,7 +426,7 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 	// (not an object_declaration with a modifier). The `companion` keyword is
 	// intrinsic to the node, so emit the label by node-type check rather than
 	// by scanning modifiers.
-	if n.Type() == "companion_object" {
+	if n.Kind() == "companion_object" {
 		out = append(out, indexer.Signal{Kind: "label", Value: "companion"})
 	}
 	// Reified type parameters live in type_parameter_modifiers inside
@@ -441,10 +441,10 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 	// class_body into member functions and leak their `reified` up to the
 	// class itself (classes can't be reified). No test caught that leak
 	// because the modifier-coverage test only asserts positive labels.
-	if n.Type() == "function_declaration" {
+	if n.Kind() == "function_declaration" {
 		reified := false
 		walk(n, func(c *sitter.Node) bool {
-			switch c.Type() {
+			switch c.Kind() {
 			case "function_body":
 				// Don't descend into bodies — a `reified` keyword inside
 				// the body (in a nested lambda's type params, say) isn't
@@ -464,7 +464,7 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 	if mods == nil {
 		return out
 	}
-	for i := 0; i < int(mods.NamedChildCount()); i++ {
+	for i := uint(0); i < mods.NamedChildCount(); i++ {
 		c := mods.NamedChild(i)
 		if c == nil {
 			continue
@@ -474,7 +474,7 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 		// against the allow-list so stray / visibility / junk keywords
 		// don't leak into signals. visibility_modifier is deliberately
 		// NOT in the list (see function godoc).
-		switch c.Type() {
+		switch c.Kind() {
 		// reification_modifier is NOT listed here — it lives under
 		// type_parameter_modifiers inside type_parameters (a sibling of
 		// the function's `modifiers` node), not under `modifiers` itself.
@@ -482,7 +482,7 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 		case "class_modifier", "function_modifier", "member_modifier",
 			"inheritance_modifier", "property_modifier",
 			"parameter_modifier", "platform_modifier":
-			keyword := strings.TrimSpace(c.Content(source))
+			keyword := strings.TrimSpace(c.Utf8Text(source))
 			if keyword == "" {
 				continue
 			}
@@ -499,7 +499,7 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 // heuristic (constructor_invocation = extends, bare user_type = implements,
 // with interface / enum class declarations overriding the default mapping).
 func (*KotlinGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
-	if n.Type() != "class_declaration" && n.Type() != "object_declaration" {
+	if n.Kind() != "class_declaration" && n.Kind() != "object_declaration" {
 		return nil
 	}
 
@@ -507,12 +507,12 @@ func (*KotlinGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 	isEnum := hasAnonymousChild(n, "enum")
 
 	var out []ParentRef
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
-		if c == nil || c.Type() != "delegation_specifier" {
+		if c == nil || c.Kind() != "delegation_specifier" {
 			continue
 		}
-		for j := 0; j < int(c.NamedChildCount()); j++ {
+		for j := uint(0); j < c.NamedChildCount(); j++ {
 			target := c.NamedChild(j)
 			if target == nil {
 				continue
@@ -529,7 +529,7 @@ func (*KotlinGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 			case isInterface:
 				// `interface X : Y, Z` — every target is a parent interface.
 				relation = "extends"
-			case !isEnum && target.Type() == "constructor_invocation":
+			case !isEnum && target.Kind() == "constructor_invocation":
 				// Class with a concrete superclass (`: Base()`). Excluded
 				// for enums because an `enum class X : I()` would be a
 				// syntax error anyway.
@@ -543,8 +543,8 @@ func (*KotlinGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 				Name:     name,
 				Relation: relation,
 				Loc: indexer.Location{
-					Line:       int(target.StartPoint().Row) + 1,
-					Column:     int(target.StartPoint().Column) + 1,
+					Line:       int(target.StartPosition().Row) + 1,
+					Column:     int(target.StartPosition().Column) + 1,
 					ByteOffset: int(target.StartByte()),
 				},
 				Metadata: meta,
@@ -562,7 +562,7 @@ func (*KotlinGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 //                                  user_type is the interface being
 //                                  delegated
 func kotlinExtractParentType(n *sitter.Node, source []byte) (string, []string) {
-	switch n.Type() {
+	switch n.Kind() {
 	case "user_type":
 		return kotlinUserTypeName(n, source)
 	case "constructor_invocation", "explicit_delegation":
@@ -571,9 +571,9 @@ func kotlinExtractParentType(n *sitter.Node, source []byte) (string, []string) {
 		// expression (`Foo by bar`). Both expose the target type as a
 		// direct user_type child — the rest is arguments / delegate we
 		// don't need for inheritance edges.
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c != nil && c.Type() == "user_type" {
+			if c != nil && c.Kind() == "user_type" {
 				return kotlinUserTypeName(c, source)
 			}
 		}
@@ -592,22 +592,22 @@ func kotlinUserTypeName(n *sitter.Node, source []byte) (string, []string) {
 	var args []string
 	var collect func(*sitter.Node)
 	collect = func(node *sitter.Node) {
-		for i := 0; i < int(node.NamedChildCount()); i++ {
+		for i := uint(0); i < node.NamedChildCount(); i++ {
 			c := node.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			switch c.Type() {
+			switch c.Kind() {
 			case "simple_user_type":
 				collect(c)
 			case "simple_identifier", "type_identifier":
 				if len(args) == 0 { // only collect ids before a type_arguments block
-					ids = append(ids, c.Content(source))
+					ids = append(ids, c.Utf8Text(source))
 				}
 			case "type_arguments":
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					if a := c.NamedChild(j); a != nil {
-						if t := strings.TrimSpace(a.Content(source)); t != "" {
+						if t := strings.TrimSpace(a.Utf8Text(source)); t != "" {
 							args = append(args, t)
 						}
 					}
@@ -619,7 +619,7 @@ func kotlinUserTypeName(n *sitter.Node, source []byte) (string, []string) {
 	name := strings.Join(ids, ".")
 	if name == "" {
 		// Fallback: use the raw content; strip any `<...>` generics.
-		name = strings.TrimSpace(n.Content(source))
+		name = strings.TrimSpace(n.Utf8Text(source))
 		if idx := strings.Index(name, "<"); idx > 0 {
 			name = name[:idx]
 		}
@@ -652,20 +652,47 @@ func (*KotlinGrammar) ResolveParents(refs []indexer.Reference, path string, ctx 
 // both land as Metadata["receiver"]="String") so downstream queries don't
 // have to normalise.
 func (*KotlinGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]any {
-	if n.Type() != "function_declaration" {
+	if n.Kind() != "function_declaration" {
 		return nil
 	}
 	// Walk named children looking for a receiver type that appears BEFORE
-	// the simple_identifier (the function name). The only valid
-	// type-before-name shape is an extension receiver. nullable_type
-	// wraps a user_type for `String?`-style nullable receivers; unwrap
-	// one level before handing to kotlinUserTypeName.
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	// the simple_identifier (the function name). The valid type-before-name
+	// shapes are:
+	//   - receiver_type wrapping a user_type (fwcd/tree-sitter-kotlin idiom)
+	//   - bare user_type (older smacker-bundled grammar idiom; still
+	//     supported for forward compat)
+	//   - nullable_type wrapping a user_type for `String?`-style receivers
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
+		case "receiver_type":
+			// Unwrap the receiver_type to its inner user_type /
+			// nullable_type. Same handling as the bare forms below.
+			for j := uint(0); j < c.NamedChildCount(); j++ {
+				inner := c.NamedChild(j)
+				if inner == nil {
+					continue
+				}
+				switch inner.Kind() {
+				case "user_type":
+					if name, _ := kotlinUserTypeName(inner, source); name != "" {
+						return map[string]any{"receiver": name}
+					}
+				case "nullable_type":
+					for k := uint(0); k < inner.NamedChildCount(); k++ {
+						ut := inner.NamedChild(k)
+						if ut != nil && ut.Kind() == "user_type" {
+							if name, _ := kotlinUserTypeName(ut, source); name != "" {
+								return map[string]any{"receiver": name}
+							}
+						}
+					}
+				}
+			}
+			return nil
 		case "user_type":
 			name, _ := kotlinUserTypeName(c, source)
 			if name == "" {
@@ -673,9 +700,9 @@ func (*KotlinGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]a
 			}
 			return map[string]any{"receiver": name}
 		case "nullable_type":
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				inner := c.NamedChild(j)
-				if inner != nil && inner.Type() == "user_type" {
+				if inner != nil && inner.Kind() == "user_type" {
 					name, _ := kotlinUserTypeName(inner, source)
 					if name == "" {
 						return nil
@@ -685,14 +712,11 @@ func (*KotlinGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]a
 			}
 			return nil
 		case "simple_identifier":
-			// Reached the name without seeing a receiver type — this is
-			// a plain (non-extension) function.
 			return nil
 		}
 	}
 	return nil
 }
-
 
 // kotlinAnnotationName extracts the identifier from an annotation node.
 // `@Deprecated(...)` → "Deprecated"; `@foo.Bar` → "foo.Bar".
@@ -702,20 +726,20 @@ func kotlinAnnotationName(n *sitter.Node, source []byte) string {
 	// constructor_invocation / simple_identifier.
 	var probe func(*sitter.Node) string
 	probe = func(node *sitter.Node) string {
-		for i := 0; i < int(node.NamedChildCount()); i++ {
+		for i := uint(0); i < node.NamedChildCount(); i++ {
 			c := node.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			switch c.Type() {
+			switch c.Kind() {
 			case "user_type":
 				name, _ := kotlinUserTypeName(c, source)
 				if name != "" {
 					return name
 				}
 			case "constructor_invocation":
-				for j := 0; j < int(c.NamedChildCount()); j++ {
-					if cc := c.NamedChild(j); cc != nil && cc.Type() == "user_type" {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
+					if cc := c.NamedChild(j); cc != nil && cc.Kind() == "user_type" {
 						name, _ := kotlinUserTypeName(cc, source)
 						if name != "" {
 							return name
@@ -723,7 +747,7 @@ func kotlinAnnotationName(n *sitter.Node, source []byte) string {
 					}
 				}
 			case "simple_identifier", "type_identifier":
-				return c.Content(source)
+				return c.Utf8Text(source)
 			case "single_annotation", "multi_annotation", "annotation_use_site_target":
 				if r := probe(c); r != "" {
 					return r

@@ -3,8 +3,8 @@ package code
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/java"
+	sitter "github.com/tree-sitter/go-tree-sitter"
+	"github.com/tree-sitter/tree-sitter-java/bindings/go"
 
 	"librarian/internal/indexer"
 )
@@ -46,7 +46,7 @@ func NewJavaGrammar() *JavaGrammar { return &JavaGrammar{} }
 
 func (*JavaGrammar) Name() string               { return "java" }
 func (*JavaGrammar) Extensions() []string       { return []string{".java"} }
-func (*JavaGrammar) Language() *sitter.Language { return java.GetLanguage() }
+func (*JavaGrammar) Language() *sitter.Language { return sitter.NewLanguage(tree_sitter_java.Language()) }
 
 // CommentNodeTypes covers both line comments and block comments; Javadoc
 // (`/** ... */`) is represented as a block_comment, so the existing
@@ -96,21 +96,21 @@ func (*JavaGrammar) ContainerKinds() map[string]bool {
 // declarator's name so exactly one Unit is emitted per declaration; the full
 // declaration text (including all variables) is captured in Unit.Content.
 func (*JavaGrammar) SymbolName(n *sitter.Node, source []byte) string {
-	switch n.Type() {
+	switch n.Kind() {
 	case "class_declaration", "interface_declaration",
 		"enum_declaration", "record_declaration",
 		"method_declaration", "constructor_declaration":
 		if name := n.ChildByFieldName("name"); name != nil {
-			return name.Content(source)
+			return name.Utf8Text(source)
 		}
 	case "field_declaration":
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
-			if c == nil || c.Type() != "variable_declarator" {
+			if c == nil || c.Kind() != "variable_declarator" {
 				continue
 			}
 			if name := c.ChildByFieldName("name"); name != nil {
-				return name.Content(source)
+				return name.Utf8Text(source)
 			}
 		}
 	}
@@ -121,18 +121,18 @@ func (*JavaGrammar) SymbolName(n *sitter.Node, source []byte) string {
 // declaration. Returns "" for files without a package (default package / test
 // snippets), which falls back to the file stem like Python.
 func (*JavaGrammar) PackageName(root *sitter.Node, source []byte) string {
-	for i := 0; i < int(root.NamedChildCount()); i++ {
+	for i := uint(0); i < root.NamedChildCount(); i++ {
 		c := root.NamedChild(i)
-		if c == nil || c.Type() != "package_declaration" {
+		if c == nil || c.Kind() != "package_declaration" {
 			continue
 		}
-		for j := 0; j < int(c.NamedChildCount()); j++ {
+		for j := uint(0); j < c.NamedChildCount(); j++ {
 			cc := c.NamedChild(j)
 			if cc == nil {
 				continue
 			}
-			if cc.Type() == "scoped_identifier" || cc.Type() == "identifier" {
-				return cc.Content(source)
+			if cc.Kind() == "scoped_identifier" || cc.Kind() == "identifier" {
+				return cc.Utf8Text(source)
 			}
 		}
 	}
@@ -146,7 +146,7 @@ func (*JavaGrammar) PackageName(root *sitter.Node, source []byte) string {
 func (*JavaGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 	var out []ImportRef
 	walk(root, func(n *sitter.Node) bool {
-		if n.Type() != "import_declaration" {
+		if n.Kind() != "import_declaration" {
 			return true
 		}
 		ref := ImportRef{}
@@ -154,17 +154,17 @@ func (*JavaGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 		// All children (not just named) so the anonymous `static` and
 		// `asterisk` tokens are both visible. The scoped_identifier /
 		// identifier carries the dotted path; the asterisk marks `.*`.
-		for i := 0; i < int(n.ChildCount()); i++ {
+		for i := uint(0); i < n.ChildCount(); i++ {
 			c := n.Child(i)
 			if c == nil {
 				continue
 			}
-			switch c.Type() {
+			switch c.Kind() {
 			case "static":
 				ref.Static = true
 			case "scoped_identifier", "identifier":
 				if ref.Path == "" {
-					ref.Path = c.Content(source)
+					ref.Path = c.Utf8Text(source)
 				}
 			case "asterisk":
 				wildcard = true
@@ -188,9 +188,9 @@ func (*JavaGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 // — they survive in Unit.Content if the caller needs the full form.
 func (*JavaGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string {
 	var mods *sitter.Node
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
-		if c != nil && c.Type() == "modifiers" {
+		if c != nil && c.Kind() == "modifiers" {
 			mods = c
 			break
 		}
@@ -200,12 +200,12 @@ func (*JavaGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string {
 	}
 
 	var out []string
-	for i := 0; i < int(mods.NamedChildCount()); i++ {
+	for i := uint(0); i < mods.NamedChildCount(); i++ {
 		c := mods.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "marker_annotation", "annotation":
 			if name := javaAnnotationName(c, source); name != "" {
 				out = append(out, name)
@@ -235,12 +235,12 @@ func (*JavaGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string {
 // declares.
 func (*JavaGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 	var out []ParentRef
-	for i := 0; i < int(n.NamedChildCount()); i++ {
+	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch c.Kind() {
 		case "superclass":
 			out = append(out, javaParentsFromTypeContainer(c, "extends", source)...)
 		case "super_interfaces":
@@ -273,20 +273,20 @@ func javaParentsFromTypeContainer(container *sitter.Node, relation string, sourc
 			Name:     name,
 			Relation: relation,
 			Loc: indexer.Location{
-				Line:       int(t.StartPoint().Row) + 1,
-				Column:     int(t.StartPoint().Column) + 1,
+				Line:       int(t.StartPosition().Row) + 1,
+				Column:     int(t.StartPosition().Column) + 1,
 				ByteOffset: int(t.StartByte()),
 			},
 			Metadata: meta,
 		})
 	}
-	for i := 0; i < int(container.NamedChildCount()); i++ {
+	for i := uint(0); i < container.NamedChildCount(); i++ {
 		c := container.NamedChild(i)
 		if c == nil {
 			continue
 		}
-		if c.Type() == "type_list" {
-			for j := 0; j < int(c.NamedChildCount()); j++ {
+		if c.Kind() == "type_list" {
+			for j := uint(0); j < c.NamedChildCount(); j++ {
 				if cc := c.NamedChild(j); cc != nil {
 					add(cc)
 				}
@@ -308,29 +308,29 @@ func javaParentsFromTypeContainer(container *sitter.Node, relation string, sourc
 // general Java syntax but never legal in an extends/implements list, so
 // returning "" there silently skips them.
 func extractJavaTypeName(n *sitter.Node, source []byte) (string, []string) {
-	switch n.Type() {
+	switch n.Kind() {
 	case "type_identifier", "scoped_type_identifier":
-		return strings.TrimSpace(n.Content(source)), nil
+		return strings.TrimSpace(n.Utf8Text(source)), nil
 	case "generic_type":
 		var name string
 		var args []string
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			switch c.Type() {
+			switch c.Kind() {
 			case "type_identifier", "scoped_type_identifier":
 				if name == "" {
-					name = strings.TrimSpace(c.Content(source))
+					name = strings.TrimSpace(c.Utf8Text(source))
 				}
 			case "type_arguments":
-				for j := 0; j < int(c.NamedChildCount()); j++ {
+				for j := uint(0); j < c.NamedChildCount(); j++ {
 					cc := c.NamedChild(j)
 					if cc == nil {
 						continue
 					}
-					if t := strings.TrimSpace(cc.Content(source)); t != "" {
+					if t := strings.TrimSpace(cc.Utf8Text(source)); t != "" {
 						args = append(args, t)
 					}
 				}
@@ -372,12 +372,12 @@ func javaAnnotationName(n *sitter.Node, source []byte) string {
 	name := n.ChildByFieldName("name")
 	if name == nil {
 		// Some tree-sitter versions expose the name as an un-fielded child.
-		for i := 0; i < int(n.NamedChildCount()); i++ {
+		for i := uint(0); i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			if c == nil {
 				continue
 			}
-			if c.Type() == "identifier" || c.Type() == "scoped_identifier" {
+			if c.Kind() == "identifier" || c.Kind() == "scoped_identifier" {
 				name = c
 				break
 			}
@@ -386,5 +386,5 @@ func javaAnnotationName(n *sitter.Node, source []byte) string {
 	if name == nil {
 		return ""
 	}
-	return strings.TrimSpace(name.Content(source))
+	return strings.TrimSpace(name.Utf8Text(source))
 }

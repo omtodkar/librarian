@@ -253,6 +253,41 @@ func TestSwiftGrammar_ExtensionMemberReceiverMetadata(t *testing.T) {
 	}
 }
 
+// Typealiases, subscripts, and init declarations inside an extension
+// all carry receiver metadata — gaps here would silently hide members
+// from "all extensions of X" queries.
+func TestSwiftGrammar_ExtensionMemberReceiverMetadata_AllKinds(t *testing.T) {
+	src := []byte(`extension Collection {
+    typealias Head = Element
+    subscript(head _: Int) -> Element? { first }
+    init(single e: Element) { self.init() }
+    func peek() -> Element? { first }
+    var tail: Collection { self }
+}
+`)
+	h := code.New(code.NewSwiftGrammar())
+	doc, err := h.Parse("c.swift", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, path := range []string{
+		"c.Collection.Head",
+		"c.Collection.subscript",
+		"c.Collection.init",
+		"c.Collection.peek",
+		"c.Collection.tail",
+	} {
+		u := findByPath(doc, path)
+		if u == nil {
+			t.Errorf("missing Unit at %q", path)
+			continue
+		}
+		if got, _ := u.Metadata["receiver"].(string); got != "Collection" {
+			t.Errorf("%s receiver = %q, want %q", path, got, "Collection")
+		}
+	}
+}
+
 // Generic inheritance: `class Cache<K: Hashable, V>: NSObject` — NSObject
 // lands as extends with the generic type arguments stripped (they live on
 // the class_declaration's type_parameters, not the inheritance_specifier).
