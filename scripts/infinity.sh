@@ -163,8 +163,10 @@ cmd_status() {
     if is_running; then
         echo "Running: pid $(cat "$PIDFILE"), port $PORT"
         echo ""
-        echo "Loaded models (/v1/models):"
-        curl -sf "http://127.0.0.1:$PORT/v1/models" 2>/dev/null |
+        echo "Loaded models (/models):"
+        # Infinity serves /models directly, not /v1/models — same non-OpenAI
+        # divergence as /embeddings vs /v1/embeddings.
+        curl -sf "http://127.0.0.1:$PORT/models" 2>/dev/null |
             python3 -m json.tool 2>/dev/null ||
             echo "  (endpoint not yet responding — still warming up or failed; check: $0 logs)"
     else

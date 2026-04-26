@@ -33,6 +33,22 @@ Configure your assistant to launch it. `librarian install` writes most of this f
 }
 ```
 
+The `command` field resolves against `PATH` by default. If the binary is only built in-repo (e.g. `go build -o librarian .`), use an absolute path instead — `/path/to/your/project/librarian`. When the server needs environment variables that aren't already exported in your shell (typically `LIBRARIAN_EMBEDDING_API_KEY` for local embedders), pass them in an `env` block:
+
+```json
+{
+  "mcpServers": {
+    "librarian": {
+      "command": "/path/to/project/librarian",
+      "args": ["mcp", "serve"],
+      "env": {
+        "LIBRARIAN_EMBEDDING_API_KEY": "local"
+      }
+    }
+  }
+}
+```
+
 ### Cursor — `.cursor/mcp.json`
 
 ```json

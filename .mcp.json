@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "librarian": {
+      "command": "./librarian",
+      "args": ["mcp", "serve"],
+      "env": {
+        "LIBRARIAN_EMBEDDING_API_KEY": "local"
+      }
+    }
+  }
+}

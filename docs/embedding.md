@@ -63,14 +63,14 @@ If none resolves, initialisation fails with an error.
 
 ## OpenAIEmbedder
 
-`internal/embedding/openai.go` — calls any OpenAI-compatible `/v1/embeddings` endpoint.
+`internal/embedding/openai.go` — calls any OpenAI-compatible embedding endpoint. The OpenAI standard places embeddings at `/v1/embeddings`; the embedder appends `/embeddings` onto whatever `base_url` you supply, so most servers work by setting `base_url` to their `/v1` prefix. [Infinity](configuration.md#local-embedding--rerank-via-infinity) is the exception — it exposes `/embeddings` directly (no `/v1`), so you set `base_url` without the `/v1` suffix there.
 
 ### Configuration
 
 | Field | Required | Default | Notes |
 |---|---|---|---|
-| `embedding.base_url` | no | `http://localhost:1234/v1` | LM Studio's default; set to `http://localhost:11434/v1` for Ollama, your provider URL otherwise |
-| `embedding.model` | **yes** | — | Model identifier the endpoint understands (e.g. `text-embedding-3-small`, `nomic-embed-text`) |
+| `embedding.base_url` | no | `http://localhost:1234/v1` | Default is LM Studio. `http://localhost:11434/v1` for Ollama. `http://127.0.0.1:7997` for Infinity (note: **no `/v1` suffix**). Your provider's URL otherwise |
+| `embedding.model` | **yes** | — | Model identifier the endpoint understands (e.g. `text-embedding-3-small`, `nomic-embed-text`, `Qwen/Qwen3-Embedding-0.6B`) |
 | `embedding.api_key` | no | — | Sent as `Authorization: Bearer` when set; local providers often don't need it |
 
 ### API details
@@ -115,7 +115,7 @@ run 'librarian reindex --rebuild-vectors' to drop the vector table and re-embed 
 
 Recover with `librarian reindex --rebuild-vectors`, which drops `doc_chunk_vectors` + `embedding_meta` + `doc_chunks` and re-runs the docs indexing pass with the currently configured embedder. `documents` and `code_files` are preserved. The graph pass isn't re-run (it doesn't embed) — run `librarian index --skip-docs` after `reindex` if you also want to refresh the graph.
 
-Known limitation: if two runs use the same model name against different OpenAI-compatible endpoints (e.g. LM Studio vs. Ollama serving different underlying weights under the same `model:` name), the mismatch can't be detected — the model identifier is all we have.
+Known limitation: if two runs use the same model name against different OpenAI-compatible endpoints (e.g. LM Studio vs. Ollama vs. Infinity serving different underlying weights under the same `model:` name), the mismatch can't be detected — the model identifier is all we have.
 
 ## Pipeline flow
 
@@ -127,4 +127,4 @@ Known limitation: if two runs use the same model name against different OpenAI-c
 
 Indexing sends one batch request per ~100 chunks (configurable via `embedding.batch_size`). A small docs directory (~50 files, ~200 chunks) is two or three requests total — trivially cheap on any provider. A large monorepo with code + docs + PDFs running into hundreds of thousands of chunks scales linearly with request count; batching caps that at `total_chunks / batch_size`. Content-hash-based incremental indexing means only changed files re-embed on subsequent runs.
 
-For local endpoints (LM Studio, Ollama, vLLM), raising `batch_size` up to the server's limit (typically well under `openaiBatchMax` of 2048) reduces per-request overhead further. For Gemini, 100 is both the default and the documented cap — raising it has no effect because EmbedBatch clamps down silently.
+For local endpoints (LM Studio, Ollama, Infinity, vLLM), raising `batch_size` up to the server's limit (typically well under `openaiBatchMax` of 2048) reduces per-request overhead further. For Gemini, 100 is both the default and the documented cap — raising it has no effect because EmbedBatch clamps down silently.

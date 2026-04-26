@@ -71,7 +71,7 @@ get_context sym:auth.Service.Validate     → related files + callers, ~6k token
 | 🔌 **Seven assistants, one command** | `librarian install --all` wires CLAUDE.md, AGENTS.md, `.cursor/rules/`, `.github/copilot-instructions.md`, and friends in one shot. |
 | 📄 **Nine file formats** | Markdown, Go/Python/Java/JS/TS/TSX via tree-sitter, YAML/JSON/TOML/XML/properties/env, DOCX/XLSX/PPTX, PDF. |
 | ⚡ **Fast re-indexes** | SHA-256 hash per file → unchanged files skip `Parse` entirely. |
-| 🔑 **Bring your own embedder** | Gemini by default; point at LM Studio / Ollama / any OpenAI-compatible endpoint to run fully local. |
+| 🔑 **Bring your own embedder** | Gemini by default; point at LM Studio, Ollama, or run fully local via the bundled `make infinity-*` tooling (Qwen3-Embedding + gte-reranker on MPS/CUDA). |
 
 ---
 
