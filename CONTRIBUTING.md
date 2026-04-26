@@ -64,6 +64,12 @@ Plus a few project-specific preferences:
 
 Use [GitHub Issues](../../issues) for bug reports, feature requests, and discussion. Before filing a bug, search existing issues; before opening a PR for anything larger than a small fix, open an issue so we can align on approach.
 
+## Responsible Reporting
+
+If you discover a security vulnerability while working on the codebase — even a theoretical one — **do not open a public issue or PR**. Follow the coordinated disclosure process described in [SECURITY.md](SECURITY.md). In short: report privately via GitHub Private Vulnerability Reporting (or email if PVR isn't enabled), give maintainers the 90-day window, and we will credit you in the release notes.
+
+If the issue is a regular bug (not a security concern), open a GitHub issue as normal.
+
 ## License
 
 By contributing, you agree that your contributions are licensed under the MIT License (see [LICENSE](LICENSE)).
