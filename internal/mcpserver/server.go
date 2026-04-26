@@ -18,7 +18,7 @@ func Serve(s *store.Store, cfg *config.Config, embedder embedding.Embedder) erro
 		"0.1.0",
 		server.WithToolCapabilities(false),
 		server.WithRecovery(),
-		server.WithInstructions("Librarian provides semantic search across project documentation. Use search_docs for quick searches, get_context for comprehensive briefings with related code files and documents, get_document to read full documents, list_documents to browse the index, and update_docs to write and re-index documentation."),
+		server.WithInstructions("Librarian provides semantic search across project documentation. Use search_docs for quick searches, get_context for comprehensive briefings with related code files and documents, get_document to read full documents, list_documents to browse the index, update_docs to write and re-index documentation, and trace_rpc for end-to-end gRPC understanding (proto declaration + every language's implementation + input/output messages + sibling rpcs in one call)."),
 	)
 
 	registerSearchDocs(srv, s, embedder)
@@ -26,6 +26,7 @@ func Serve(s *store.Store, cfg *config.Config, embedder embedding.Embedder) erro
 	registerGetContext(srv, s, embedder)
 	registerListDocuments(srv, s)
 	registerUpdateDocs(srv, s, cfg, embedder)
+	registerTraceRPC(srv, s, cfg)
 
 	if err := server.ServeStdio(srv,
 		server.WithErrorLogger(log.New(os.Stderr, "[librarian] ", log.LstdFlags)),
