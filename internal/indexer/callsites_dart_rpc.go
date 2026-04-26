@@ -360,7 +360,7 @@ func dartExtractVarBinding(n *sitter.Node, src []byte) (varName, className strin
 		// We only accept the pattern where the FIRST selector after the identifier
 		// has argument_part as its direct child — excluding any method-chain selectors.
 		if c.Kind() == "identifier" {
-			next := c.NextSibling()
+			next := c.NextNamedSibling()
 			if next != nil && next.Kind() == "selector" && dartSelectorHasArgumentPart(next) {
 				className = strings.TrimSpace(c.Utf8Text(src))
 				return varName, className
@@ -394,7 +394,7 @@ func dartExtractFieldAssignmentBinding(n *sitter.Node, src []byte) (fieldName, c
 		}
 		// After `=`: same direct-constructor check as in dartExtractVarBinding.
 		if c.Kind() == "identifier" {
-			next := c.NextSibling()
+			next := c.NextNamedSibling()
 			if next != nil && next.Kind() == "selector" && dartSelectorHasArgumentPart(next) {
 				className = strings.TrimSpace(c.Utf8Text(src))
 				return fieldName, className
@@ -454,7 +454,7 @@ func dartGetterConstructorClass(fb *sitter.Node, src []byte) string {
 		if c == nil || c.Kind() != "identifier" {
 			continue
 		}
-		next := c.NextSibling()
+		next := c.NextNamedSibling()
 		if next != nil && next.Kind() == "selector" && dartSelectorHasArgumentPart(next) {
 			return strings.TrimSpace(c.Utf8Text(src))
 		}
@@ -586,15 +586,20 @@ func dartCollectCallEdges(root *sitter.Node, src []byte, stem string, bindings m
 }
 
 // dartSelectorMethodName returns the method name from a `selector` node
-// containing an unconditional_assignable_selector:
+// containing an unconditional_assignable_selector or conditional_assignable_selector:
 //
 //	selector → unconditional_assignable_selector → . → identifier("login")
+//	selector → conditional_assignable_selector   → ?. → identifier("login")
 //
+// The conditional form handles null-safe calls: `client?.login(req)`.
 // Returns "" for selectors that contain argument_part or other kinds.
 func dartSelectorMethodName(n *sitter.Node, src []byte) string {
 	for i := uint(0); i < n.ChildCount(); i++ {
 		c := n.Child(i)
-		if c == nil || c.Kind() != "unconditional_assignable_selector" {
+		if c == nil {
+			continue
+		}
+		if c.Kind() != "unconditional_assignable_selector" && c.Kind() != "conditional_assignable_selector" {
 			continue
 		}
 		for j := uint(0); j < c.ChildCount(); j++ {
