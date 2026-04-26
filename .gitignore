@@ -21,3 +21,5 @@ vendor/
 .dolt/
 *.db
 .beads-credential-key
+
+.infinity_cache/

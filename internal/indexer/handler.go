@@ -141,17 +141,20 @@ type ParsedDoc struct {
 //
 //	"section"     — markdown H1-H6 section
 //	"paragraph"   — standalone paragraph in formats without sections
-//	"class"       — class/struct declaration
+//	"class"       — class declaration (Go, Python, Java, TS, Kotlin, Swift)
+//	"struct"      — Swift struct declaration
 //	"interface"   — interface declaration (Java, TypeScript)
-//	"enum"        — enumeration declaration (Java, TypeScript)
+//	"enum"        — enumeration declaration (Java, TypeScript, Swift, Kotlin via label)
 //	"record"      — Java record
+//	"protocol"    — Swift protocol declaration
+//	"extension"   — Swift extension declaration (Title = target type)
 //	"object"      — Kotlin `object` / `companion object` declaration
 //	"function"    — standalone function/procedure declaration
-//	"method"      — method declaration (function inside a class)
-//	"constructor" — Java / Kotlin constructor
+//	"method"      — method declaration (function inside a class); Swift protocol_function_declaration
+//	"constructor" — Java / Kotlin constructor; Swift init_declaration
 //	"field"       — class field / top-level variable
-//	"property"    — Kotlin `val` / `var` property
-//	"type"        — type alias / type definition (Go, Python, TypeScript)
+//	"property"    — Kotlin `val` / `var` property; Swift property_declaration
+//	"type"        — type alias / type definition (Go, Python, TypeScript, Swift typealias)
 //	"key-path"    — YAML/JSON/TOML/properties key path
 //	"page"        — PDF page or slide
 //	"row"         — CSV row (opt-in, rare)
@@ -190,16 +193,23 @@ type Unit struct {
 	// Metadata is unit-specific extras. Conventional keys populated by one
 	// or more handlers (open set — handlers may introduce new keys):
 	//
-	//	"receiver"   — extension-function receiver type name, generics and
-	//	               nullability stripped. Emitted by the Kotlin grammar
-	//	               for `fun String.toSlug()` / `fun String?.x()` as
-	//	               "String" so "all extensions of String" is a cheap
-	//	               filter regardless of nullability.
-	//	"level"      — markdown section heading level (1-6). Emitted by
-	//	               the markdown handler for section Units.
-	//	"hierarchy"  — markdown section path as []string (e.g. ["Guide",
-	//	               "Installation"]). Emitted by the markdown handler
-	//	               alongside "level".
+	//	"receiver"    — extension-function/extension-member receiver type
+	//	                name, generics and nullability stripped. Emitted by
+	//	                the Kotlin grammar for `fun String.toSlug()` /
+	//	                `fun String?.x()` and the Swift grammar for members
+	//	                inside `extension String { ... }` — both produce
+	//	                "String" so "all extensions of String" is a cheap
+	//	                filter regardless of language.
+	//	"extends_type" — target type a Swift extension declaration extends.
+	//	                Emitted by the Swift grammar on Units of Kind
+	//	                "extension" as the complement of "receiver": the
+	//	                type the extension is extending rather than the
+	//	                receiver of an individual member.
+	//	"level"       — markdown section heading level (1-6). Emitted by
+	//	                the markdown handler for section Units.
+	//	"hierarchy"   — markdown section path as []string (e.g. ["Guide",
+	//	                "Installation"]). Emitted by the markdown handler
+	//	                alongside "level".
 	//
 	// Code-grammar keys are merged in by grammars implementing the optional
 	// symbolMetadataExtractor interface (code.go). Non-code handlers may

@@ -655,8 +655,11 @@ func isSymbolKind(kind string) bool {
 	case "function", "method", "constructor",
 		"class", "interface", "enum", "record",
 		"type", "field",
-		"object",   // Kotlin object / companion object declarations
-		"property": // Kotlin property (val / var declarations)
+		"object",    // Kotlin object / companion object declarations
+		"property",  // Kotlin property (val / var declarations)
+		"struct",    // Swift struct declarations
+		"extension", // Swift extension declarations (target type as Title)
+		"protocol":  // Swift protocol declarations
 		return true
 	}
 	return false

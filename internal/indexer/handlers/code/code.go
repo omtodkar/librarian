@@ -6,9 +6,9 @@
 // This package ships the Grammar interface + CodeHandler wiring. Concrete
 // languages live in sibling files (golang.go, python.go, java.go,
 // javascript.go — the last ships TypeScript, TSX, and JavaScript grammars
-// backed by a shared base — and kotlin.go). Each grammar registers through
-// the package-level init() so the extension → handler mapping stays in one
-// place.
+// backed by a shared base — kotlin.go, and swift.go). Each grammar
+// registers through the package-level init() so the extension → handler
+// mapping stays in one place.
 package code
 
 import (
@@ -78,12 +78,13 @@ var classFamilyUnitKinds = map[string]bool{
 	"class":          true,
 	"interface":      true,
 	"abstract_class": true, // reserved — TS abstract_class_declaration currently maps to Unit.Kind="class" via tsOnlySymbolKinds, so this entry doesn't fire today. Kept so a future grammar can emit the distinct kind without gate changes.
-	"enum":           true, // Java enum implements, and future languages
+	"enum":           true, // Java enum implements, Swift enum conformance
 	"record":         true, // Java records can implement
-	"protocol":       true, // reserved for lib-wji.4 Swift protocols
+	"protocol":       true, // Swift protocol declarations (lib-wji.4)
 	"mixin":          true, // reserved for lib-wji.3 Dart mixins
-	"struct":         true, // reserved for lib-wji.4 Swift structs / future others
-	"object":         true, // reserved for lib-wji.2 Kotlin objects
+	"struct":         true, // Swift struct declarations (lib-wji.4)
+	"extension":      true, // Swift extension declarations (lib-wji.4) — inheritance = adds conformances
+	"object":         true, // Kotlin object / companion object (lib-wji.2)
 	"type":           true, // Go type_spec wrapping interface_type (embedding)
 }
 
@@ -188,6 +189,25 @@ type importResolver interface {
 	ResolveImports(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
 }
 
+// symbolKindResolver is an optional interface a Grammar implements to
+// override the Unit.Kind of a just-matched symbol node at emission time.
+// The walker starts with the kind from SymbolKinds() and applies the
+// function→method rewrite (for functions inside class containers), then
+// gives grammars one more opportunity to refine. Invocation happens
+// inside extractUnits (symbol-match path), earlier than the other hooks
+// below which fire during buildUnit — this is why it appears first.
+//
+// Use case: Swift's tree-sitter node `class_declaration` covers four
+// semantically-distinct declarations (class / struct / enum / extension),
+// differentiated only by an anonymous keyword child. The static
+// SymbolKinds() map can't express this — all four would land as one Kind.
+// Swift implements SymbolKindFor to inspect the keyword and emit the
+// precise Kind ("class", "struct", "enum", "extension"). Grammars that
+// don't implement this are unaffected.
+type symbolKindResolver interface {
+	SymbolKindFor(node *sitter.Node, source []byte, declaredKind string) string
+}
+
 // symbolMetadataExtractor is an optional interface a Grammar implements to
 // contribute structured per-symbol metadata (beyond Signals and References).
 // The walker calls SymbolMetadata for every emitted Unit and merges the
@@ -197,6 +217,9 @@ type importResolver interface {
 //
 //   - Kotlin: `fun String.toSlug()` → {"receiver": "String"} so queries
 //     like "all extensions of String" become a cheap metadata filter.
+//   - Swift: members inside `extension String { ... }` → {"receiver":
+//     "String"}; the extension declaration itself → {"extends_type":
+//     "String"}.
 //
 // Candidate future users (not yet implemented, no beads filed):
 //
@@ -204,7 +227,7 @@ type importResolver interface {
 //     `func (s *Service) Foo()` vs `func (s Service) Foo()`. The AST
 //     already exposes the receiver; only the hook implementation is
 //     missing.
-//   - C# / Swift / Rust extension / impl target types — similar shape.
+//   - C# / Rust extension / impl target types — similar shape.
 //
 // Distinguished from extraSignalsExtractor by shape: signals are
 // append-oriented observations (labels, annotations, TODOs); metadata is a
@@ -416,6 +439,15 @@ func (h *CodeHandler) extractUnits(
 			emittedKind := declaredKind
 			if declaredKind == "function" && containerKind == "class" {
 				emittedKind = "method"
+			}
+			// Grammar-specific Kind override runs AFTER the function→method
+			// rewrite so the Swift resolver (which only cares about
+			// class_declaration flavors) doesn't need to re-implement the
+			// container-scope rewrite.
+			if r, ok := h.grammar.(symbolKindResolver); ok {
+				if override := r.SymbolKindFor(child, source, emittedKind); override != "" {
+					emittedKind = override
+				}
 			}
 			name := h.grammar.SymbolName(child, source)
 			if name != "" {
@@ -675,6 +707,20 @@ func resolveInheritsRefs(refs []indexer.Reference, local map[string]string) []in
 	return refs
 }
 
+// modifiersNode returns the first named `modifiers` child of a declaration
+// node, or nil. Used by Kotlin and Swift — both grammars wrap attributes,
+// annotations, and access/mutation modifiers in a shared `modifiers` node
+// whose presence is optional.
+func modifiersNode(n *sitter.Node) *sitter.Node {
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c != nil && c.Type() == "modifiers" {
+			return c
+		}
+	}
+	return nil
+}
+
 // extractImports runs the grammar's import extractor and appends each as a
 // ParsedDoc.Reference with Kind="import". Alias / Static / grammar-provided
 // Metadata all land on Reference.Metadata so the indexer pipeline can
@@ -815,6 +861,7 @@ func init() {
 		NewTypeScriptGrammar(),
 		NewTSXGrammar(),
 		NewKotlinGrammar(),
+		NewSwiftGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}

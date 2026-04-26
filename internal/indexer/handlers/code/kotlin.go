@@ -362,7 +362,7 @@ func (*KotlinGrammar) Imports(root *sitter.Node, source []byte) []ImportRef {
 // name without the leading `@`. Argument lists (`@Deprecated("msg")`) are
 // dropped; the name alone is the signal value.
 func (*KotlinGrammar) SymbolAnnotations(n *sitter.Node, source []byte) []string {
-	mods := kotlinModifiersNode(n)
+	mods := modifiersNode(n)
 	if mods == nil {
 		return nil
 	}
@@ -460,7 +460,7 @@ func (*KotlinGrammar) SymbolExtraSignals(n *sitter.Node, source []byte) []indexe
 			out = append(out, indexer.Signal{Kind: "label", Value: "reified"})
 		}
 	}
-	mods := kotlinModifiersNode(n)
+	mods := modifiersNode(n)
 	if mods == nil {
 		return out
 	}
@@ -693,17 +693,6 @@ func (*KotlinGrammar) SymbolMetadata(n *sitter.Node, source []byte) map[string]a
 	return nil
 }
 
-// kotlinModifiersNode returns the `modifiers` child of a declaration node,
-// or nil. Kotlin puts annotations + modifiers in a shared wrapper.
-func kotlinModifiersNode(n *sitter.Node) *sitter.Node {
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		c := n.NamedChild(i)
-		if c != nil && c.Type() == "modifiers" {
-			return c
-		}
-	}
-	return nil
-}
 
 // kotlinAnnotationName extracts the identifier from an annotation node.
 // `@Deprecated(...)` → "Deprecated"; `@foo.Bar` → "foo.Bar".

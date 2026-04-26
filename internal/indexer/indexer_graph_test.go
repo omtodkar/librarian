@@ -863,6 +863,18 @@ class PyChild(PyBase):
 		"src/ts/tschild.ts": `import { TsBase } from "./tsbase";
 class TsChild extends TsBase {}
 `,
+		// Swift: exercises lib-wji.4's per-flavor heuristic (first
+		// inheritance_specifier on a class is extends), extension Unit
+		// Kind with target-as-Title, and the Unit.Metadata["extends_type"]
+		// surface on the extension itself.
+		"src/swift/SwBase.swift": `class SwBase {}
+`,
+		"src/swift/SwChild.swift": `class SwChild: SwBase, Codable {}
+`,
+		"src/swift/SwExt.swift": `extension String: Identifiable {
+    public var id: String { self }
+}
+`,
 		// Kotlin: exercises the full lib-wji.2 pipeline (SymbolParents,
 		// ResolveParents, constructor_invocation → extends heuristic) +
 		// the lib-wji.2-round-3 fixes (companion object walking, primary-
@@ -924,6 +936,12 @@ fun String.ktSlug(): String = this.lowercase()
 		// heuristic maps to relation=extends. KtBase imported cross-file,
 		// so ResolveParents rewrites the bare name to the FQN.
 		{"kotlin", "sym:com.example.kt.KtChild", "sym:com.example.kt.KtBase", "extends"},
+		// Swift's per-flavor heuristic: first inheritance_specifier on a
+		// class-flavor declaration is relation=extends. SwBase is in the
+		// same stem (no imports to resolve), so it stays as the bare
+		// name; since there's no cross-file symbol resolver, the
+		// unresolved=true flag lands but the edge still materialises.
+		{"swift", "sym:SwChild.SwChild", "sym:SwBase", "extends"},
 	}
 
 	for _, tc := range cases {
@@ -1015,6 +1033,37 @@ fun String.ktSlug(): String = this.lowercase()
 		}
 		if !containsJSON(n.Metadata, `"receiver":"String"`) {
 			t.Errorf("expected receiver metadata on ktSlug symbol node; got %q", n.Metadata)
+		}
+	})
+	t.Run("swift_extension_target_metadata", func(t *testing.T) {
+		// `extension String: Identifiable` — the extension Unit itself
+		// should land as sym:SwExt.String with Kind=symbol (via the
+		// "extension" isSymbolKind entry) and carry extends_type=String
+		// in its metadata.
+		n, err := s.GetNode("sym:SwExt.String")
+		if err != nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		if n == nil {
+			t.Fatalf("extension String symbol missing")
+		}
+		if !containsJSON(n.Metadata, `"extends_type":"String"`) {
+			t.Errorf("expected extends_type=String on extension symbol node; got %q", n.Metadata)
+		}
+	})
+	t.Run("swift_extension_member_receiver", func(t *testing.T) {
+		// `extension String { public var id: String { self } }` —
+		// the property Unit gets Metadata["receiver"]="String" via
+		// SymbolMetadata on the enclosing extension.
+		n, err := s.GetNode("sym:SwExt.String.id")
+		if err != nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		if n == nil {
+			t.Fatalf("extension property symbol missing")
+		}
+		if !containsJSON(n.Metadata, `"receiver":"String"`) {
+			t.Errorf("expected receiver=String on extension property node; got %q", n.Metadata)
 		}
 	})
 }

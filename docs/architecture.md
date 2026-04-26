@@ -16,7 +16,7 @@ Files (9+ formats)            Librarian CLI           SQLite + sqlite-vec
 │ docs/*.md        │   │  walker → handler   │   │ documents          │
 │ *.go .py .java   │──>│  parse → chunk      │──>│ doc_chunks         │
 │ .ts .tsx .js .kt │   │  signals + refs     │   │ doc_chunk_vectors  │
-│ .yaml .json .toml│   │  store + graph pass │   │ code_files + refs  │
+│ .swift .yaml     │   │  store + graph pass │   │ code_files + refs  │
 │ .docx .xlsx .pptx│   │                     │   │ graph_nodes/_edges │
 │ .pdf             │   └──────────┬──────────┘   └──────────┬─────────┘
 └──────────────────┘              │                         │
@@ -134,7 +134,7 @@ See [Storage Layer](storage.md) for full schema + operations and [Handlers](hand
 `librarian index` runs two passes, scoped to different roots:
 
 1. **Docs pass** over `docs_dir` — produces chunks + vectors + `mentions` edges from doc prose to referenced code files. This is the knowledge base: `search_docs` and `get_context` query here.
-2. **Graph pass** over `ProjectRoot` (the workspace root) — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes{kind=symbol}` with `contains` edges from their file, and emits `import` / `call` / `inherits` edges. The `inherits` edge covers class/interface/protocol parent relationships across every grammar (Java `extends`/`implements`, Python class bases, JS/TS class and interface heritage, Go interface embedding, Kotlin extends/implements via delegation_specifier heuristic); the flavor lives in `Edge.Metadata.relation` (`extends` / `implements` / `mixes` / `conforms` / `embeds`). No chunks, no vectors — structural only, so the knowledge base stays curated prose.
+2. **Graph pass** over `ProjectRoot` (the workspace root) — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes{kind=symbol}` with `contains` edges from their file, and emits `import` / `call` / `inherits` edges. The `inherits` edge covers class/interface/protocol parent relationships across every grammar (Java `extends`/`implements`, Python class bases, JS/TS class and interface heritage, Go interface embedding, Kotlin delegation_specifier heuristic, Swift per-flavor heuristic over inheritance_specifier nodes); the flavor lives in `Edge.Metadata.relation` (`extends` / `implements` / `mixes` / `conforms` / `embeds`). No chunks, no vectors — structural only, so the knowledge base stays curated prose.
 
 ```
  PASS 1: docs pass (docs_dir)

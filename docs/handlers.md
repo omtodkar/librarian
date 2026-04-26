@@ -40,17 +40,20 @@ Handlers emit these kinds into `Unit.Kind`:
 |---|---|
 | `section` | Markdown H1–H6 section, Office heading, PDF tagged heading |
 | `paragraph` | Standalone paragraph in formats without sections |
-| `class` | Class/struct declaration (Go, Python, Java, TS, Kotlin) |
+| `class` | Class declaration (Go, Python, Java, TS, Kotlin, Swift) |
+| `struct` | Swift struct declaration |
 | `interface` | Interface declaration (Java, TS) |
-| `enum` | Enumeration (Java, TS, Kotlin — `enum class` emits Kind=class + label=enum) |
+| `protocol` | Swift protocol declaration |
+| `extension` | Swift extension declaration — `Title` is the target type (`extension String {}` → Title=`String`) |
+| `enum` | Enumeration (Java, TS, Kotlin — `enum class` emits Kind=class + label=enum; Swift) |
 | `record` | Java record |
 | `object` | Kotlin `object` / `companion object` declaration |
-| `function` | Standalone function (Go, Python, JS, TS, Kotlin) |
-| `method` | Function inside a class container |
-| `constructor` | Java / Kotlin constructor (primary and secondary) |
+| `function` | Standalone function (Go, Python, JS, TS, Kotlin, Swift) |
+| `method` | Function inside a class/protocol container (all code grammars) |
+| `constructor` | Java / Kotlin constructor (primary and secondary); Swift `init` |
 | `field` | Class field / top-level variable (Java field, JS/TS property_signature) |
-| `property` | Kotlin `val` / `var` property (including primary-constructor `val`/`var` params) |
-| `type` | Type alias or type definition (Go, Python PEP 695/613, TS, Kotlin `typealias`) |
+| `property` | Kotlin `val` / `var` property (including primary-constructor `val`/`var` params); Swift `var` / `let` |
+| `type` | Type alias or type definition (Go, Python PEP 695/613, TS, Kotlin `typealias`, Swift `typealias`) |
 | `key-path` | YAML/JSON/TOML/properties/XML key path |
 | `page` | PDF page fallback |
 | `table` | Tabular summary (XLSX) |
@@ -88,17 +91,19 @@ Tree-sitter powered. Six languages share one `CodeHandler` wrapping per-language
 | TypeScript | `.ts` | everything above + interface, enum, type, abstract class, method signature, **class/interface extends + implements** |
 | TSX | `.tsx` | TypeScript + JSX |
 | Kotlin | `.kt` | class, interface, enum class, object, companion object, function, property, typealias, secondary constructor, `@annotation` signals, **22 modifier label signals** (data/sealed/open/abstract/inline/value/inner/lateinit/const/override/suspend/operator/infix/tailrec/external/noinline/crossinline/reified/expect/actual/annotation/companion + interface/enum keyword labels), **extends/implements** (`inherits`; heuristic: `constructor_invocation` target → extends, bare `user_type` → implements, interface-extends-interface → extends); explicit delegation (`: Bar by d`); same-file-import bare-name resolution including aliases; **extension-function receiver** via `Unit.Metadata["receiver"]` (nullable + generics stripped). Known upstream-grammar gaps: `fun interface` parses as ERROR, `context(Scope)` receivers parse as `call_expression` — tracked in lib-ljn |
+| Swift | `.swift` | class, struct, enum, protocol, extension (first-class Kind="extension" with target as Title), function, method, init, property, typealias, `@attribute` signals (@MainActor, @Published, @State, @available, @objc, @IBOutlet, etc.), **modifier label signals** (final, open, static, override, required, convenience, mutating, nonmutating, isolated, nonisolated, weak, unowned, lazy, dynamic, indirect + struct/enum/extension flavor labels), **inheritance** via `inheritance_specifier` children with per-flavor heuristic: `class X: A, B` → A=extends, B=conforms; `struct/enum X: A, B` → all conforms; `extension X: A, B` → all conforms; `protocol X: A, B` → all extends; `@testable import` sets `Reference.Metadata["testable"]=true` on the import ref (not a search signal); **extension-member receiver** via `Unit.Metadata["receiver"]` + extension Unit.Metadata["extends_type"] for the target type; same-file-import bare-name resolution |
 
 Each grammar implements the `Grammar` interface: AST node kinds mapped to Unit kinds, symbol name extraction, docstring extraction, import shapes, optional annotation + extra-signal extractors. The shared walker handles comment buffering (docstrings), container descent (class bodies), and rationale signal extraction (TODO/FIXME/HACK/XXX).
 
 Optional extractor interfaces a grammar may satisfy (type-asserted by the walker; grammars that don't implement them are unaffected):
 
-- `annotationExtractor` — surfaces Java `@Deprecated`, TS decorators, etc. as `Signal{Kind="annotation"}`.
-- `extraSignalsExtractor` — adds per-symbol signals of any Kind (JS/TS uses this for `exported` / `default-export` labels; Kotlin uses it for `data` / `sealed` / `suspend` / `reified` etc.).
+- `annotationExtractor` — surfaces Java `@Deprecated`, TS decorators, Swift `@MainActor` / `@Published` / `@available`, etc. as `Signal{Kind="annotation"}`.
+- `extraSignalsExtractor` — adds per-symbol signals of any Kind (JS/TS uses this for `exported` / `default-export` labels; Kotlin + Swift use it for `data`/`sealed`/`suspend`/`final`/`mutating` etc.).
 - `importResolver` — post-parse rewrite of import References (Python relative-import resolution, JS/TS module path resolution).
 - `inheritanceExtractor` — surfaces class-family parent relationships; the walker converts returned `ParentRef`s into `Reference{Kind="inherits"}` with `Source=<child Unit.Path>`, `Target=<parent name>`, and `Metadata.relation`.
-- `inheritanceResolver` — post-parse rewrite of inherits References (Java/JS/TS same-file-import bare-name lookup; Python dot-relative + from-import binding lookup). Runs AFTER `importResolver` so import targets are already in canonical form.
-- `symbolMetadataExtractor` — contributes structured per-symbol metadata (key/value map) merged into `Unit.Metadata`. Kotlin uses this for extension-function receiver types (`fun String.toSlug()` → `Metadata["receiver"]="String"`), keeping "all extensions of String" a cheap metadata filter.
+- `inheritanceResolver` — post-parse rewrite of inherits References (Java/JS/TS/Kotlin/Swift same-file-import bare-name lookup; Python dot-relative + from-import binding lookup). Runs AFTER `importResolver` so import targets are already in canonical form.
+- `symbolKindResolver` — overrides `Unit.Kind` at symbol-emission time. Used by Swift where a single `class_declaration` AST node covers four semantically-distinct flavors (class / struct / enum / extension) differentiated only by an anonymous keyword child.
+- `symbolMetadataExtractor` — contributes structured per-symbol metadata (key/value map) merged into `Unit.Metadata`. Kotlin and Swift use this for extension-function/member receiver types (`fun String.toSlug()` or `extension String { func slug() }` → `Metadata["receiver"]="String"`), keeping "all extensions of String" a cheap metadata filter.
 
 #### Python relative-import resolver
 

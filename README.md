@@ -132,7 +132,7 @@ DOCX/PPTX via `encoding/xml` over `archive/zip` (no AGPL dependencies); PDF via 
 | Category | Formats |
 |---|---|
 | Documentation | `.md`, `.markdown` |
-| Code (tree-sitter) | Go, Python, Java, JavaScript, TypeScript, TSX, Kotlin |
+| Code (tree-sitter) | Go, Python, Java, JavaScript, TypeScript, TSX, Kotlin, Swift |
 | Config | YAML, JSON, TOML, XML, `.properties`, `.env` |
 | Office | DOCX, XLSX, PPTX |
 | PDF | `.pdf` (with cascade: tagged-structure → bookmarks → font-size heuristic → per-page fallback) |

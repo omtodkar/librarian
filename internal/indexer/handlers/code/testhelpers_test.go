@@ -15,6 +15,19 @@ func findUnit(doc *indexer.ParsedDoc, title string) *indexer.Unit {
 	return nil
 }
 
+// findByPath returns the first Unit with the exact Unit.Path, or nil. Needed
+// when multiple Units share a Title (e.g. Swift's `extension String { var id }`
+// plus `struct User { var id }` both yield Units titled `id`, disambiguated
+// only by their container path).
+func findByPath(doc *indexer.ParsedDoc, path string) *indexer.Unit {
+	for i := range doc.Units {
+		if doc.Units[i].Path == path {
+			return &doc.Units[i]
+		}
+	}
+	return nil
+}
+
 // importTargets returns the set of Targets for all Kind="import" references.
 // Used by grammar tests that want to assert "these imports were recognised"
 // without caring about order or metadata.
