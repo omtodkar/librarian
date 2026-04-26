@@ -141,20 +141,22 @@ type ParsedDoc struct {
 //
 //	"section"     — markdown H1-H6 section
 //	"paragraph"   — standalone paragraph in formats without sections
-//	"class"       — class declaration (Go, Python, Java, TS, Kotlin, Swift)
-//	"struct"      — Swift struct declaration
-//	"interface"   — interface declaration (Java, TypeScript)
-//	"enum"        — enumeration declaration (Java, TypeScript, Swift, Kotlin via label)
-//	"record"      — Java record
-//	"protocol"    — Swift protocol declaration
-//	"extension"   — Swift extension declaration (Title = target type)
-//	"object"      — Kotlin `object` / `companion object` declaration
-//	"function"    — standalone function/procedure declaration
-//	"method"      — method declaration (function inside a class); Swift protocol_function_declaration
-//	"constructor" — Java / Kotlin constructor; Swift init_declaration
-//	"field"       — class field / top-level variable
-//	"property"    — Kotlin `val` / `var` property; Swift property_declaration
-//	"type"        — type alias / type definition (Go, Python, TypeScript, Swift typealias)
+//	"class"          — class declaration (Go, Python, Java, TS, Kotlin, Swift, Dart)
+//	"struct"         — Swift struct declaration
+//	"interface"      — interface declaration (Java, TypeScript)
+//	"enum"           — enumeration declaration (Java, TypeScript, Swift, Dart, Kotlin via label)
+//	"record"         — Java record
+//	"protocol"       — Swift protocol declaration
+//	"mixin"          — Dart mixin declaration
+//	"extension"      — Swift / Dart extension declaration (Swift: Title=target type; Dart: Title=extension's own name, target in Metadata["extends_type"])
+//	"extension_type" — Dart extension type declaration (Dart 3) — wrapping type, distinct from "extension"
+//	"object"         — Kotlin `object` / `companion object` declaration
+//	"function"       — standalone function/procedure declaration
+//	"method"         — method declaration (function inside a class); Swift protocol_function_declaration
+//	"constructor"    — Java / Kotlin constructor; Swift init_declaration; Dart constructor (default / named / factory)
+//	"field"          — class field / top-level variable
+//	"property"       — Kotlin `val` / `var` property; Swift property_declaration; Dart getter/setter
+//	"type"           — type alias / type definition (Go, Python, TypeScript, Swift typealias, Dart typedef)
 //	"key-path"    — YAML/JSON/TOML/properties key path
 //	"page"        — PDF page or slide
 //	"row"         — CSV row (opt-in, rare)
@@ -254,6 +256,13 @@ type Signal struct {
 //	"inherits"    — class/interface/protocol parent relationship; Metadata["relation"]
 //	                carries the flavor ("extends", "implements", "mixes", "conforms",
 //	                "embeds"). Source is populated with the containing symbol's Path.
+//	"requires"    — Dart `mixin M on Base` constraint. Not an inheritance parent —
+//	                a use-site type bound. Kept distinct from "inherits" so
+//	                "all parents of X" queries stay clean. Symbol → symbol.
+//	"part"        — Dart `part 'foo.dart'` / `part of 'bar.dart'` file-join
+//	                directive. Semantically a file-membership relation, not a
+//	                name binding — distinct from "import" so
+//	                `neighbors --edge-kind=import` stays clean. code_file → code_file.
 //	"config-key"  — document or config referencing another config key
 //	"doc-link"    — markdown linking to another document
 //

@@ -40,12 +40,14 @@ Handlers emit these kinds into `Unit.Kind`:
 |---|---|
 | `section` | Markdown H1–H6 section, Office heading, PDF tagged heading |
 | `paragraph` | Standalone paragraph in formats without sections |
-| `class` | Class declaration (Go, Python, Java, TS, Kotlin, Swift) |
+| `class` | Class declaration (Go, Python, Java, TS, Kotlin, Swift, Dart) |
 | `struct` | Swift struct declaration |
 | `interface` | Interface declaration (Java, TS) |
 | `protocol` | Swift protocol declaration |
-| `extension` | Swift extension declaration — `Title` is the target type (`extension String {}` → Title=`String`) |
-| `enum` | Enumeration (Java, TS, Kotlin — `enum class` emits Kind=class + label=enum; Swift) |
+| `mixin` | Dart `mixin` declaration — a reusable member bundle that can be applied with `with` |
+| `extension` | Swift extension declaration — `Title` is the target type (`extension String {}` → Title=`String`); Dart `extension Name on Target {}` — `Title` is the extension's own name, `Metadata["extends_type"]` is the target |
+| `extension_type` | Dart `extension type UserId(int id)` — a Dart 3 extension type, distinct from `extension` because it's a wrapping type (not just method injection). `Metadata["extends_type"]` is the representation type |
+| `enum` | Enumeration (Java, TS, Kotlin — `enum class` emits Kind=class + label=enum; Swift; Dart) |
 | `record` | Java record |
 | `object` | Kotlin `object` / `companion object` declaration |
 | `function` | Standalone function (Go, Python, JS, TS, Kotlin, Swift) |
@@ -93,7 +95,7 @@ Tree-sitter powered. Six languages share one `CodeHandler` wrapping per-language
 | Kotlin | `.kt` | class, interface, enum class, object, companion object, function, property, typealias, secondary constructor, `@annotation` signals, **22 modifier label signals** (data/sealed/open/abstract/inline/value/inner/lateinit/const/override/suspend/operator/infix/tailrec/external/noinline/crossinline/reified/expect/actual/annotation/companion + interface/enum keyword labels), **extends/implements** (`inherits`; heuristic: `constructor_invocation` target → extends, bare `user_type` → implements, interface-extends-interface → extends); explicit delegation (`: Bar by d`); same-file-import bare-name resolution including aliases; **extension-function receiver** via `Unit.Metadata["receiver"]` (nullable + generics stripped). Known upstream-grammar gaps: `fun interface` parses as ERROR, `context(Scope)` receivers parse as `call_expression` — tracked in lib-ljn |
 | Swift | `.swift` | class, struct, enum, protocol, extension (first-class Kind="extension" with target as Title), function, method, init, property, typealias, `@attribute` signals (@MainActor, @Published, @State, @available, @objc, @IBOutlet, etc.), **modifier label signals** (final, open, static, override, required, convenience, mutating, nonmutating, isolated, nonisolated, weak, unowned, lazy, dynamic, indirect + struct/enum/extension flavor labels), **inheritance** via `inheritance_specifier` children with per-flavor heuristic: `class X: A, B` → A=extends, B=conforms; `struct/enum X: A, B` → all conforms; `extension X: A, B` → all conforms; `protocol X: A, B` → all extends; `@testable import` sets `Reference.Metadata["testable"]=true` on the import ref (not a search signal); **extension-member receiver** via `Unit.Metadata["receiver"]` + extension Unit.Metadata["extends_type"] for the target type; same-file-import bare-name resolution |
 
-_Dart grammar is vendored at `internal/indexer/handlers/code/tree_sitter_dart/` (ABI 15, UserNobody14/tree-sitter-dart HEAD) but the handler file is not yet wired — that's lib-wji.3._
+| Dart | `.dart` | class, mixin, extension, extension_type, enum, type (typedef), function, method, constructor (factory_constructor_signature gets a `factory` label), property (getter/setter), field, `@annotation` signals, **class modifier labels** (abstract/sealed/base/interface/final/mixin), field modifier labels (final/const/static/late), `library foo.bar;` → PackageName, imports with `as`/`show`/`hide` metadata, **`part 'foo.dart'` emits Reference.Kind="part"** (edge kind `part`, code_file → code_file), **`mixin M on Base` emits Reference.Kind="requires"** (edge kind `requires`, symbol → symbol — NOT conflated with inheritance), **inheritance** via the single `inherits` edge covering all three relation flavors (extends/implements/mixes) plus Metadata.relation; Dart 3 syntax supported: sealed/base/final/interface class modifiers, records, patterns, enhanced enums, extension types, dot shorthand. Upstream-grammar quirk with error-recovery for `implements X with M` handled by the grammar via Utf8Text position split plus ERROR inner-identifier extraction |
 
 Each grammar implements the `Grammar` interface: AST node kinds mapped to Unit kinds, symbol name extraction, docstring extraction, import shapes, optional annotation + extra-signal extractors. The shared walker handles comment buffering (docstrings), container descent (class bodies), and rationale signal extraction (TODO/FIXME/HACK/XXX).
 

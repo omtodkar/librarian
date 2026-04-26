@@ -20,6 +20,8 @@ const (
 	EdgeKindSharedCodeRef = "shared_code_ref" // document → document (both mention same code file)
 	EdgeKindContains      = "contains"        // code_file → symbol (graph pass projects each parsed Unit into a symbol node tied to its file via this edge)
 	EdgeKindInherits      = "inherits"        // symbol → symbol (class/interface/protocol parent; Edge.Metadata carries a "relation" of extends/implements/mixes/conforms/embeds)
+	EdgeKindRequires      = "requires"        // symbol → symbol (Dart `mixin M on Base` — use-site constraint, not an inheritance parent; kept distinct so "all parents of X" queries stay clean)
+	EdgeKindPart          = "part"            // code_file → code_file (Dart `part 'foo.dart'` / `part of 'bar.dart'` file-join; a single Dart library lives across multiple files)
 )
 
 // Graph node kinds. Additional kinds will land as new handlers emit richer

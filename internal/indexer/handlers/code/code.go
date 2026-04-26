@@ -6,7 +6,7 @@
 // This package ships the Grammar interface + CodeHandler wiring. Concrete
 // languages live in sibling files (golang.go, python.go, java.go,
 // javascript.go — the last ships TypeScript, TSX, and JavaScript grammars
-// backed by a shared base — kotlin.go, and swift.go). Each grammar
+// backed by a shared base — kotlin.go, swift.go, and dart.go). Each grammar
 // registers through the package-level init() so the extension → handler
 // mapping stays in one place.
 package code
@@ -27,10 +27,16 @@ import (
 // Static is Java's `import static` form and false for other languages.
 // Metadata carries grammar-specific tags — used by TypeScript for
 // type_only/default/namespace markers — merged into Reference.Metadata.
+//
+// Kind overrides the emitted Reference.Kind. Default "" → "import". Dart
+// uses Kind="part" to distinguish `part 'foo.dart'` / `part of 'bar.dart'`
+// file-joins from ordinary imports — emitting them as Reference.Kind="part"
+// so `neighbors --edge-kind=import` stays clean.
 type ImportRef struct {
 	Path     string
 	Alias    string
 	Static   bool
+	Kind     string
 	Metadata map[string]any
 }
 
@@ -57,10 +63,15 @@ type ImportRef struct {
 // same-file import lookup), "unresolved_expression" (bool — base was a call /
 // non-identifier expression, like Python `class Foo(factory()):` or JS
 // `class Foo extends Mixin(Base)`; identifier-only fallback captured).
+//
+// Kind overrides the emitted Reference.Kind. Default "" → "inherits". Dart
+// uses Kind="requires" for `mixin M on Base` — a use-site constraint, not
+// an inheritance parent — so "all parents of X" queries stay clean.
 type ParentRef struct {
 	Name     string
 	Relation string
 	Loc      indexer.Location
+	Kind     string
 	Metadata map[string]any
 }
 
@@ -85,6 +96,7 @@ var classFamilyUnitKinds = map[string]bool{
 	"mixin":          true, // reserved for lib-wji.3 Dart mixins
 	"struct":         true, // Swift struct declarations (lib-wji.4)
 	"extension":      true, // Swift extension declarations (lib-wji.4) — inheritance = adds conformances
+	"extension_type": true, // Dart extension_type_declaration (lib-wji.3) — implements clause
 	"object":         true, // Kotlin object / companion object (lib-wji.2)
 	"type":           true, // Go type_spec wrapping interface_type (embedding)
 }
@@ -440,7 +452,7 @@ func (h *CodeHandler) extractUnits(
 			// (e.g., JS class-expression-as-value) still propagate the
 			// original scope kind downstream.
 			emittedKind := declaredKind
-			if declaredKind == "function" && containerKind == "class" {
+			if declaredKind == "function" && classFamilyUnitKinds[containerKind] {
 				emittedKind = "method"
 			}
 			// Grammar-specific Kind override runs AFTER the function→method
@@ -604,8 +616,12 @@ func (h *CodeHandler) extractParentRefs(n *sitter.Node, source []byte, unitPath,
 		if p.Relation != "" {
 			meta["relation"] = p.Relation
 		}
+		kind := p.Kind
+		if kind == "" {
+			kind = "inherits"
+		}
 		doc.Refs = append(doc.Refs, indexer.Reference{
-			Kind:     "inherits",
+			Kind:     kind,
 			Source:   unitPath,
 			Target:   p.Name,
 			Loc:      p.Loc,
@@ -730,7 +746,11 @@ func modifiersNode(n *sitter.Node) *sitter.Node {
 // surface them.
 func (h *CodeHandler) extractImports(root *sitter.Node, source []byte, doc *indexer.ParsedDoc) {
 	for _, imp := range h.grammar.Imports(root, source) {
-		ref := indexer.Reference{Kind: "import", Target: imp.Path}
+		kind := imp.Kind
+		if kind == "" {
+			kind = "import"
+		}
+		ref := indexer.Reference{Kind: kind, Target: imp.Path}
 		if imp.Alias != "" || imp.Static || len(imp.Metadata) > 0 {
 			ref.Metadata = map[string]any{}
 			for k, v := range imp.Metadata {
@@ -804,12 +824,34 @@ func walk(root *sitter.Node, visit func(*sitter.Node) bool) {
 	}
 }
 
+// findDescendant returns the first named descendant (DFS) matching kind,
+// or nil. Bails on first match — cheaper than walk() when only one
+// match is needed.
+func findDescendant(n *sitter.Node, kind string) *sitter.Node {
+	if n == nil {
+		return nil
+	}
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		c := n.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if c.Kind() == kind {
+			return c
+		}
+		if found := findDescendant(c, kind); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
 // findAncestor walks n.Parent() upward until it finds a node whose Type is
 // in types, or returns nil if no match is reached before the tree root.
 // Mirror of walk() for the upward direction. Package-shared since multiple
 // grammars may need to walk up to a scope-carrying ancestor (Kotlin's
 // secondary_constructor → class_declaration to borrow the class's name;
-// future: Go method receivers, Swift extension targets).
+// Swift extension members → enclosing extension target).
 func findAncestor(n *sitter.Node, types ...string) *sitter.Node {
 	for p := n.Parent(); p != nil; p = p.Parent() {
 		for _, t := range types {
@@ -819,6 +861,18 @@ func findAncestor(n *sitter.Node, types ...string) *sitter.Node {
 		}
 	}
 	return nil
+}
+
+// nodeLocation returns an indexer.Location populated from a tree-sitter
+// Node's start position and byte offset. Package-shared because multiple
+// grammars open-code the same three-field struct literal when recording
+// Unit / Reference locations.
+func nodeLocation(n *sitter.Node) indexer.Location {
+	return indexer.Location{
+		Line:       int(n.StartPosition().Row) + 1,
+		Column:     int(n.StartPosition().Column) + 1,
+		ByteOffset: int(n.StartByte()),
+	}
 }
 
 // joinPath composes a dotted Unit.Path from a prefix and a name, handling
@@ -865,6 +919,7 @@ func init() {
 		NewTSXGrammar(),
 		NewKotlinGrammar(),
 		NewSwiftGrammar(),
+		NewDartGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}

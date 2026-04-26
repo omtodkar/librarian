@@ -316,4 +316,29 @@ func TestGraph_Neighbors_KindFilter(t *testing.T) {
 	if len(none) != 0 {
 		t.Errorf("unknown-kind filter edges = %d, want 0", len(none))
 	}
+
+	// Dart-introduced kinds round-trip through the filter as raw
+	// strings — no special handling needed in the store layer. Guards
+	// against a future consumer treating these kinds specially.
+	s.UpsertNode(Node{ID: "sym:Mixin", Kind: NodeKindSymbol})
+	s.UpsertNode(Node{ID: "file:main.dart", Kind: NodeKindCodeFile})
+	s.UpsertNode(Node{ID: "file:other.dart", Kind: NodeKindCodeFile})
+	s.UpsertEdge(Edge{From: "sym:Mixin", To: "sym:Base", Kind: EdgeKindRequires})
+	s.UpsertEdge(Edge{From: "file:main.dart", To: "file:other.dart", Kind: EdgeKindPart})
+
+	req, err := s.Neighbors("sym:Mixin", "out", EdgeKindRequires)
+	if err != nil {
+		t.Fatalf("Neighbors (requires): %v", err)
+	}
+	if len(req) != 1 || req[0].Kind != "requires" {
+		t.Errorf("requires filter = %+v, want single requires edge", req)
+	}
+
+	parts, err := s.Neighbors("file:main.dart", "out", EdgeKindPart)
+	if err != nil {
+		t.Fatalf("Neighbors (part): %v", err)
+	}
+	if len(parts) != 1 || parts[0].Kind != "part" {
+		t.Errorf("part filter = %+v, want single part edge", parts)
+	}
 }

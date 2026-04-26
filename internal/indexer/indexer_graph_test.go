@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	"librarian/internal/config"
@@ -892,6 +894,23 @@ data class KtChild(val name: String) : KtBase("child") {
 }
 fun String.ktSlug(): String = this.lowercase()
 `,
+		// Dart: exercises lib-wji.3's per-flavor heuristic (extends +
+		// implements + with on a single class, emitted as three inherits
+		// edges with distinct Metadata.relation), plus the two new
+		// Reference.Kinds — `requires` on mixin on-clauses and `part` on
+		// part directives — that are ONLY produced by the Dart grammar.
+		"src/dart/dr_base.dart": `library dr.base;
+class DrBase {}
+`,
+		"src/dart/dr_child.dart": `library dr.child;
+class DrChild extends DrBase implements Comparable with Mixable {}
+`,
+		"src/dart/dr_mixin.dart": `library dr.mixin;
+mixin Mixable on DrBase {}
+`,
+		"src/dart/dr_library.dart": `library dr.library;
+part 'dr_library.g.dart';
+`,
 	}
 	for rel, body := range files {
 		abs := filepath.Join(dir, rel)
@@ -942,6 +961,12 @@ fun String.ktSlug(): String = this.lowercase()
 		// name; since there's no cross-file symbol resolver, the
 		// unresolved=true flag lands but the edge still materialises.
 		{"swift", "sym:SwChild.SwChild", "sym:SwBase", "extends"},
+		// Dart's class heritage: `class DrChild extends DrBase implements
+		// Comparable with Mixable` emits three inherits edges. The
+		// extends edge (asserted here) is the clean case; the implements
+		// + mixes edges are verified in the dart_inheritance_all_relations
+		// subtest below.
+		{"dart", "sym:dr.child.DrChild", "sym:DrBase", "extends"},
 	}
 
 	for _, tc := range cases {
@@ -1066,6 +1091,92 @@ fun String.ktSlug(): String = this.lowercase()
 			t.Errorf("expected receiver=String on extension property node; got %q", n.Metadata)
 		}
 	})
+	t.Run("dart_inheritance_all_relations", func(t *testing.T) {
+		// `class DrChild extends DrBase implements Comparable with Mixable`
+		// should produce three inherits edges with distinct relation values.
+		// The extends edge is already verified by the table-driven cases
+		// above; here we check implements + mixes land correctly.
+		edges, err := s.Neighbors("sym:dr.child.DrChild", "out", store.EdgeKindInherits)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		wantByTarget := map[string]string{
+			"sym:DrBase":     `"relation":"extends"`,
+			"sym:Comparable": `"relation":"implements"`,
+			"sym:Mixable":    `"relation":"mixes"`,
+		}
+		seen := map[string]string{}
+		for _, e := range edges {
+			seen[e.To] = e.Metadata
+		}
+		for target, wantRelation := range wantByTarget {
+			meta, ok := seen[target]
+			if !ok {
+				t.Errorf("missing inherits edge to %s (got targets %v)", target, keys(seen))
+				continue
+			}
+			if !containsJSON(meta, wantRelation) {
+				t.Errorf("edge to %s: expected %s, got %q", target, wantRelation, meta)
+			}
+		}
+	})
+	t.Run("dart_mixin_on_emits_requires_edge", func(t *testing.T) {
+		// `mixin Mixable on DrBase` emits a Reference.Kind="requires",
+		// which materialises as an EdgeKindRequires edge separately from
+		// the inherits edges above. Verifies the new edge kind end-to-end.
+		edges, err := s.Neighbors("sym:dr.mixin.Mixable", "out", store.EdgeKindRequires)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		found := false
+		for _, e := range edges {
+			if e.To == "sym:DrBase" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected requires edge from Mixable to DrBase; got edges %+v", edges)
+		}
+		// Mixable must NOT appear in the inherits edge list.
+		inh, err := s.Neighbors("sym:dr.mixin.Mixable", "out", store.EdgeKindInherits)
+		if err != nil {
+			t.Fatalf("Neighbors inherits: %v", err)
+		}
+		for _, e := range inh {
+			if e.To == "sym:DrBase" {
+				t.Errorf("Mixable's on-clause leaked into inherits edge (should be requires only): %+v", e)
+			}
+		}
+	})
+	t.Run("dart_part_directive_emits_part_edge", func(t *testing.T) {
+		// `part 'dr_library.g.dart'` emits a Reference.Kind="part",
+		// materialising as an EdgeKindPart edge from the library file
+		// to the part file. Target routes to CodeFileNodeID.
+		edges, err := s.Neighbors("file:src/dart/dr_library.dart", "out", store.EdgeKindPart)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		found := false
+		for _, e := range edges {
+			if strings.Contains(e.To, "dr_library.g.dart") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected part edge to dr_library.g.dart; got %+v", edges)
+		}
+	})
+}
+
+// keys returns the sorted key set of a map[string]string for stable
+// failure messages.
+func keys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // containsJSON is a forgiving substring check used above because Edge.Metadata

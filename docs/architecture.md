@@ -122,9 +122,9 @@ Eight persistent tables plus one virtual table. Three primary entity tables (`do
                   │    "sym:…",    │  │  weight      │
                   │    "key:…")    │  └──────────────┘
                   │  kind, label   │  typed edges:
-                  │  source_path   │   mentions
-                  │  metadata      │   shared_code_ref
-                  └────────────────┘   imports, calls, …
+                  │  source_path   │   mentions, shared_code_ref
+                  │  metadata      │   contains, import, call
+                  └────────────────┘   inherits, requires, part
 ```
 
 See [Storage Layer](storage.md) for full schema + operations and [Handlers](handlers.md) for how each format projects into these tables.
@@ -134,7 +134,7 @@ See [Storage Layer](storage.md) for full schema + operations and [Handlers](hand
 `librarian index` runs two passes, scoped to different roots:
 
 1. **Docs pass** over `docs_dir` — produces chunks + vectors + `mentions` edges from doc prose to referenced code files. This is the knowledge base: `search_docs` and `get_context` query here.
-2. **Graph pass** over `ProjectRoot` (the workspace root) — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes{kind=symbol}` with `contains` edges from their file, and emits `import` / `call` / `inherits` edges. The `inherits` edge covers class/interface/protocol parent relationships across every grammar (Java `extends`/`implements`, Python class bases, JS/TS class and interface heritage, Go interface embedding, Kotlin delegation_specifier heuristic, Swift per-flavor heuristic over inheritance_specifier nodes); the flavor lives in `Edge.Metadata.relation` (`extends` / `implements` / `mixes` / `conforms` / `embeds`). No chunks, no vectors — structural only, so the knowledge base stays curated prose.
+2. **Graph pass** over `ProjectRoot` (the workspace root) — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes{kind=symbol}` with `contains` edges from their file, and emits `import` / `call` / `inherits` / `requires` / `part` edges. The `inherits` edge covers class/interface/protocol parent relationships across every grammar (Java `extends`/`implements`, Python class bases, JS/TS class and interface heritage, Go interface embedding, Kotlin delegation_specifier heuristic, Swift per-flavor heuristic over inheritance_specifier nodes, Dart class heritage with extends+implements+with); the flavor lives in `Edge.Metadata.relation` (`extends` / `implements` / `mixes` / `conforms` / `embeds`). `requires` (Dart) is a distinct edge kind for `mixin M on Base` use-site constraints — kept separate from inheritance. `part` (Dart) routes file-join declarations (code_file → code_file). No chunks, no vectors — structural only, so the knowledge base stays curated prose.
 
 ```
  PASS 1: docs pass (docs_dir)
@@ -189,7 +189,7 @@ Single-file database, zero external dependencies. The `vec0` virtual table is cr
 
 ### Graph spine across formats
 
-Every indexed thing — documents, code files, code symbols, config keys — projects into a `graph_node` with a namespaced id (`doc:…`, `file:…`, `sym:…`, `key:…`). Typed `graph_edges` (`mentions`, `shared_code_ref`, `contains`, `import`, `call`, `inherits`) connect them. CLI commands `neighbors`, `path`, and `context` walk this graph; `report` emits topology summaries (god nodes, communities, cross-cluster bridges). `neighbors --edge-kind=<kind>` filters by edge kind (repeatable). See [Storage Layer](storage.md#graph-layer).
+Every indexed thing — documents, code files, code symbols, config keys — projects into a `graph_node` with a namespaced id (`doc:…`, `file:…`, `sym:…`, `key:…`). Typed `graph_edges` (`mentions`, `shared_code_ref`, `contains`, `import`, `call`, `inherits`, `requires`, `part`) connect them. CLI commands `neighbors`, `path`, and `context` walk this graph; `report` emits topology summaries (god nodes, communities, cross-cluster bridges). `neighbors --edge-kind=<kind>` filters by edge kind (repeatable). See [Storage Layer](storage.md#graph-layer).
 
 *Inspired by [graphify](https://github.com/graphify/graphify).*
 

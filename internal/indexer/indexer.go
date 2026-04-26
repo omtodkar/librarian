@@ -655,11 +655,13 @@ func isSymbolKind(kind string) bool {
 	case "function", "method", "constructor",
 		"class", "interface", "enum", "record",
 		"type", "field",
-		"object",    // Kotlin object / companion object declarations
-		"property",  // Kotlin property (val / var declarations)
-		"struct",    // Swift struct declarations
-		"extension", // Swift extension declarations (target type as Title)
-		"protocol":  // Swift protocol declarations
+		"object",         // Kotlin object / companion object declarations
+		"property",       // Kotlin property (val / var declarations)
+		"struct",         // Swift struct declarations
+		"extension",      // Swift extension declarations (target type as Title)
+		"protocol",       // Swift protocol declarations
+		"mixin",          // Dart mixin declarations (lib-wji.3)
+		"extension_type": // Dart extension type declarations (lib-wji.3)
 		return true
 	}
 	return false
@@ -996,8 +998,10 @@ func graphTargetID(ref Reference) string {
 			return store.ExternalPackageNodeID(ref.Target)
 		}
 		return store.SymbolNodeID(ref.Target)
-	case "call", "inherits", "extends", "implements":
+	case "call", "inherits", "requires", "extends", "implements":
 		return store.SymbolNodeID(ref.Target)
+	case "part":
+		return store.CodeFileNodeID(ref.Target)
 	case "config-key":
 		return store.ConfigKeyNodeID(ref.Target)
 	}
@@ -1015,8 +1019,10 @@ func graphNodeKindFromRef(ref Reference) string {
 			return k
 		}
 		return store.NodeKindSymbol
-	case "call", "inherits", "extends", "implements":
+	case "call", "inherits", "requires", "extends", "implements":
 		return store.NodeKindSymbol
+	case "part":
+		return store.NodeKindCodeFile
 	case "config-key":
 		return store.NodeKindConfigKey
 	}
