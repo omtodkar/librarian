@@ -100,7 +100,10 @@ func TestLanguageFromPluginIdentity_LocalConnectShapes(t *testing.T) {
 		// Remote buf.build paths.
 		{"buf.build/connectrpc/go", "go"},
 		{"buf.build/connectrpc/dart", "dart"},
-		// Connect-Query (TypeScript hooks generator).
+		// Connect-Query (TypeScript hooks generator). The remote buf.build
+		// form has last segment "query"; local binary form "protoc-gen-query"
+		// strips to "query". Both classify as ts via the exact-match arm.
+		// See the comment in languageFromPluginIdentity for the trade-off.
 		{"query", "ts"},
 		{"protoc-gen-query", "ts"},
 		{"buf.build/connectrpc/query", "ts"},

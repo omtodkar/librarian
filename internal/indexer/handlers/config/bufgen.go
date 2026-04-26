@@ -203,6 +203,16 @@ func languageFromPluginIdentity(identity string) string {
 		return "go"
 	case name == "dart", strings.HasPrefix(name, "dart-"), name == "connect-dart":
 		return "dart"
+	// "query" is buf.build/connectrpc/query (Connect-Query TypeScript hooks
+	// generator); its last path segment is the literal word "query" with no
+	// language-keyword alias. This arm is intentionally narrow: no HasPrefix
+	// branch, so only the exact token classifies. The remote form
+	// buf.build/connectrpc/query reaches this branch because the function
+	// strips everything up to the final "/". A hypothetical unrelated plugin
+	// whose last segment is also "query" would incorrectly classify as TS,
+	// but (a) no such plugin exists in buf's public registry today and (b) a
+	// misclassification here only adds an incorrect TS prefix constraint
+	// rather than creating a false-positive implements_rpc edge.
 	case name == "es", strings.HasPrefix(name, "es-"), name == "connect-es", name == "query":
 		return "ts"
 	}
