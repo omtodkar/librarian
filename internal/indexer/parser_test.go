@@ -1,7 +1,6 @@
 package indexer
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -80,27 +79,17 @@ Some content here.
 				if h != tc.want[i] {
 					t.Errorf("heading[%d]: got %q, want %q", i, h, tc.want[i])
 				}
-				// Paranoia: the heading text must not contain itself as a suffix.
-				if strings.HasSuffix(h, h+h) || strings.Count(h, h[:len(h)/2+1]) > 1 {
-					t.Errorf("heading[%d] appears to be duplicated: %q", i, h)
+				// Guard: a doubled heading has even length and equals its first half repeated.
+				if len(h)%2 == 0 && h == h[:len(h)/2]+h[:len(h)/2] {
+					t.Errorf("heading[%d] is a duplication of itself: %q", i, h)
 				}
 			}
 
 			// Section headings must also be non-duplicated.
 			for _, sec := range pd.Sections {
-				doubled := sec.Heading + sec.Heading
-				if strings.Contains(doubled[:len(sec.Heading)], sec.Heading) &&
-					sec.Heading != "" && strings.HasPrefix(doubled, sec.Heading) {
-					// Real check: sec.Heading must not end with itself repeated.
-					half := len(sec.Heading) / 2
-					if half > 0 && strings.HasSuffix(sec.Heading, sec.Heading[len(sec.Heading)-half:]) &&
-						sec.Heading == sec.Heading[:half]+sec.Heading[half:] {
-						// only fails if heading literally equals doubled content
-					}
-				}
-				// Simpler: no heading should appear as a strict repetition.
-				if len(sec.Heading) > 0 && sec.Heading == strings.Repeat(sec.Heading[:len(sec.Heading)/2], 2) && len(sec.Heading)%2 == 0 {
-					t.Errorf("section heading is duplicated: %q", sec.Heading)
+				h := sec.Heading
+				if len(h)%2 == 0 && h == h[:len(h)/2]+h[:len(h)/2] {
+					t.Errorf("section heading is a duplication of itself: %q", h)
 				}
 			}
 		})

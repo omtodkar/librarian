@@ -67,9 +67,7 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 
 		for i, chunk := range chunks {
 			output += fmt.Sprintf("### Result %d\n", i+1)
-			output += fmt.Sprintf("**File:** %s\n", chunk.FilePath)
-			output += fmt.Sprintf("**Section:** %s\n", chunk.SectionHeading)
-			output += fmt.Sprintf("**Content:**\n%s\n\n", chunk.Content)
+			output += formatChunkResult(chunk)
 
 			if includeRefs {
 				paths, ok := refs[chunk.FilePath]
@@ -82,4 +80,11 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 
 		return mcp.NewToolResultText(output), nil
 	})
+}
+
+// formatChunkResult renders the per-chunk block for search_docs output.
+// Extracted so tests can import the same format strings and catch drift.
+func formatChunkResult(chunk store.DocChunk) string {
+	return fmt.Sprintf("**File:** %s\n**Section:** %s\n**Content:**\n%s\n\n",
+		chunk.FilePath, chunk.SectionHeading, chunk.Content)
 }

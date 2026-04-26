@@ -12,14 +12,13 @@ import (
 // guards against the regression where section headings appeared twice in
 // search_docs / get_context responses (e.g. "Stage 2: DispatchStage 2: Dispatch").
 //
-// The render logic is intentionally inlined here to match what
-// registerSearchDocs emits, so a future change to the format string will
-// cause this test to fail visibly instead of silently regressing.
+// It calls the production formatChunkResult helper so any change to the
+// format string in search_docs.go will cause this test to fail visibly.
 func TestSearchDocsFormatNonDuplicatedSection(t *testing.T) {
 	cases := []struct {
 		name      string
 		chunk     store.DocChunk
-		wantLabel string // the exact string expected after "**Section:** "
+		wantLabel string // exact section heading expected in the rendered block
 	}{
 		{
 			name: "plain text heading",
@@ -52,21 +51,17 @@ func TestSearchDocsFormatNonDuplicatedSection(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Reproduce the exact format string used in registerSearchDocs.
-			line := fmt.Sprintf("**Section:** %s\n", tc.chunk.SectionHeading)
+			rendered := formatChunkResult(tc.chunk)
 
-			// The label must appear exactly once.
-			if !strings.Contains(line, tc.wantLabel) {
-				t.Errorf("section label %q not found in output line %q", tc.wantLabel, line)
-			}
-			if count := strings.Count(line, tc.wantLabel); count != 1 {
-				t.Errorf("section label %q appears %d times in output line %q (want 1)", tc.wantLabel, count, line)
+			// The section label must appear exactly once.
+			if count := strings.Count(rendered, tc.wantLabel); count != 1 {
+				t.Errorf("section label %q appears %d times in rendered block (want 1):\n%s", tc.wantLabel, count, rendered)
 			}
 
-			// Golden output check: the full line must match exactly.
+			// Golden check: the **Section:** line must contain the label verbatim.
 			wantLine := fmt.Sprintf("**Section:** %s\n", tc.wantLabel)
-			if line != wantLine {
-				t.Errorf("rendered line:\n  got:  %q\n  want: %q", line, wantLine)
+			if !strings.Contains(rendered, wantLine) {
+				t.Errorf("rendered block does not contain expected section line %q:\n%s", wantLine, rendered)
 			}
 		})
 	}
