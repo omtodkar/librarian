@@ -51,14 +51,28 @@ Plus a few project-specific preferences:
 - **No speculative code.** Don't add features, abstractions, or error handling for scenarios that can't happen. Three similar lines beats a premature abstraction.
 - **Named identifiers over magic numbers / strings.** If a constant is being tuned, give it a name.
 
+## Changelog
+
+Every PR must update the `[Unreleased]` section in `CHANGELOG.md`. Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions:
+
+- **Added** for new features.
+- **Changed** for changes to existing behaviour.
+- **Deprecated** for soon-to-be-removed features.
+- **Removed** for now-removed features.
+- **Fixed** for bug fixes.
+- **Security** for vulnerability fixes or new security policies.
+
+One bullet per logical change. Write for a user who is deciding whether to upgrade, not for a reviewer of the diff.
+
 ## Pull-request flow
 
 1. Fork the repo and branch off `main` (use a descriptive branch name, e.g. `feat/kiro-integration` or `fix/pdf-bookmark-depth`).
 2. Make your changes; run `make test` and `go vet ./...`.
-3. Commit messages: imperative one-line subject (max ~72 chars), body explaining *why* if non-obvious. Keep commits focused — squash trivial fixups before pushing.
-4. Push to your fork and open a PR against `main`. Keep the PR focused — one concern per PR.
-5. Link any issue the PR closes (e.g. `Closes #42`) in the description.
-6. Address review feedback by pushing follow-up commits; maintainers will squash on merge if appropriate.
+3. **Update `CHANGELOG.md`** — add one or more bullets under `[Unreleased]` describing what your PR does (see above).
+4. Commit messages: imperative one-line subject (max ~72 chars), body explaining *why* if non-obvious. Keep commits focused — squash trivial fixups before pushing.
+5. Push to your fork and open a PR against `main`. Keep the PR focused — one concern per PR.
+6. Link any issue the PR closes (e.g. `Closes #42`) in the description.
+7. Address review feedback by pushing follow-up commits; maintainers will squash on merge if appropriate.
 
 ## Issue tracker
 

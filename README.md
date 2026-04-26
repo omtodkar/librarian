@@ -4,7 +4,7 @@
 
 [![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)]()
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)](CHANGELOG.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 <!-- Add a demo GIF here once available — show `librarian index` + `librarian search` + Claude Code picking up the /librarian skill. -->
