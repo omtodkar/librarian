@@ -76,9 +76,7 @@ func (h *Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error)
 	if !bytes.Contains(content, []byte("typeName")) {
 		return doc, nil
 	}
-	// Parse the AST once and reuse the result for both detection and extraction,
-	// avoiding the double tree-sitter parse that isConnectEsFile + extractConnectESUnits
-	// would otherwise incur.
+	// Parse the AST once; reuse for both detection (non-empty defs) and extraction.
 	defs := parseServiceDefs(content)
 	if len(defs) == 0 {
 		return doc, nil
@@ -91,29 +89,6 @@ func (h *Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error)
 // are graph-only and do not participate in the docs-pass embedding store.
 func (*Handler) Chunk(_ *indexer.ParsedDoc, _ indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	return nil, nil
-}
-
-// isConnectEsFile is the two-stage detector used directly by tests:
-//
-//  1. Filename suffix heuristic: stem ends with "_connect" or "_connectweb"
-//     (covers *_connect.ts, *_connectweb.ts, *_connect.js, etc.).
-//  2. Quick string pre-scan for "typeName" avoids full AST parse cost on files
-//     that fail the suffix check but somehow reach here, and on hand-written
-//     _connect.ts files that clearly lack a service definition.
-//  3. AST confirmation via parseServiceDefs: the file must contain at least one
-//     export const with a typeName string property and a methods object.
-//
-// Parse inlines this logic and reuses the parseServiceDefs result, so
-// isConnectEsFile is only called from test code that wants the bool result
-// without constructing a full ParsedDoc.
-func isConnectEsFile(path string, content []byte) bool {
-	if !hasConnectSuffix(path) {
-		return false
-	}
-	if !bytes.Contains(content, []byte("typeName")) {
-		return false
-	}
-	return len(parseServiceDefs(content)) > 0
 }
 
 // hasConnectSuffix reports whether the basename's stem (extension stripped) ends
@@ -228,12 +203,14 @@ func parseServiceObject(node *sitter.Node, src []byte) (serviceDef, bool) {
 		if keyNode == nil || valNode == nil {
 			continue
 		}
-		key := keyNode.Utf8Text(src)
+		// keyNode is typically property_identifier (unquoted) for generated files.
+		// Quoted string keys (e.g. "typeName": "...") are not emitted by
+		// protoc-gen-connect-es but are handled defensively below.
+		key := stripTSStringQuotes(keyNode.Utf8Text(src))
 		switch key {
 		case "typeName":
 			if valNode.Kind() == "string" {
-				raw := valNode.Utf8Text(src)
-				typeName = strings.Trim(raw, `"'`+"`")
+				typeName = stripTSStringQuotes(valNode.Utf8Text(src))
 			}
 		case "methods":
 			if valNode.Kind() == "object" {
@@ -323,6 +300,21 @@ func unitsFromDefs(defs []serviceDef) []indexer.Unit {
 		}
 	}
 	return units
+}
+
+// stripTSStringQuotes removes a single surrounding pair of double or single
+// quotes (or backtick) from a tree-sitter string node's raw text, mirroring
+// the protoStripQuotes pattern in proto.go. Unlike strings.Trim it strips at
+// most one pair so internal quotes are preserved.
+func stripTSStringQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'' || first == '`') && first == last {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 // connectESUnitContent returns a concise text representation suitable for

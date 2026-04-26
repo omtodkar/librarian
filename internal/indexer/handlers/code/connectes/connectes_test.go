@@ -145,6 +145,56 @@ func TestDetect_HandWrittenConnectLookalike(t *testing.T) {
 	}
 }
 
+// TestDetect_TypeNameInContentButNoServiceObject verifies that a *_connect.ts file
+// whose content contains the string "typeName" (e.g. in a comment or a non-service
+// object) but no actual service export does NOT trigger connect-es detection.
+// This exercises the parseServiceDefs-returns-empty branch in Parse.
+func TestDetect_TypeNameInContentButNoServiceObject(t *testing.T) {
+	h := connectes.New()
+
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "typeName only in comment",
+			content: `// typeName: "some.Service" — note: this is a hand-rolled wrapper, not generated.
+export const wrapper = {
+  call: () => {},
+} as const;
+`,
+		},
+		{
+			name: "typeName in non-service object (no methods key)",
+			content: `export const Meta = {
+  typeName: "app.Meta",
+  version: 1,
+} as const;
+`,
+		},
+		{
+			name: "typeName present but no export const",
+			content: `const local = {
+  typeName: "auth.AuthService",
+  methods: { login: {} },
+};
+`,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc, err := h.Parse("gen/ts/auth_connect.ts", []byte(c.content))
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if len(doc.Units) != 0 {
+				t.Errorf("expected no Units (parseServiceDefs empty), got %d: %+v", len(doc.Units), doc.Units)
+			}
+		})
+	}
+}
+
 // TestDetect_NonConnectFile verifies that a regular .ts file (no connect suffix)
 // produces no connect-es units even if it contains "typeName".
 func TestDetect_NonConnectFile(t *testing.T) {

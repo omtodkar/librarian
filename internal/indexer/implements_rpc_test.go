@@ -1842,17 +1842,13 @@ message LoginReply {}
 		t.Fatalf("regular TS symbol %s not projected (TypeScript grammar handler not running)", loginSym)
 	}
 
-	// No connect-es metadata should appear on the TS symbol.
-	if node.Metadata != "" && node.Metadata != "{}" {
-		// The Metadata column may be non-empty from the TS grammar (e.g. exported flag),
-		// but it must NOT contain "connect_es_stub" which is connect-es specific.
-		if len(node.Metadata) > 0 {
-			var meta map[string]interface{}
-			if err := json.Unmarshal([]byte(node.Metadata), &meta); err == nil {
-				if _, hasStub := meta["connect_es_stub"]; hasStub {
-					t.Errorf("regular TS symbol has connect_es_stub metadata: %s", node.Metadata)
-				}
-			}
+	// No connect-es metadata should appear on the TS symbol. Unmarshal regardless
+	// of whether metadata is empty — json.Unmarshal("") errors (no false alarm),
+	// "{}" yields an empty map (passes cleanly).
+	var meta map[string]interface{}
+	if err := json.Unmarshal([]byte(node.Metadata), &meta); err == nil {
+		if _, hasStub := meta["connect_es_stub"]; hasStub {
+			t.Errorf("regular TS symbol has connect_es_stub metadata: %s", node.Metadata)
 		}
 	}
 
