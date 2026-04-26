@@ -275,6 +275,18 @@ type inheritanceResolver interface {
 	ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
 }
 
+// parsedDocPostProcessor is an optional interface a Grammar implements when
+// it needs to stash file-level information onto the ParsedDoc AFTER the
+// shared walker finishes — not per-symbol Metadata, which has its own
+// symbolMetadataExtractor hook. Today the only user is the Protobuf grammar,
+// which projects `option go_package` / `option java_package` etc. onto
+// ParsedDoc.Metadata["options"] (feeds lib-4kb's buf.gen.yaml awareness).
+// ParseCtx invokes it last, after imports and inheritance have been emitted
+// so the grammar can read (but not mutate) the final Refs list.
+type parsedDocPostProcessor interface {
+	PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, source []byte)
+}
+
 // CodeHandler implements indexer.FileHandler for a single Grammar.
 type CodeHandler struct {
 	grammar Grammar
@@ -366,6 +378,9 @@ func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseCon
 		doc.Refs = r.ResolveParents(doc.Refs, path, ctx)
 	}
 	doc.Signals = extractAllCommentSignals(root, content, commentSet)
+	if pp, ok := h.grammar.(parsedDocPostProcessor); ok {
+		pp.PostProcess(doc, root, content)
+	}
 
 	return doc, nil
 }
@@ -920,6 +935,7 @@ func init() {
 		NewKotlinGrammar(),
 		NewSwiftGrammar(),
 		NewDartGrammar(),
+		NewProtoGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}

@@ -911,6 +911,32 @@ mixin Mixable on DrBase {}
 		"src/dart/dr_library.dart": `library dr.library;
 part 'dr_library.g.dart';
 `,
+		// Protobuf: exercises lib-cym's end-to-end projection — service /
+		// rpc / message / field Units land as symbol nodes, rpc Metadata
+		// (input_type / streaming) survives into graph_nodes.metadata, and
+		// `extend Foo { ... }` emits a file-scoped inherits edge.
+		"src/proto/greeter.proto": `syntax = "proto3";
+package pr.v1;
+
+option go_package = "example.com/pr/v1;prv1";
+
+service Greeter {
+  rpc SayHi (HiRequest) returns (HiReply);
+  rpc StreamHi (stream HiRequest) returns (stream HiReply);
+}
+
+message HiRequest {
+  string name = 1;
+}
+
+message HiReply {
+  string greeting = 1;
+}
+
+extend Base {
+  string extra = 100;
+}
+`,
 	}
 	for rel, body := range files {
 		abs := filepath.Join(dir, rel)
@@ -1164,6 +1190,87 @@ part 'dr_library.g.dart';
 		}
 		if !found {
 			t.Errorf("expected part edge to dr_library.g.dart; got %+v", edges)
+		}
+	})
+	t.Run("proto_service_and_rpc_symbols", func(t *testing.T) {
+		// service Greeter { rpc SayHi ... } produces two distinct symbol
+		// nodes under the file's package path, with rpc Metadata (input
+		// type, streaming booleans) serialised into graph_nodes.metadata.
+		if n, err := s.GetNode("sym:pr.v1.Greeter"); err != nil {
+			t.Fatalf("GetNode Greeter: %v", err)
+		} else if n == nil {
+			t.Fatalf("service Greeter symbol missing")
+		}
+		rpc, err := s.GetNode("sym:pr.v1.Greeter.SayHi")
+		if err != nil {
+			t.Fatalf("GetNode SayHi: %v", err)
+		}
+		if rpc == nil {
+			t.Fatalf("rpc SayHi symbol missing")
+		}
+		if !containsJSON(rpc.Metadata, `"input_type":"HiRequest"`) {
+			t.Errorf("expected input_type=HiRequest on SayHi metadata; got %q", rpc.Metadata)
+		}
+		if !containsJSON(rpc.Metadata, `"output_type":"HiReply"`) {
+			t.Errorf("expected output_type=HiReply on SayHi metadata; got %q", rpc.Metadata)
+		}
+		// Non-streaming rpc still serialises both flags as false so the
+		// downstream lib-6wz cross-language matcher doesn't have to deal
+		// with "absent-key means not-streaming" ambiguity.
+		if !containsJSON(rpc.Metadata, `"client_streaming":false`) {
+			t.Errorf("expected client_streaming=false on SayHi metadata; got %q", rpc.Metadata)
+		}
+		if !containsJSON(rpc.Metadata, `"server_streaming":false`) {
+			t.Errorf("expected server_streaming=false on SayHi metadata; got %q", rpc.Metadata)
+		}
+		streaming, err := s.GetNode("sym:pr.v1.Greeter.StreamHi")
+		if err != nil {
+			t.Fatalf("GetNode StreamHi: %v", err)
+		}
+		if streaming == nil {
+			t.Fatalf("rpc StreamHi symbol missing")
+		}
+		if !containsJSON(streaming.Metadata, `"client_streaming":true`) {
+			t.Errorf("expected client_streaming=true on StreamHi metadata; got %q", streaming.Metadata)
+		}
+		if !containsJSON(streaming.Metadata, `"server_streaming":true`) {
+			t.Errorf("expected server_streaming=true on StreamHi metadata; got %q", streaming.Metadata)
+		}
+	})
+	t.Run("proto_field_carries_field_number", func(t *testing.T) {
+		// Message fields project as symbol nodes with field_number
+		// serialised into graph_nodes.metadata — available to downstream
+		// cross-language (lib-6wz) and buf.gen.yaml (lib-4kb) logic.
+		n, err := s.GetNode("sym:pr.v1.HiRequest.name")
+		if err != nil {
+			t.Fatalf("GetNode name: %v", err)
+		}
+		if n == nil {
+			t.Fatalf("field HiRequest.name symbol missing")
+		}
+		// Substring terminators guard against false positives like
+		// `"field_number":10` matching a bare `"field_number":1` prefix.
+		if !containsJSON(n.Metadata, `"field_number":1,`) && !containsJSON(n.Metadata, `"field_number":1}`) {
+			t.Errorf("expected field_number=1 on name metadata; got %q", n.Metadata)
+		}
+	})
+	t.Run("proto_extend_emits_file_scoped_inherits_edge", func(t *testing.T) {
+		// `extend Base { ... }` has no surrounding symbol (file-scoped),
+		// so the inherits edge originates at the file node and targets a
+		// placeholder sym:Base node with relation=extends in metadata.
+		edges, err := s.Neighbors("file:src/proto/greeter.proto", "out", store.EdgeKindInherits)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		found := false
+		for _, e := range edges {
+			if e.To == "sym:Base" && containsJSON(e.Metadata, `"relation":"extends"`) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected inherits edge to sym:Base (relation=extends); got %+v", edges)
 		}
 	})
 }

@@ -655,13 +655,17 @@ func isSymbolKind(kind string) bool {
 	case "function", "method", "constructor",
 		"class", "interface", "enum", "record",
 		"type", "field",
-		"object",         // Kotlin object / companion object declarations
-		"property",       // Kotlin property (val / var declarations)
-		"struct",         // Swift struct declarations
-		"extension",      // Swift extension declarations (target type as Title)
-		"protocol",       // Swift protocol declarations
-		"mixin",          // Dart mixin declarations (lib-wji.3)
-		"extension_type": // Dart extension type declarations (lib-wji.3)
+		"object",          // Kotlin object / companion object declarations
+		"property",        // Kotlin property (val / var declarations)
+		"struct",          // Swift struct declarations
+		"extension",       // Swift extension declarations (target type as Title)
+		"protocol",        // Swift protocol declarations
+		"mixin",           // Dart mixin declarations (lib-wji.3)
+		"extension_type",  // Dart extension type declarations (lib-wji.3)
+		"service",         // Proto service declarations (lib-cym)
+		"rpc",             // Proto service RPC methods (lib-cym)
+		"message",         // Proto message declarations (lib-cym)
+		"oneof":           // Proto oneof declarations (lib-cym)
 		return true
 	}
 	return false

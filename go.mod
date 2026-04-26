@@ -1,9 +1,10 @@
 module librarian
 
-go 1.25.7
+go 1.26.0
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/coder3101/tree-sitter-proto v0.0.0-20260315065021-d65a18ce7c22
 	github.com/fwcd/tree-sitter-kotlin v0.0.0-20260411204054-55622a49bd59
 	github.com/google/uuid v1.6.0
 	github.com/klippa-app/go-pdfium v1.19.2
