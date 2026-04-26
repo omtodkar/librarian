@@ -129,6 +129,26 @@ func TestBufManifest_LookupPrefix_Nil(t *testing.T) {
 	}
 }
 
+// TestBufManifest_LookupPrefix_EmptySlice pins the defensive guard: a
+// non-nil but zero-length prefix slice must return (nil, false) so the
+// resolver falls back to name-only matching rather than silently dropping
+// the candidate via an empty loop that always returns false. This state is
+// unreachable today via assembleManifestEntry (which only appends non-empty
+// prefixes), but the guard protects future direct constructors or test
+// helpers that might zero-initialise a LangPrefixes entry.
+func TestBufManifest_LookupPrefix_EmptySlice(t *testing.T) {
+	m := &BufManifest{Entries: map[string]*BufManifestEntry{
+		"api/auth.proto": {
+			LangPrefixes: map[string][]string{
+				"go": {}, // non-nil but zero-length — should be treated as absent
+			},
+		},
+	}}
+	if prefixes, ok := m.LookupPrefix("api/auth.proto", "go"); ok || prefixes != nil {
+		t.Errorf("empty-slice: LookupPrefix = (%v, %v), want (nil, false)", prefixes, ok)
+	}
+}
+
 // TestBufManifest_LookupPrefix_Hit / Miss cover the in-memory lookup.
 func TestBufManifest_LookupPrefix(t *testing.T) {
 	m := &BufManifest{Entries: map[string]*BufManifestEntry{
@@ -384,10 +404,12 @@ func TestCandidateWithinCodegenTree(t *testing.T) {
 	}
 }
 
-// TestAssembleManifestEntry_MultiplePluginsSameLanguage pins that two Go
-// plugins with different out-dirs both contribute a prefix, in declaration
-// order. This covers the protoc-gen-go + protoc-gen-connect-go case where
-// message types and service interfaces land in separate output directories.
+// TestAssembleManifestEntry_MultiplePluginsSameLanguage is the standalone
+// acceptance-criteria test for the multi-prefix policy (lib-4g2.1 task spec).
+// It overlaps intentionally with the `same_language_two_plugins_both_collected`
+// subtest in TestAssembleManifestEntry — the subtest covers the same logic in
+// the table-driven suite while this function provides the named entry point the
+// spec required. Both must stay in sync if the fixture changes.
 func TestAssembleManifestEntry_MultiplePluginsSameLanguage(t *testing.T) {
 	plugins := []bufGenPluginSerialized{
 		{Language: "go", Out: "gen/go"},

@@ -179,11 +179,15 @@ func bufGenOpts(val *yaml.Node) []string {
 //
 // Recognised shapes:
 //
-//   - Bare name (v1 `name:`): "go", "go-grpc", "dart", "es", "connect-es"
+//   - Bare name (v1 `name:`): "go", "go-grpc", "dart", "es", "connect-es",
+//     "connect-go", "connect-dart", "query"
 //   - Remote path (v2 `remote:`): "buf.build/protocolbuffers/go",
-//     "buf.build/grpc/go", "buf.build/bufbuild/es", "buf.build/connectrpc/es"
+//     "buf.build/grpc/go", "buf.build/bufbuild/es", "buf.build/connectrpc/es",
+//     "buf.build/connectrpc/go", "buf.build/connectrpc/dart",
+//     "buf.build/connectrpc/query"
 //   - Local binary (v2 `local:`): "protoc-gen-go", "protoc-gen-go-grpc",
-//     "protoc-gen-dart", "protoc-gen-es", "protoc-gen-connect-es"
+//     "protoc-gen-dart", "protoc-gen-es", "protoc-gen-connect-es",
+//     "protoc-gen-connect-go", "protoc-gen-connect-dart"
 //
 // Matching is suffix-based on the trailing segment after any `/`, so new
 // orgs hosting e.g. `buf.build/custom-org/go` still classify correctly.
