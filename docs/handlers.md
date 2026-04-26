@@ -62,7 +62,25 @@ Handlers emit these kinds into `Unit.Kind`:
 
 ## Registry
 
-`indexer.RegisterDefault(h)` registers a handler with the default registry (`internal/indexer/registry.go`). Extensions are last-writer-wins, so two handlers claiming the same extension is a silent collision — each handler package asserts disjoint extension sets.
+`indexer.RegisterDefault(h)` registers a handler with the default registry (`internal/indexer/registry.go`). Extensions are last-writer-wins, so two handlers claiming the same extension as primary is a silent collision — each handler package asserts disjoint extension sets.
+
+### Multiple handlers per extension (additional handlers)
+
+Some file shapes carry two distinct layers of meaning: a general-purpose grammar can extract the regular code symbols, and a specialised handler can extract additional domain-specific symbols from the same file. Rather than coupling the two parsers inside a single handler, the registry supports *additional handlers* per extension:
+
+```go
+indexer.RegisterDefaultAdditional(h)  // registers h as additional, not primary
+```
+
+During the **graph pass** (`indexGraphFile`), the indexer calls `registry.HandlersFor(path)` instead of `HandlerFor`. This returns the primary handler followed by all additional handlers in registration order. All handlers parse the same content; their `Units` and `Refs` are merged before graph node projection. The docs pass still uses `HandlerFor` (primary only) so the embedding store is not double-indexed.
+
+**Current additional handlers:**
+
+| Handler | Extensions | Primary handler | Adds |
+|---|---|---|---|
+| `connect-es` (`internal/indexer/handlers/code/connectes/`) | `.ts`, `.js` | TypeScript grammar | One `method`-kind symbol per (service, method) pair from `*_connect.ts` / `*_connectweb.ts` service-object exports |
+
+**When to use additional vs primary:** register as additional when your handler targets a strict *subset* of the primary handler's files (detected at parse time by a content heuristic) and produces *complementary* symbols that the primary misses. If the handler targets a wholly different file format, register it as primary instead.
 
 Blank-importing `internal/indexer/handlers/defaults` wires every built-in handler in one line:
 
@@ -171,10 +189,51 @@ Structure cascade (first viable tier wins):
 
 The chosen tier is recorded on `Metadata["pdf.structure_source"]` for diagnosability. OCR for scanned pages is deferred (tracked as a follow-up).
 
+### Connect-ES stubs — `internal/indexer/handlers/code/connectes/`
+
+*Additional handler* on `.ts` and `.js` (registered alongside the TypeScript grammar via `RegisterDefaultAdditional`).
+
+protoc-gen-connect-es generates service descriptors as plain object-literal exports rather than classes:
+
+```ts
+export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: {
+    login: { name: "Login", kind: MethodKind.Unary, I: LoginRequest, O: LoginReply },
+  },
+} as const;
+```
+
+The TypeScript grammar emits no symbols for object-literal keys, so these RPC stubs would otherwise be invisible to the `implements_rpc` resolver. This handler fills the gap by detecting connect-es shaped files (suffix heuristic + AST confirmation of `typeName` property) and emitting one `method`-kind `Unit` per `(service, method)` pair with `Unit.Path = "<typeName>.<methodKey>"` — an exact match with the proto rpc's `Unit.Path`. The existing TS candidate `pkg.Svc.methodName` in `linkRPCImplementations` then finds and links it.
+
+**Detection (two-stage):**
+
+1. Filename suffix: stem ends with `_connect` or `_connectweb` (case-insensitive).
+2. AST confirmation via tree-sitter-typescript: at least one top-level `export const X = { typeName: "<string>", methods: { ... } } as const` must be present. A hand-written `_connect.ts` with no `typeName` property does not trigger the handler.
+
+**Symbol emitted per (service, method):**
+
+| Field | Value |
+|---|---|
+| `Unit.Kind` | `"method"` |
+| `Unit.Path` | `<typeName>.<methodKey>` |
+| `Metadata["connect_es_stub"]` | `true` |
+| `Metadata["service_typename"]` | full proto type name |
+| `Metadata["method_key"]` | lowerCamelCase method key as written in the generated file |
+| `Metadata["streaming_kind"]` | `"Unary"`, `"ServerStreaming"`, `"ClientStreaming"`, `"BiDiStreaming"` or `""` |
+
+`Chunk` always returns nil — connect-es symbols are graph-only and do not participate in the embedding store.
+
 ## Where to add a new format
 
 1. Create `internal/indexer/handlers/<format>/` with `Name()`, `Extensions()`, `Parse`, `Chunk`, and an `init()` that calls `indexer.RegisterDefault(New(...))`.
 2. Blank-import it in `internal/indexer/handlers/defaults/defaults.go`.
 3. If the format needs user config, add a struct to `internal/config/config.go`, wire defaults in `Load()`, and have `cmd/root.go` re-register after `config.Load()` with the user-scoped instance (matches the Office + PDF precedent).
+
+To add a new **additional handler** (one that augments an existing format without replacing the primary grammar):
+
+1. Create the handler package and call `indexer.RegisterDefaultAdditional(New(...))` from `init()`.
+2. Blank-import it in `internal/indexer/handlers/defaults/defaults.go`.
+3. In `Parse`, return an empty `ParsedDoc` (no units) when your content heuristic doesn't match — the primary handler still runs for every file, so your handler must be cheap and precise for the non-matching majority.
 
 The walker, store, MCP server, and every downstream consumer need no changes.

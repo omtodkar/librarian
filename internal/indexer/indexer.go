@@ -535,10 +535,11 @@ var docsPassFormats = map[string]bool{
 // (logged as per-file errors, loop continues) rather than fatal so one bad
 // symbol doesn't abandon the rest of a large file.
 func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force bool) error {
-	handler := idx.registry.HandlerFor(file.FilePath)
-	if handler == nil {
+	handlers := idx.registry.HandlersFor(file.FilePath)
+	if len(handlers) == 0 {
 		return nil
 	}
+	primary := handlers[0]
 
 	content, err := os.ReadFile(file.AbsPath)
 	if err != nil {
@@ -575,7 +576,9 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 		return nil
 	}
 
-	parsed, err := idx.parseFile(handler, file, content)
+	// Parse with the primary handler: its ParsedDoc drives the code_file node
+	// metadata (e.g. buf_gen / proto options) and the base set of Units/Refs.
+	parsed, err := idx.parseFile(primary, file, content)
 	if err != nil {
 		return fmt.Errorf("parsing: %w", err)
 	}
@@ -591,7 +594,7 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 		return fmt.Errorf("upserting code file node: %w", err)
 	}
 
-	if _, err := idx.store.AddOrUpdateCodeFile(file.FilePath, handler.Name(), hash); err != nil {
+	if _, err := idx.store.AddOrUpdateCodeFile(file.FilePath, primary.Name(), hash); err != nil {
 		return fmt.Errorf("updating code file row: %w", err)
 	}
 
@@ -599,6 +602,22 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 	// kind='symbol' so docs-pass mentions/shared_code_ref edges survive.
 	if err := idx.store.DeleteSymbolsForFile(file.FilePath); err != nil {
 		return fmt.Errorf("deleting stale symbols: %w", err)
+	}
+
+	// Collect Units and Refs from additional handlers (e.g. connect-es stub
+	// handler for *_connect.ts files). Additional handlers run on the same
+	// content bytes already read; parse errors are non-fatal (logged on
+	// result.Errors, remaining handlers still run).
+	allUnits := parsed.Units
+	allRefs := parsed.Refs
+	for _, h := range handlers[1:] {
+		extra, parseErr := idx.parseFile(h, file, content)
+		if parseErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("handler %s for %s: %s", h.Name(), file.FilePath, parseErr))
+			continue
+		}
+		allUnits = append(allUnits, extra.Units...)
+		allRefs = append(allRefs, extra.Refs...)
 	}
 
 	// Project code-symbol Units. Non-symbol kinds (section/key-path/page/…)
@@ -609,7 +628,7 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 	// type) serialises into graph_nodes.metadata so downstream queries
 	// ("find all extensions of String") can filter on the JSON. Empty /
 	// nil metadata serialises to "{}" via UpsertNode's own default.
-	for _, u := range parsed.Units {
+	for _, u := range allUnits {
 		if !isSymbolKind(u.Kind) {
 			continue
 		}
@@ -656,7 +675,7 @@ func (idx *Indexer) indexGraphFile(file WalkResult, result *GraphResult, force b
 	// filenames. UpsertPlaceholderNode leaves existing rows untouched so
 	// a Reference.Metadata with unresolved=true can't poison a resolved
 	// node's metadata downstream.
-	for _, ref := range parsed.Refs {
+	for _, ref := range allRefs {
 		targetID := graphTargetID(ref)
 		if targetID == "" {
 			continue
