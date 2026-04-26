@@ -53,6 +53,13 @@ func (r *Registry) Register(h FileHandler) {
 // Typical use: a specialised handler that emits extra symbols for a subset of files
 // sharing an extension with a general-purpose grammar (e.g. the connect-es stub handler
 // registered on ".ts" alongside the TypeScript grammar).
+//
+// IMPORTANT: Extensions reports only primary-handler extensions (byExt). The walker
+// uses Extensions to pre-filter candidate files, so an extension registered ONLY via
+// RegisterAdditional (with no primary handler on that extension) will be silently
+// excluded from the walk. RegisterAdditional is safe only when every extension it
+// declares already has a primary handler registered via Register; callers should
+// ensure this at registration time.
 func (r *Registry) RegisterAdditional(h FileHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

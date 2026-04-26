@@ -70,10 +70,20 @@ func (h *Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error)
 		DocType:    "code",
 		RawContent: string(content),
 	}
-	if !isConnectEsFile(path, content) {
+	if !hasConnectSuffix(path) {
 		return doc, nil
 	}
-	doc.Units = extractConnectESUnits(content)
+	if !bytes.Contains(content, []byte("typeName")) {
+		return doc, nil
+	}
+	// Parse the AST once and reuse the result for both detection and extraction,
+	// avoiding the double tree-sitter parse that isConnectEsFile + extractConnectESUnits
+	// would otherwise incur.
+	defs := parseServiceDefs(content)
+	if len(defs) == 0 {
+		return doc, nil
+	}
+	doc.Units = unitsFromDefs(defs)
 	return doc, nil
 }
 
@@ -83,7 +93,7 @@ func (*Handler) Chunk(_ *indexer.ParsedDoc, _ indexer.ChunkOpts) ([]indexer.Chun
 	return nil, nil
 }
 
-// isConnectEsFile is the two-stage detector:
+// isConnectEsFile is the two-stage detector used directly by tests:
 //
 //  1. Filename suffix heuristic: stem ends with "_connect" or "_connectweb"
 //     (covers *_connect.ts, *_connectweb.ts, *_connect.js, etc.).
@@ -92,6 +102,10 @@ func (*Handler) Chunk(_ *indexer.ParsedDoc, _ indexer.ChunkOpts) ([]indexer.Chun
 //     _connect.ts files that clearly lack a service definition.
 //  3. AST confirmation via parseServiceDefs: the file must contain at least one
 //     export const with a typeName string property and a methods object.
+//
+// Parse inlines this logic and reuses the parseServiceDefs result, so
+// isConnectEsFile is only called from test code that wants the bool result
+// without constructing a full ParsedDoc.
 func isConnectEsFile(path string, content []byte) bool {
 	if !hasConnectSuffix(path) {
 		return false
@@ -286,13 +300,9 @@ func extractStreamingKind(methodObj *sitter.Node, src []byte) string {
 	return ""
 }
 
-// extractConnectESUnits parses content and returns one "method"-kind Unit per
-// (service, method) pair found. Returns nil when content has no service definitions.
-func extractConnectESUnits(content []byte) []indexer.Unit {
-	defs := parseServiceDefs(content)
-	if len(defs) == 0 {
-		return nil
-	}
+// unitsFromDefs converts pre-parsed service definitions into indexer Units.
+// One "method"-kind Unit is emitted per (service, method) pair.
+func unitsFromDefs(defs []serviceDef) []indexer.Unit {
 	var units []indexer.Unit
 	for _, def := range defs {
 		for _, m := range def.methods {
@@ -301,7 +311,7 @@ func extractConnectESUnits(content []byte) []indexer.Unit {
 				Kind:  "method",
 				Title: m.key,
 				Path:  unitPath,
-				// Content is the metadata JSON for downstream inspection.
+				// Content is a concise text representation; the important data is in Metadata.
 				Content: connectESUnitContent(def.typeName, m.key, m.kind),
 				Metadata: map[string]any{
 					"connect_es_stub":  true,

@@ -1749,9 +1749,55 @@ message LoginReply {}
 		t.Errorf("expected 0 implements_rpc edges (only out-of-tree stub exists); got %d: %+v", len(edges), edges)
 	}
 
-	// Confirm the original dir fixture (with both files) links exactly once for
-	// whichever stub source_path wins — this is the positive half.
-	_ = s // s from dir1 with both files; edge count depends on file walk order
+	// Positive half: in-tree stub only → exactly 1 implements_rpc edge. Uses a
+	// fresh fixture with no out-of-tree file so the sym:auth.AuthService.login node's
+	// source_path is deterministically under gen/ts and the tightening check accepts it.
+	dir3 := t.TempDir()
+	writeImplementsRPCFixture(t, dir3, map[string]string{
+		"buf.gen.yaml": `version: v2
+plugins:
+  - remote: buf.build/bufbuild/connect-es
+    out: gen/ts
+`,
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`,
+		"gen/ts/api/auth_connect.ts": `export const AuthService = {
+  typeName: "auth.AuthService",
+  methods: {
+    login: { name: "Login" },
+  },
+} as const;
+`,
+	})
+	idx3, s3 := openImplementsRPCStore(t, dir3)
+	if _, err := idx3.IndexProjectGraph(dir3, true); err != nil {
+		t.Fatalf("IndexProjectGraph (dir3): %v", err)
+	}
+	inTreeSym := store.SymbolNodeID("auth.AuthService.login")
+	inTreeEdges, err := s3.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors (dir3): %v", err)
+	}
+	foundInTree := false
+	for _, e := range inTreeEdges {
+		if e.From == inTreeSym {
+			foundInTree = true
+			break
+		}
+	}
+	if !foundInTree {
+		t.Errorf("in-tree stub (gen/ts/api/auth_connect.ts) failed to link to proto rpc — tightening over-drops in-tree candidates")
+	}
+
+	_ = s // s from dir1 (both files) not asserted: sym:id collision makes order-dependent, covered by dir2 + dir3 isolation above
 }
 
 // TestImplementsRPC_NonConnectTSFileHasNoConnectESSymbols pins the handler-dispatch
@@ -1821,5 +1867,81 @@ message LoginReply {}
 		if e.From == loginSym {
 			t.Errorf("non-connect TS symbol %s incorrectly linked to proto rpc via implements_rpc", loginSym)
 		}
+	}
+}
+
+// TestImplementsRPC_ConnectWebInTreeStubLinksWithManifest pins the positive-path
+// manifest behaviour: a buf.gen.yaml declaring a connect-es plugin writing to
+// gen/ts, combined with an in-tree *_connect.ts file, must produce an
+// implements_rpc edge. This test complements ConnectWebPathTighteningDropsOutOfTree
+// (which covers the negative path) and guards against a regression where
+// manifest-present tightening over-drops in-tree "ts" candidates.
+//
+// Without buf.gen.yaml the resolver uses name-only matching (no tightening).
+// ConnectWebStubLinks already covers that path. This test is specifically for
+// the with-manifest code path.
+func TestImplementsRPC_ConnectWebInTreeStubLinksWithManifest(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"buf.gen.yaml": `version: v2
+plugins:
+  - remote: buf.build/bufbuild/connect-es
+    out: gen/ts
+`,
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest { string user = 1; }
+message LoginReply { bool ok = 1; }
+`,
+		// In-tree connect-es stub — lives under gen/ts matching the manifest prefix.
+		"gen/ts/api/auth_connect.ts": `import { MethodKind } from "@bufbuild/protobuf";
+
+export const AuthService = {
+  typeName: "auth.AuthService",
+  methods: {
+    login: {
+      name: "Login",
+      kind: MethodKind.Unary,
+    },
+  },
+} as const;
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	src := store.SymbolNodeID("auth.AuthService.login")
+
+	// The stub symbol must have been emitted with the correct source path.
+	stubNode, err := s.GetNode(src)
+	if err != nil {
+		t.Fatalf("GetNode(%s): %v", src, err)
+	}
+	if stubNode == nil {
+		t.Fatalf("connect-es stub symbol %s not projected", src)
+	}
+	if stubNode.SourcePath != "gen/ts/api/auth_connect.ts" {
+		t.Errorf("stub node source_path = %q, want gen/ts/api/auth_connect.ts", stubNode.SourcePath)
+	}
+
+	// With buf.gen.yaml restricting ts to gen/ts, an in-tree stub must still link.
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected exactly 1 implements_rpc edge (in-tree stub with manifest); got %d: %+v", len(edges), edges)
+	}
+	if edges[0].From != src {
+		t.Errorf("edge source = %s, want %s", edges[0].From, src)
 	}
 }
