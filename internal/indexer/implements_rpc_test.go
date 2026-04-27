@@ -822,10 +822,11 @@ class AuthServiceBase {
 }
 `,
 		// TS under gen/ts/api — in-prefix. File stem ("auth") becomes the
-		// synthetic JS/TS "package" in Unit.Path. Real protoc-gen-es output
-		// carries a _pb suffix; that's a pre-existing lib-6wz naming-match
-		// limitation (name-match only, no _pb stripping) and is out of
-		// scope for lib-4kb which only tightens path matching.
+		// synthetic JS/TS "package" in Unit.Path. This fixture uses a plain
+		// `auth.ts` stem that matches the proto package name, so no stem-drift
+		// applies. Generators that add file suffixes (_grpc_web_pb, _pb_service)
+		// are covered by TestImplementsRPC_GrpcWebStemFix and
+		// TestImplementsRPC_ImprobableGrpcWebStemFix.
 		"gen/ts/api/auth.ts": `export class AuthService {
   login(): void {}
 }
@@ -1990,6 +1991,107 @@ service AuthService {
 	got := lines[node.LineNumber-1]
 	if !containsRPCDecl(got, "Login") {
 		t.Errorf("line %d = %q; expected it to contain the rpc Login declaration", node.LineNumber, got)
+	}
+}
+
+// TestImplementsRPC_GrpcWebStemFix pins that protoc-gen-grpc-web output files
+// (stem `auth_grpc_web_pb`) link to their proto rpc despite stem-drift.
+// protoc-gen-grpc-web appends `_grpc_web_pb` to the proto file basename, so
+// all symbols in the generated file have path prefix `auth_grpc_web_pb.*`
+// while the resolver derives candidates from the proto package name `auth`.
+// The resolver emits a `{pkg}_grpc_web_pb.SvcClient.lcMethod` candidate to
+// bridge the gap (lib-r4s.10).
+func TestImplementsRPC_GrpcWebStemFix(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`,
+		// Mirrors protoc-gen-grpc-web output: file stem auth_grpc_web_pb, class
+		// AuthServiceClient with lowerCamelCase method login.
+		"gen/ts/api/auth_grpc_web_pb.ts": `export class AuthServiceClient {
+  login(): void {}
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	want := store.SymbolNodeID("auth_grpc_web_pb.AuthServiceClient.login")
+
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	found := false
+	for _, e := range edges {
+		if e.From == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected implements_rpc edge from %s to %s; got %+v", want, target, edges)
+	}
+}
+
+// TestImplementsRPC_ImprobableGrpcWebStemFix pins that @improbable-eng/grpc-web
+// output files (stem `auth_pb_service`) link to their proto rpc despite stem-drift.
+// ts-protoc-gen (used by @improbable-eng/grpc-web) appends `_pb_service` to the
+// proto file basename, so symbols have path prefix `auth_pb_service.*` while the
+// resolver derives candidates from proto package `auth`. The resolver emits a
+// `{pkg}_pb_service.SvcClient.lcMethod` candidate to bridge the gap (lib-r4s.10).
+func TestImplementsRPC_ImprobableGrpcWebStemFix(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`,
+		// Mirrors @improbable-eng/grpc-web (ts-protoc-gen) output: file stem
+		// auth_pb_service, class AuthServiceClient with lowerCamelCase method login.
+		"gen/ts/api/auth_pb_service.ts": `export class AuthServiceClient {
+  login(): void {}
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	want := store.SymbolNodeID("auth_pb_service.AuthServiceClient.login")
+
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	found := false
+	for _, e := range edges {
+		if e.From == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected implements_rpc edge from %s to %s; got %+v", want, target, edges)
 	}
 }
 

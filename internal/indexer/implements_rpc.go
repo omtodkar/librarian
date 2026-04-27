@@ -151,6 +151,11 @@ func (idx *Indexer) linkRPCImplementations(rpcPath, rpcSourcePath string) int {
 		// + service-interface types. SvcClient collides with Dart; dedupe.
 		{pkg + "." + svc + "Client." + lcMethod, "ts"},
 		{pkg + "." + svc + "." + lcMethod, "ts"},
+		// protoc-gen-grpc-web (Google): file stem is `{pkg}_grpc_web_pb` —
+		// stem-fallback drift because JS/TS modules have no package clause.
+		{pkg + "_grpc_web_pb." + svc + "Client." + lcMethod, "ts"},
+		// @improbable-eng/grpc-web (ts-protoc-gen): file stem `{pkg}_pb_service`.
+		{pkg + "_pb_service." + svc + "Client." + lcMethod, "ts"},
 	}
 
 	target := store.SymbolNodeID(rpcPath)
