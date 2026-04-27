@@ -1686,8 +1686,67 @@ Foo = TypedDict("Foo", {"x": int, "y": str})
 	if u.Kind != "class" {
 		t.Errorf("Kind = %q, want class", u.Kind)
 	}
+	if u.Path != "m.Foo" {
+		t.Errorf("Path = %q, want m.Foo", u.Path)
+	}
 	if f, _ := u.Metadata["factory"].(string); f != "typeddict" {
 		t.Errorf("factory = %q, want typeddict; metadata=%+v", f, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingExtensions_AliasedImport_TypedDict covers the aliased
+// typing_extensions form: `from typing_extensions import TypedDict as TD` followed
+// by `class Foo(TD):`. Should resolve to ext:typing_extensions.TypedDict.
+func TestPythonGrammar_TypingExtensions_AliasedImport_TypedDict(t *testing.T) {
+	src := []byte(`from typing_extensions import TypedDict as TD
+
+class Foo(TD):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing_extensions.TypedDict" {
+		t.Errorf("Target = %q, want ext:typing_extensions.TypedDict (alias TD resolved)", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingTypedDict_FunctionalCallBase guards the Part A/B
+// interaction for TypedDict: `class Foo(typing.TypedDict("Foo", {...})):` has
+// Target "typing.TypedDict" with unresolved_expression=true. Part A must skip
+// it; Part B must claim it as base_factory="typeddict".
+func TestPythonGrammar_TypingTypedDict_FunctionalCallBase(t *testing.T) {
+	src := []byte(`from typing import TypedDict
+
+class Foo(TypedDict("Foo", {"x": int})):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// Must NOT emit an inherits edge.
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 0 {
+		t.Errorf("functional TypedDict call base must not produce inherits refs; got %+v", refs)
+	}
+	// Must set base_factory on the class Unit.
+	u := findUnit(doc, "Foo")
+	if u == nil {
+		t.Fatal("Foo Unit missing")
+	}
+	if bf, _ := u.Metadata["base_factory"].(string); bf != "typeddict" {
+		t.Errorf("base_factory = %q, want typeddict; metadata=%+v", bf, u.Metadata)
 	}
 }
 
