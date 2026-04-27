@@ -768,8 +768,6 @@ func buildTypeVarLocalNames(refs []indexer.Reference) map[string]bool {
 		if local == "" {
 			if dot := strings.LastIndex(r.Target, "."); dot >= 0 {
 				local = r.Target[dot+1:]
-			} else {
-				local = r.Target
 			}
 		}
 		if local != "" {
