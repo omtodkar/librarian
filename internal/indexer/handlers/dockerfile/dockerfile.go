@@ -22,7 +22,8 @@ import (
 // Handler indexes Dockerfile files for the docs pass.
 type Handler struct{}
 
-// New returns a Dockerfile handler.
+// New returns a Dockerfile handler. Exported following the project handler convention
+// (all handler constructors are exported) so tests can instantiate it directly.
 func New() *Handler { return &Handler{} }
 
 var _ indexer.FileHandler = (*Handler)(nil)
@@ -65,6 +66,9 @@ func (*Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error) {
 func (*Handler) Chunk(doc *indexer.ParsedDoc, opts indexer.ChunkOpts) ([]indexer.Chunk, error) {
 	inputs := make([]indexer.SectionInput, 0, len(doc.Units))
 	for _, u := range doc.Units {
+		// splitIntoStageUnits always sets Kind="section", so this guard is unreachable
+		// in practice — kept as a forward-compat guard in case future parse paths add
+		// non-section units (e.g. a metadata unit in v2).
 		if u.Kind != "section" {
 			continue
 		}

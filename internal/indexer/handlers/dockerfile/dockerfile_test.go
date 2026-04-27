@@ -159,7 +159,10 @@ CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:wsgi"]`
 		return
 	}
 	if !strings.Contains(chunks[0].Content, "FROM python") {
-		t.Error("chunk content missing FROM directive")
+		t.Error("chunk content missing FROM directive at start")
+	}
+	if !strings.Contains(chunks[0].Content, `CMD ["gunicorn"`) {
+		t.Error("chunk content missing CMD directive at end — stage content may be truncated")
 	}
 }
 
@@ -587,5 +590,124 @@ func TestHandler_ChunkFallback_EmptyUnits(t *testing.T) {
 	}
 	if !strings.Contains(chunks[0].Content, "FROM golang") {
 		t.Error("raw-content fallback chunk should contain the original raw content")
+	}
+}
+
+// TestHandler_ChunkEmbeddingTextAndSectionHeading verifies that produced chunks have
+// SectionHeading set to the stage title and EmbeddingText contains both the document
+// title and the stage heading — analogous to TestHandler_ChunkEmbeddingTextContainsTitle
+// in the SQL handler tests.
+func TestHandler_ChunkEmbeddingTextAndSectionHeading(t *testing.T) {
+	h := dockerfilehandler.New()
+	// Multi-stage with named stages so we can verify headings by name.
+	src := `FROM golang:1.22 AS build
+WORKDIR /app
+# Download Go module dependencies for Docker layer caching before copying source.
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /server ./cmd/server
+
+FROM alpine:3.19 AS release
+RUN apk add --no-cache ca-certificates tzdata && update-ca-certificates
+COPY --from=build /server /server
+RUN addgroup -S app && adduser -S -G app app && chown app /server
+USER app
+EXPOSE 8080
+CMD ["/server"]`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	chunks, err := h.Chunk(doc, indexer.ChunkConfig{MaxTokens: 512, MinTokens: 1})
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
+	}
+
+	// First chunk corresponds to the "build" stage.
+	if chunks[0].SectionHeading != "stage: build" {
+		t.Errorf("chunks[0].SectionHeading = %q, want stage: build", chunks[0].SectionHeading)
+	}
+	if !strings.Contains(chunks[0].EmbeddingText, "Dockerfile") {
+		t.Errorf("EmbeddingText should contain document title 'Dockerfile': %q", chunks[0].EmbeddingText)
+	}
+	if !strings.Contains(chunks[0].EmbeddingText, "stage: build") {
+		t.Errorf("EmbeddingText should contain section heading 'stage: build': %q", chunks[0].EmbeddingText)
+	}
+}
+
+// TestHandler_SignalsPipeline verifies that ExtractRationaleSignals fires on Dockerfile
+// TODO/FIXME comments and the signals surface on the produced Units.
+func TestHandler_SignalsPipeline(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM python:3.12-slim
+WORKDIR /app
+# TODO: pin the requirements.txt version before going to production
+COPY requirements.txt .
+# FIXME: this RUN layer is too broad and busts the cache too often
+RUN pip install --no-cache-dir -r requirements.txt && pip cache purge
+COPY . .
+EXPOSE 8000
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Units) == 0 {
+		t.Fatal("expected at least 1 unit")
+	}
+
+	// Signals should be extracted — at least the TODO and FIXME.
+	allSignals := doc.Units[0].Signals
+	if len(allSignals) == 0 {
+		t.Error("expected at least one signal (TODO/FIXME) on stage unit, got none")
+	}
+	foundTODO := false
+	for _, s := range allSignals {
+		if strings.Contains(strings.ToUpper(s.Value), "TODO") || strings.Contains(strings.ToUpper(s.Detail), "TODO") {
+			foundTODO = true
+		}
+	}
+	if !foundTODO {
+		t.Errorf("expected a TODO signal, got signals: %+v", allSignals)
+	}
+}
+
+// TestHandler_LowercaseFromAs verifies case-insensitive FROM/AS detection so that
+// `from node:20 as app` (all lowercase) is treated identically to `FROM node:20 AS app`.
+func TestHandler_LowercaseFromAs(t *testing.T) {
+	h := dockerfilehandler.New()
+	// Use lowercase from/as; stage bodies must be long enough to exceed MinTokens.
+	src := `from node:20 as deps
+workdir /app
+# Install only production dependencies in a locked layer for reproducible builds.
+copy package.json package-lock.json ./
+run npm ci --omit=dev && npm cache clean --force
+
+from node:20-alpine as runner
+workdir /app
+# Copy the installed modules and built artefacts from the deps stage.
+copy --from=deps /app/node_modules /app/node_modules
+copy . .
+expose 3000
+cmd ["node", "server.js"]`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Units) != 2 {
+		t.Fatalf("expected 2 Units for lowercase from/as Dockerfile, got %d", len(doc.Units))
+	}
+	if doc.Units[0].Title != "stage: deps" {
+		t.Errorf("Units[0].Title = %q, want stage: deps", doc.Units[0].Title)
+	}
+	if doc.Units[1].Title != "stage: runner" {
+		t.Errorf("Units[1].Title = %q, want stage: runner", doc.Units[1].Title)
 	}
 }
