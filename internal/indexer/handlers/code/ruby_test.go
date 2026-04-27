@@ -210,11 +210,59 @@ func TestRubyGrammar_Inheritance(t *testing.T) {
 	}
 }
 
+func TestRubyGrammar_SuperclassInherits(t *testing.T) {
+	const src = `
+class Dog < Animal
+  def bark; end
+end
+
+class Puppy < Animals::Dog
+  def whimper; end
+end
+`
+	h := code.New(code.NewRubyGrammar())
+	doc, err := h.Parse("app/dog.rb", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// class Dog < Animal → Target="Animal", Relation="extends"
+	dogRefs := inheritsRefsBySource(doc, "dog.Dog")
+	var foundAnimal bool
+	for _, r := range dogRefs {
+		if r.Target == "Animal" {
+			foundAnimal = true
+			if rel, _ := r.Metadata["relation"].(string); rel != "extends" {
+				t.Errorf("Dog → Animal: relation = %q, want extends", rel)
+			}
+		}
+	}
+	if !foundAnimal {
+		t.Errorf("missing inherits ref Dog → Animal (target=%q)", "Animal")
+	}
+
+	// class Puppy < Animals::Dog → Target="Animals::Dog", Relation="extends"
+	puppyRefs := inheritsRefsBySource(doc, "dog.Puppy")
+	var foundScoped bool
+	for _, r := range puppyRefs {
+		if r.Target == "Animals::Dog" {
+			foundScoped = true
+			if rel, _ := r.Metadata["relation"].(string); rel != "extends" {
+				t.Errorf("Puppy → Animals::Dog: relation = %q, want extends", rel)
+			}
+		}
+	}
+	if !foundScoped {
+		t.Errorf("missing inherits ref Puppy → Animals::Dog (scoped superclass not resolved)")
+	}
+}
+
 func TestRubyGrammar_AttrAccessorExpansion(t *testing.T) {
 	const src = `
 class User
   attr_accessor :first_name, :last_name, :email
   attr_reader :id
+  attr_writer :password
 end
 `
 	h := code.New(code.NewRubyGrammar())
@@ -223,8 +271,8 @@ end
 		t.Fatalf("Parse: %v", err)
 	}
 
-	// All three attr_accessor symbols + attr_reader should emit field Units.
-	wantFields := []string{"first_name", "last_name", "email", "id"}
+	// All attr_accessor symbols + attr_reader + attr_writer should emit field Units.
+	wantFields := []string{"first_name", "last_name", "email", "id", "password"}
 	got := rubyUnitTitles(doc)
 	for _, f := range wantFields {
 		if !got[f] {

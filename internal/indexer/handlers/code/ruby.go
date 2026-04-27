@@ -167,21 +167,12 @@ func rubyClassParents(n *sitter.Node, source []byte) []ParentRef {
 	// field rather than iterating named children, consistent with ChildByFieldName
 	// usage throughout the codebase.
 	if sc := n.ChildByFieldName("superclass"); sc != nil {
-		for j := uint(0); j < sc.NamedChildCount(); j++ {
-			child := sc.NamedChild(j)
-			if child == nil {
-				continue
-			}
-			name := rubyConstantName(child, source)
-			if name == "" {
-				continue
-			}
+		if name := rubyConstantName(sc, source); name != "" {
 			out = append(out, ParentRef{
 				Name:     name,
 				Relation: "extends",
-				Loc:      nodeLocation(child),
+				Loc:      nodeLocation(sc),
 			})
-			break
 		}
 	}
 
@@ -420,6 +411,12 @@ func rubySymbolText(n *sitter.Node, source []byte) string {
 
 // rubyConstantName returns the fully-qualified constant name from an AST node.
 // Handles simple constants ("Animal") and scoped constants ("Mod::Animal").
+// rubyConstantName returns the fully-qualified constant name from an AST node.
+// Handles:
+//   - "constant"       → bare name ("Animal")
+//   - "scope_resolution" → qualified name ("Pets::Dog")
+//   - "superclass"     → wrapper node for `< Parent`; delegates to its single
+//                        named child (the constant or scope_resolution).
 func rubyConstantName(n *sitter.Node, source []byte) string {
 	if n == nil {
 		return ""
@@ -428,8 +425,11 @@ func rubyConstantName(n *sitter.Node, source []byte) string {
 	case "constant":
 		return n.Utf8Text(source)
 	case "scope_resolution":
-		// `Mod::Animal` — full text is the qualified name.
 		return n.Utf8Text(source)
+	case "superclass":
+		// The superclass wrapper node (e.g., "< Animal") wraps the actual
+		// parent constant as its first named child.
+		return rubyConstantName(n.NamedChild(0), source)
 	}
 	return ""
 }
