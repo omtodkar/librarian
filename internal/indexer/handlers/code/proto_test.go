@@ -1,6 +1,7 @@
 package code_test
 
 import (
+	"strings"
 	"testing"
 
 	"librarian/internal/indexer"
@@ -465,6 +466,184 @@ message Foo {
 	} else if got, _ := u.Metadata["field_number"].(int); got != 1 {
 		t.Errorf("code.field_number = %v, want 1", u.Metadata["field_number"])
 	}
+}
+
+// DocstringFromNode: a multi-line leading comment on an rpc is lifted into
+// Unit.Content as the docstring prefix. Two consecutive // lines must appear
+// joined with a newline, without the // markers.
+func TestProtoGrammar_DocstringFromNodeRPC(t *testing.T) {
+	src := []byte(`syntax = "proto3";
+package ds;
+service Svc {
+  // line1
+  // line2
+  rpc Method (Req) returns (Res);
+}
+message Req {}
+message Res {}
+`)
+	h := code.New(code.NewProtoGrammar())
+	doc, err := h.Parse("ds.proto", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Method")
+	if u == nil {
+		t.Fatalf("rpc Method Unit missing")
+	}
+	if u.Kind != "rpc" {
+		t.Fatalf("Method Kind = %q, want rpc", u.Kind)
+	}
+	want := "line1\nline2"
+	if !strings.HasPrefix(u.Content, want+"\n\n") {
+		t.Errorf("Method.Content starts with %q; want prefix %q followed by \\n\\nrpc…",
+			u.Content[:min(len(u.Content), 60)], want)
+	}
+}
+
+// DocstringFromNode: a blank-line gap between two comment blocks means only
+// the contiguous block immediately preceding the declaration is attached.
+func TestProtoGrammar_DocstringStopsAtBlankLine(t *testing.T) {
+	src := []byte(`syntax = "proto3";
+package ds;
+service Svc {
+  // unrelated comment
+
+  // doc for Method
+  rpc Method (Req) returns (Res);
+}
+message Req {}
+message Res {}
+`)
+	h := code.New(code.NewProtoGrammar())
+	doc, err := h.Parse("ds.proto", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Method")
+	if u == nil {
+		t.Fatalf("rpc Method Unit missing")
+	}
+	// Only "doc for Method" should appear; "unrelated comment" is separated
+	// by a blank line so it belongs to neither this rpc nor to stream.
+	wantDocstring := "doc for Method"
+	if !strings.HasPrefix(u.Content, wantDocstring+"\n\n") {
+		t.Errorf("Method.Content = %q; want prefix %q", u.Content[:min(len(u.Content), 80)], wantDocstring)
+	}
+	if strings.Contains(u.Content[:min(len(u.Content), 80)], "unrelated") {
+		t.Errorf("Method.Content should not include the unrelated comment block")
+	}
+}
+
+// Field type metadata: scalar, repeated, map, and oneof fields each carry the
+// correct type keys in Unit.Metadata.
+func TestProtoGrammar_FieldTypeMetadata(t *testing.T) {
+	src := []byte(`syntax = "proto3";
+package ft;
+message Msg {
+  string name = 1;
+  repeated string tags = 2;
+  map<string, int32> attrs = 3;
+  oneof payload {
+    int64 num = 4;
+  }
+}
+`)
+	h := code.New(code.NewProtoGrammar())
+	doc, err := h.Parse("ft.proto", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// scalar string field
+	u := findByPath(doc, "ft.Msg.name")
+	if u == nil {
+		t.Fatalf("field name missing")
+	}
+	if got, _ := u.Metadata["type"].(string); got != "string" {
+		t.Errorf("name.type = %q, want string", got)
+	}
+	if _, hasRepeated := u.Metadata["repeated"]; hasRepeated {
+		t.Errorf("name.repeated should be absent for non-repeated field")
+	}
+	if _, hasMapKey := u.Metadata["map_key_type"]; hasMapKey {
+		t.Errorf("name.map_key_type should be absent for scalar field")
+	}
+
+	// repeated string field
+	u = findByPath(doc, "ft.Msg.tags")
+	if u == nil {
+		t.Fatalf("field tags missing")
+	}
+	if got, _ := u.Metadata["type"].(string); got != "string" {
+		t.Errorf("tags.type = %q, want string", got)
+	}
+	if got, _ := u.Metadata["repeated"].(bool); !got {
+		t.Errorf("tags.repeated = %v, want true", u.Metadata["repeated"])
+	}
+
+	// map field
+	u = findByPath(doc, "ft.Msg.attrs")
+	if u == nil {
+		t.Fatalf("map_field attrs missing")
+	}
+	if got, _ := u.Metadata["map_key_type"].(string); got != "string" {
+		t.Errorf("attrs.map_key_type = %q, want string", got)
+	}
+	if got, _ := u.Metadata["map_value_type"].(string); got != "int32" {
+		t.Errorf("attrs.map_value_type = %q, want int32", got)
+	}
+	if _, hasType := u.Metadata["type"]; hasType {
+		t.Errorf("attrs.type should be absent for map_field (use map_key_type/map_value_type)")
+	}
+	if _, hasRepeated := u.Metadata["repeated"]; hasRepeated {
+		t.Errorf("attrs.repeated should be absent for map_field")
+	}
+
+	// oneof_field
+	u = findByPath(doc, "ft.Msg.payload.num")
+	if u == nil {
+		t.Fatalf("oneof_field num missing")
+	}
+	if got, _ := u.Metadata["type"].(string); got != "int64" {
+		t.Errorf("num.type = %q, want int64", got)
+	}
+	if got, _ := u.Metadata["oneof"].(string); got != "payload" {
+		t.Errorf("num.oneof = %q, want payload", got)
+	}
+}
+
+// Field type metadata: a field with no explicit type (an error in real proto,
+// but the grammar may still parse it) must not crash; missing keys are simply
+// absent rather than populated with empty strings.
+func TestProtoGrammar_FieldTypeMetadata_NoTypeCrash(t *testing.T) {
+	// This is a valid proto3 message — ensure parsing never panics.
+	src := []byte(`syntax = "proto3";
+package ft;
+message Msg {
+  string ok = 1;
+}
+`)
+	h := code.New(code.NewProtoGrammar())
+	doc, err := h.Parse("ft.proto", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findByPath(doc, "ft.Msg.ok")
+	if u == nil {
+		t.Fatalf("field ok missing")
+	}
+	// Keys must be present for the valid field.
+	if _, ok := u.Metadata["type"]; !ok {
+		t.Errorf("ok.type absent; expected present for typed field")
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Shared structural invariants apply to every grammar — running them on

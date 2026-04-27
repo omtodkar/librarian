@@ -59,9 +59,13 @@ type traceRPCImplementation struct {
 
 // traceRPCField describes a single field inside an input/output message.
 type traceRPCField struct {
-	Name        string `json:"name"`
-	FieldNumber int    `json:"field_number,omitempty"`
-	OneOf       string `json:"oneof,omitempty"`
+	Name         string `json:"name"`
+	FieldNumber  int    `json:"field_number,omitempty"`
+	OneOf        string `json:"oneof,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Repeated     bool   `json:"repeated,omitempty"`
+	MapKeyType   string `json:"map_key_type,omitempty"`
+	MapValueType string `json:"map_value_type,omitempty"`
 }
 
 // traceRPCMessage is the resolved definition of an rpc input or output type.
@@ -777,8 +781,12 @@ func resolveTraceRPCMessageFQ(st storeReader, fq, displayName string, depth int)
 			continue
 		}
 		var fieldMeta struct {
-			FieldNumber int    `json:"field_number"`
-			OneOf       string `json:"oneof"`
+			FieldNumber  int    `json:"field_number"`
+			OneOf        string `json:"oneof"`
+			Type         string `json:"type"`
+			Repeated     bool   `json:"repeated"`
+			MapKeyType   string `json:"map_key_type"`
+			MapValueType string `json:"map_value_type"`
 		}
 		if fn.Metadata != "" {
 			_ = json.Unmarshal([]byte(fn.Metadata), &fieldMeta)
@@ -814,9 +822,13 @@ func resolveTraceRPCMessageFQ(st storeReader, fq, displayName string, depth int)
 			}
 		}
 		msg.Fields = append(msg.Fields, traceRPCField{
-			Name:        fn.Label,
-			FieldNumber: fieldMeta.FieldNumber,
-			OneOf:       fieldMeta.OneOf,
+			Name:         fn.Label,
+			FieldNumber:  fieldMeta.FieldNumber,
+			OneOf:        fieldMeta.OneOf,
+			Type:         fieldMeta.Type,
+			Repeated:     fieldMeta.Repeated,
+			MapKeyType:   fieldMeta.MapKeyType,
+			MapValueType: fieldMeta.MapValueType,
 		})
 	}
 	sort.Slice(msg.Fields, func(i, j int) bool {
@@ -939,10 +951,11 @@ func resolveTraceRPCPath(projectRoot, sourcePath string) string {
 // stripped of their markers and joined with spaces. Returns (0, "") when the
 // file can't be read or the declaration isn't found.
 //
-// The proto grammar does NOT emit docstrings (DocstringFromNode returns ""),
-// so a graph-only approach would leave the docstring field permanently empty.
-// Scanning the source at query time keeps the field useful without touching
-// the grammar.
+// The proto grammar now emits docstrings via DocstringFromNode (lib-r4s.4),
+// so newly-indexed nodes have the comment text in their Unit.Content. However,
+// graph_nodes does not persist a separate docstring column, so reading the
+// source file is still the mechanism used here. Also serves as a fallback for
+// nodes indexed before lib-r4s.4.
 func scanTraceRPCDefinitionSite(absPath, method string) (int, string) {
 	data, err := os.ReadFile(absPath)
 	if err != nil {
@@ -1046,6 +1059,11 @@ func isTraceRPCIdentByte(b byte) bool {
 // collecting contiguous // comment lines. Returns them joined with single
 // spaces, with leading "// " stripped. Blank lines or non-comment lines
 // terminate the block. Used only for the best-effort docstring field.
+//
+// Pre-DocstringFromNode fallback: before the proto grammar implemented
+// DocstringFromNode (lib-r4s.4), this was the primary mechanism for
+// populating Docstring on proto rpc definitions. It now fires for nodes
+// indexed before that grammar update or whenever the source file is readable.
 func collectTraceRPCLeadingComments(lines []string, rpcLineIdx int) string {
 	var block []string
 	for i := rpcLineIdx - 1; i >= 0; i-- {

@@ -60,9 +60,32 @@ func (*ProtoGrammar) Name() string               { return "proto" }
 func (*ProtoGrammar) Extensions() []string       { return []string{".proto"} }
 func (*ProtoGrammar) Language() *sitter.Language { return sitter.NewLanguage(tree_sitter_proto.Language()) }
 
-func (*ProtoGrammar) CommentNodeTypes() []string { return []string{"comment"} }
+// CommentNodeTypes returns an empty slice. Proto comment nodes are named
+// siblings of declarations, but DocstringFromNode handles docstring attachment
+// via the preceding-sibling walk below — returning ["comment"] here would
+// cause the walker's pending buffer and DocstringFromNode to both fire,
+// duplicating the docstring in Unit.Content.
+func (*ProtoGrammar) CommentNodeTypes() []string { return []string{} }
 
-func (*ProtoGrammar) DocstringFromNode(*sitter.Node, []byte) string { return "" }
+// DocstringFromNode walks the preceding named-sibling chain while siblings
+// have kind "comment" and are on adjacent source lines (no blank-line gap),
+// collects their stripped text, and returns them joined with newlines. This is
+// the canonical docstring mechanism for proto — comment nodes are named
+// children of their parent (service, message_body, etc.) and appear as
+// immediate preceding siblings of the declaration they document.
+func (*ProtoGrammar) DocstringFromNode(n *sitter.Node, source []byte) string {
+	var lines []string
+	sib := n.PrevNamedSibling()
+	for sib != nil && sib.Kind() == "comment" {
+		lines = append([]string{stripCommentMarkers(sib.Utf8Text(source))}, lines...)
+		prev := sib.PrevNamedSibling()
+		if prev == nil || prev.Kind() != "comment" || !commentsAreConsecutive(prev, sib) {
+			break
+		}
+		sib = prev
+	}
+	return strings.Join(lines, "\n")
+}
 
 // SymbolKinds maps proto AST node types to Unit.Kind. `extend` is
 // deliberately absent — we emit a file-level `inherits` Reference instead
@@ -404,9 +427,22 @@ func protoRPCMetadata(n *sitter.Node, source []byte) map[string]any {
 	return out
 }
 
-// protoFieldMetadata pulls `field_number` (int) off a field / map_field /
-// oneof_field node. Adds "oneof" metadata when the field lives inside a
-// oneof (grammar-level position; the walker doesn't propagate containment).
+// protoFieldMetadata pulls structured metadata off a field / map_field /
+// oneof_field node.
+//
+// Keys always present when available:
+//   - "field_number" (int)         — the field tag number.
+//   - "oneof"        (string)      — enclosing oneof name when the field is
+//                                    declared inside a oneof block.
+//
+// Type-shape keys (absent rather than empty when not applicable):
+//   - "type"         (string)      — scalar or message type for field /
+//                                    oneof_field ("string", "int32",
+//                                    "MyMessage", …).
+//   - "repeated"     (bool)        — true only for repeated fields; omitted
+//                                    otherwise.
+//   - "map_key_type" (string)      — key type for map_field only.
+//   - "map_value_type" (string)    — value type for map_field only.
 func protoFieldMetadata(n *sitter.Node, source []byte) map[string]any {
 	out := map[string]any{}
 	if num, ok := protoFieldNumber(n, source); ok {
@@ -422,6 +458,47 @@ func protoFieldMetadata(n *sitter.Node, source []byte) map[string]any {
 			}
 		}
 	}
+
+	switch n.Kind() {
+	case "field", "oneof_field":
+		// Extract the scalar or message type from the `type` named child.
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			if c != nil && c.Kind() == "type" {
+				if t := strings.TrimSpace(c.Utf8Text(source)); t != "" {
+					out["type"] = t
+				}
+				break
+			}
+		}
+		// `repeated` is an anonymous keyword child — not in NamedChildCount.
+		for i := uint(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c != nil && c.Kind() == "repeated" {
+				out["repeated"] = true
+				break
+			}
+		}
+	case "map_field":
+		// map_field has key_type and type (value type) as named children.
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			if c == nil {
+				continue
+			}
+			switch c.Kind() {
+			case "key_type":
+				if t := strings.TrimSpace(c.Utf8Text(source)); t != "" {
+					out["map_key_type"] = t
+				}
+			case "type":
+				if t := strings.TrimSpace(c.Utf8Text(source)); t != "" {
+					out["map_value_type"] = t
+				}
+			}
+		}
+	}
+
 	if len(out) == 0 {
 		return nil
 	}

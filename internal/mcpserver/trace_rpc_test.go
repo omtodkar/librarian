@@ -1841,3 +1841,87 @@ export default function Page() {
 	}
 }
 
+// TestTraceRPC_FieldTypeMetadata verifies that scalar, repeated, and map field
+// type metadata emitted by the proto grammar's protoFieldMetadata flows through
+// graph_nodes.metadata and surfaces in the trace_rpc response's Fields slice.
+func TestTraceRPC_FieldTypeMetadata(t *testing.T) {
+	const fieldTypeProto = `syntax = "proto3";
+package ftype;
+
+message TypedRequest {
+  string user = 1;
+  repeated string roles = 2;
+  map<string, int32> labels = 3;
+}
+message TypedReply {
+  bool ok = 1;
+}
+
+service TypedSvc {
+  rpc TypedRPC (TypedRequest) returns (TypedReply);
+}
+`
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/ftype.proto": fieldTypeProto,
+	})
+	s := openTraceRPCStore(t, dir)
+
+	result, err := runTraceRPC(s, dir, "ftype.TypedSvc.TypedRPC")
+	if err != nil {
+		t.Fatalf("runTraceRPC: %v", err)
+	}
+	if result.InputMessage == nil || !result.InputMessage.Resolved {
+		t.Fatalf("InputMessage not resolved; note=%q", func() string {
+			if result.InputMessage != nil {
+				return result.InputMessage.Note
+			}
+			return "nil"
+		}())
+	}
+
+	byName := map[string]traceRPCField{}
+	for _, f := range result.InputMessage.Fields {
+		byName[f.Name] = f
+	}
+
+	// scalar string field
+	user, ok := byName["user"]
+	if !ok {
+		t.Fatalf("field 'user' missing from InputMessage.Fields; got %+v", result.InputMessage.Fields)
+	}
+	if user.Type != "string" {
+		t.Errorf("user.Type = %q, want string", user.Type)
+	}
+	if user.Repeated {
+		t.Errorf("user.Repeated = true, want false")
+	}
+
+	// repeated string field
+	roles, ok := byName["roles"]
+	if !ok {
+		t.Fatalf("field 'roles' missing from InputMessage.Fields")
+	}
+	if roles.Type != "string" {
+		t.Errorf("roles.Type = %q, want string", roles.Type)
+	}
+	if !roles.Repeated {
+		t.Errorf("roles.Repeated = false, want true")
+	}
+
+	// map field
+	labels, ok := byName["labels"]
+	if !ok {
+		t.Fatalf("field 'labels' missing from InputMessage.Fields")
+	}
+	if labels.MapKeyType != "string" {
+		t.Errorf("labels.MapKeyType = %q, want string", labels.MapKeyType)
+	}
+	if labels.MapValueType != "int32" {
+		t.Errorf("labels.MapValueType = %q, want int32", labels.MapValueType)
+	}
+	if labels.Type != "" {
+		t.Errorf("labels.Type = %q, want empty for map_field", labels.Type)
+	}
+}
+
