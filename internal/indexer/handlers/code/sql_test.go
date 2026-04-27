@@ -9,6 +9,28 @@ import (
 	"librarian/internal/store"
 )
 
+// TestSQLGrammar_SatisfiesGrammarInvariants verifies that SQLGrammar satisfies
+// the structural invariants every Grammar implementation must pass.
+//
+// SQL paths are schema-qualified absolute names (e.g. "public.users") rather
+// than file-stem-prefixed names (e.g. "001_create_users.public.users"). The
+// shared invariant harness exempts "sql_graph" from the title-prefix check
+// because there is no meaningful relationship between a migration filename stem
+// and the canonical schema-qualified symbol path.
+func TestSQLGrammar_SatisfiesGrammarInvariants(t *testing.T) {
+	h := code.New(code.NewSQLGrammar())
+	src := []byte(`
+CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE orders (id UUID, user_id INT REFERENCES users(id));
+CREATE INDEX orders_user_id_idx ON orders(user_id);
+CREATE VIEW active_orders AS SELECT * FROM orders WHERE status = 'active';
+CREATE FUNCTION add(a int, b int) RETURNS int LANGUAGE sql AS $$ SELECT a + b $$;
+CREATE SEQUENCE order_seq START 1 INCREMENT 1;
+CREATE SCHEMA reporting;
+`)
+	code.AssertGrammarInvariants(t, h, "migrations/20230101000000_schema.sql", src)
+}
+
 // helper: parse SQL source and return the doc.
 func parseSQLDoc(t *testing.T, filename, src string) *indexer.ParsedDoc {
 	t.Helper()
@@ -39,6 +61,27 @@ func sqlRef(doc *indexer.ParsedDoc, kind, src, target string) *indexer.Reference
 		}
 	}
 	return nil
+}
+
+// ---------- table → column contains edges ----------
+
+func TestSQLGrammar_TableContainsColumnEdges(t *testing.T) {
+	src := `CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);`
+	doc := parseSQLDoc(t, "schema.sql", src)
+
+	// Both columns must have a contains edge from the table.
+	for _, colPath := range []string{"public.users.id", "public.users.name"} {
+		found := false
+		for _, r := range doc.Refs {
+			if r.Kind == store.EdgeKindContains && r.Source == "public.users" && r.Target == colPath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing contains edge public.users → %s; refs: %v", colPath, refSummary(doc))
+		}
+	}
 }
 
 // ---------- CREATE TABLE ----------

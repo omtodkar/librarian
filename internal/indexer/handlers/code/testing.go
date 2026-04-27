@@ -89,7 +89,12 @@ func AssertGrammarInvariants(t *testing.T, h *CodeHandler, path string, src []by
 		if strings.Contains(u.Path, "..") {
 			t.Errorf("Unit %q Path %q contains consecutive dots", u.Title, u.Path)
 		}
-		if title != "" && u.Path != u.Title && !strings.HasPrefix(u.Path, title+".") {
+		// SQL grammars emit schema-qualified absolute paths (e.g. "public.users")
+		// that are intentionally decoupled from the file title — the file stem
+		// (e.g. "001_create_users") is irrelevant to the canonical sym: identifier.
+		// Skip the title-prefix check for these grammars.
+		if title != "" && u.Path != u.Title && !strings.HasPrefix(u.Path, title+".") &&
+			h.grammar.Name() != "sql_graph" {
 			t.Errorf("Unit %q Path %q neither equals Title nor is prefixed with %q+'.'", u.Title, u.Path, title)
 		}
 	}

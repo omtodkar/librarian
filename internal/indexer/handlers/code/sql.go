@@ -28,8 +28,9 @@ package code
 // Edge direction mirrors inherits: child → parent.
 //
 // psql meta-commands (\timing on, \c database, etc.) produce ERROR nodes in the
-// grammar. The handler skips top-level ERROR nodes whose text begins with "\" so
-// migration files with meta-commands parse cleanly without failing.
+// grammar. The handler skips all top-level ERROR nodes — there is no valid DDL
+// statement that the grammar emits as ERROR, so skipping them entirely is safe
+// and avoids surfacing parse noise for meta-command-heavy migration files.
 //
 // Unit.Kind values emitted:
 //   - "table"    — CREATE TABLE
@@ -232,7 +233,7 @@ func sqlExtractTable(n *sitter.Node, source []byte, doc *indexer.ParsedDoc, migT
 				}
 			case "constraints":
 				// Table-level FK constraints.
-				sqlExtractTableConstraintFKs(child, source, tablePath, schema, tableName, doc)
+				sqlExtractTableConstraintFKs(child, source, tablePath, doc)
 			case "ERROR":
 				// Some inline REFERENCES forms (e.g. REFERENCES tbl without parens)
 				// parse as an ERROR node sibling to the preceding column_definition.
@@ -309,8 +310,17 @@ func sqlExtractColumn(n *sitter.Node, source []byte, tablePath, tableSchema, tab
 		meta["migration_tool"] = migTool
 	}
 
+	// Emit table→column contains edge so `neighbors sym:public.users --direction=out`
+	// returns the column nodes.
+	doc.Refs = append(doc.Refs, indexer.Reference{
+		Kind:   store.EdgeKindContains,
+		Source: tablePath,
+		Target: colPath,
+		Loc:    nodeLocation(n),
+	})
+
 	// Emit inline FK reference: REFERENCES target_table(target_col)
-	sqlExtractInlineFK(n, source, colPath, tableSchema, doc)
+	sqlExtractInlineFK(n, source, colPath, doc)
 
 	return &indexer.Unit{
 		Kind:     "column",
@@ -355,7 +365,7 @@ func sqlColumnType(n *sitter.Node, source []byte) string {
 
 // sqlExtractInlineFK checks a column_definition for an inline REFERENCES clause
 // and emits a Reference{Kind:"references"} if found.
-func sqlExtractInlineFK(n *sitter.Node, source []byte, colPath, tableSchema string, doc *indexer.ParsedDoc) {
+func sqlExtractInlineFK(n *sitter.Node, source []byte, colPath string, doc *indexer.ParsedDoc) {
 	hasRef := false
 	var targetRef *sitter.Node
 	var targetColIdent string
@@ -405,13 +415,13 @@ func sqlExtractInlineFK(n *sitter.Node, source []byte, colPath, tableSchema stri
 
 // sqlExtractTableConstraintFKs walks a `constraints` node inside column_definitions
 // and emits References for FOREIGN KEY constraints.
-func sqlExtractTableConstraintFKs(n *sitter.Node, source []byte, tablePath, tableSchema, tableName string, doc *indexer.ParsedDoc) {
+func sqlExtractTableConstraintFKs(n *sitter.Node, source []byte, tablePath string, doc *indexer.ParsedDoc) {
 	for i := uint(0); i < n.NamedChildCount(); i++ {
 		c := n.NamedChild(i)
 		if c == nil || c.Kind() != "constraint" {
 			continue
 		}
-		sqlExtractConstraintFK(c, source, tablePath, tableSchema, tableName, doc)
+		sqlExtractConstraintFK(c, source, tablePath, doc)
 	}
 }
 
@@ -453,7 +463,7 @@ func sqlExtractErrorNodeFK(n *sitter.Node, source []byte, colPath string, doc *i
 // sqlExtractConstraintFK parses a single `constraint` node for FK information.
 // Handles both table-level (FOREIGN KEY (cols) REFERENCES ...) and ALTER TABLE
 // constraint forms.
-func sqlExtractConstraintFK(n *sitter.Node, source []byte, sourcePath, sourceSchema, sourceTable string, doc *indexer.ParsedDoc) {
+func sqlExtractConstraintFK(n *sitter.Node, source []byte, sourcePath string, doc *indexer.ParsedDoc) {
 	// Check if this is a FK constraint (has keyword_foreign or starts with KEY).
 	isFKConstraint := false
 	for i := uint(0); i < n.NamedChildCount(); i++ {
@@ -614,7 +624,7 @@ func sqlRefAction(n *sitter.Node, source []byte, start uint) string {
 				return "SET DEFAULT"
 			}
 		}
-		return "SET NULL"
+		return ""
 	case "keyword_no":
 		return "NO ACTION"
 	}
@@ -959,7 +969,7 @@ func sqlExtractAlterTableFKs(n *sitter.Node, source []byte, doc *indexer.ParsedD
 	if constraint == nil {
 		return
 	}
-	sqlExtractConstraintFK(constraint, source, tablePath, tableSchema, tableName, doc)
+	sqlExtractConstraintFK(constraint, source, tablePath, doc)
 }
 
 // --- Migration tool detection ---
