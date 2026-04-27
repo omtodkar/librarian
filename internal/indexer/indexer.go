@@ -342,6 +342,12 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 	// with the bead dependency order lib-4g2.3 → lib-4g2.4).
 	idx.buildDartCallRPCEdges(result)
 
+	// Python cross-module TypeVar resolver: annotates type_args_resolved on
+	// Generic[T] inherits edges where T is imported from another module. Runs
+	// after all per-file projection so TypeVar symbol nodes from every indexed
+	// file exist in the store before resolution begins (lib-0pa.5).
+	idx.buildPythonTypeVarCrossModuleEdges(result)
+
 	// Test-subject linker: emit tests edges from test files to their likely
 	// subject files via path-naming conventions (lib-8bg). Runs after all
 	// per-file projection so every code_file node exists in the store.

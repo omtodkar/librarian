@@ -342,6 +342,32 @@ func (s *Store) ListNodesByKind(kind string) ([]Node, error) {
 	return out, rows.Err()
 }
 
+// ListEdgesWithMetadataContaining returns all graph_edges rows of the given
+// kind whose metadata JSON contains the given substring. Used by post-graph-pass
+// resolvers (e.g., the Python cross-module TypeVar resolver) that scan for
+// edges annotated with a particular metadata marker.
+func (s *Store) ListEdgesWithMetadataContaining(kind, substring string) ([]Edge, error) {
+	like := "%" + likeEscaper.Replace(substring) + "%"
+	rows, err := s.db.Query(`
+		SELECT from_node, to_node, kind, weight, metadata
+		FROM graph_edges
+		WHERE kind = ? AND metadata LIKE ? ESCAPE '\'`,
+		kind, like)
+	if err != nil {
+		return nil, fmt.Errorf("list_edges_with_metadata: %w", err)
+	}
+	defer rows.Close()
+	var out []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.From, &e.To, &e.Kind, &e.Weight, &e.Metadata); err != nil {
+			return nil, fmt.Errorf("list_edges_with_metadata scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // ListEdges returns every graph_edges row. Companion to ListNodes for
 // graph-wide analytics.
 func (s *Store) ListEdges() ([]Edge, error) {

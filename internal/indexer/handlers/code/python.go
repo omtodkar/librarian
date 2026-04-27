@@ -919,6 +919,13 @@ func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, sou
 
 	// Pass 5: annotate type_args_resolved on Generic[T] inherits refs using
 	// LEGB-style scope resolution (scoped TypeVars before module-level).
+	//
+	// For type args that aren't resolved same-module but DO have an import
+	// binding, record the binding as type_args_pending_cross_module for the
+	// post-graph-pass resolver (buildPythonTypeVarCrossModuleEdges, lib-0pa.5).
+	// The pending map is keyed by the local alias name and valued by the
+	// canonical dotted import path — e.g. {"T": "mylib.types.T"}.
+	importBindings := localTypeBindings(doc.Refs, false /* skipStatic */)
 	for i, ref := range doc.Refs {
 		if ref.Kind != "inherits" {
 			continue
@@ -928,13 +935,21 @@ func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, sou
 			continue
 		}
 		var resolved []string
+		pending := map[string]string{}
 		for _, arg := range typeArgs {
 			if sym := lookupTypeVar(arg, ref.Source, moduleName, typeVarSymPaths, pep695SymPaths); sym != "" {
 				resolved = append(resolved, sym)
+			} else if canonical, hasBind := importBindings[arg]; hasBind {
+				// Cross-module candidate: arg is imported from another module.
+				// Defer to post-graph-pass for graph-level TypeVar validation.
+				pending[arg] = canonical
 			}
 		}
 		if len(resolved) > 0 {
 			doc.Refs[i].Metadata["type_args_resolved"] = resolved
+		}
+		if len(pending) > 0 {
+			doc.Refs[i].Metadata["type_args_pending_cross_module"] = pending
 		}
 	}
 }

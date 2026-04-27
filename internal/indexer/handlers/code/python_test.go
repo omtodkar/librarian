@@ -1338,6 +1338,161 @@ class Foo(Generic[T, U]):
 	}
 }
 
+// --- lib-0pa.5: cross-module TypeVar resolution (pending metadata) ---
+
+// TestPythonGrammar_TypeVarCrossModule_PendingSet verifies that when T is
+// imported from another module (not declared locally), PostProcess records
+// the import binding in type_args_pending_cross_module so the post-graph-pass
+// resolver can validate the TypeVar node later.
+func TestPythonGrammar_TypeVarCrossModule_PendingSet(t *testing.T) {
+	src := []byte(`from other.types import T
+
+class Foo(Generic[T]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic; refs: %+v", refs)
+	}
+	// type_args_resolved must be absent — not yet resolved (needs graph).
+	if _, ok := genericRef.Metadata["type_args_resolved"]; ok {
+		t.Errorf("expected type_args_resolved absent before graph pass; metadata: %+v", genericRef.Metadata)
+	}
+	// type_args_pending_cross_module must record the import binding.
+	pending, ok := genericRef.Metadata["type_args_pending_cross_module"].(map[string]string)
+	if !ok || len(pending) == 0 {
+		t.Fatalf("expected type_args_pending_cross_module set; metadata: %+v", genericRef.Metadata)
+	}
+	if pending["T"] != "other.types.T" {
+		t.Errorf("pending[T] = %q, want other.types.T", pending["T"])
+	}
+}
+
+// TestPythonGrammar_TypeVarCrossModule_AliasedImport verifies that the alias
+// form `from .types import T as MyT` is tracked via the alias in
+// type_args_pending_cross_module, with the canonical path as the value.
+func TestPythonGrammar_TypeVarCrossModule_AliasedImport(t *testing.T) {
+	src := []byte(`from other.types import T as MyT
+
+class Foo(Generic[MyT]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic; refs: %+v", refs)
+	}
+	if _, ok := genericRef.Metadata["type_args_resolved"]; ok {
+		t.Errorf("expected type_args_resolved absent; metadata: %+v", genericRef.Metadata)
+	}
+	pending, ok := genericRef.Metadata["type_args_pending_cross_module"].(map[string]string)
+	if !ok || len(pending) == 0 {
+		t.Fatalf("expected type_args_pending_cross_module set; metadata: %+v", genericRef.Metadata)
+	}
+	// Key is the local alias, value is the canonical import path.
+	if pending["MyT"] != "other.types.T" {
+		t.Errorf("pending[MyT] = %q, want other.types.T", pending["MyT"])
+	}
+	if _, hasBadKey := pending["T"]; hasBadKey {
+		t.Errorf("unexpected key T in pending (should use alias MyT): %+v", pending)
+	}
+}
+
+// TestPythonGrammar_TypeVarCrossModule_LocalVarNotPending verifies that a
+// same-module TypeVar resolves via type_args_resolved and does NOT trigger
+// the cross-module pending path.
+func TestPythonGrammar_TypeVarCrossModule_LocalVarNotPending(t *testing.T) {
+	src := []byte(`T = TypeVar("T")
+
+class Foo(Generic[T]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic; refs: %+v", refs)
+	}
+	resolved, _ := genericRef.Metadata["type_args_resolved"].([]string)
+	if len(resolved) != 1 || resolved[0] != "sym:mymod.T" {
+		t.Errorf("type_args_resolved = %v, want [sym:mymod.T]", resolved)
+	}
+	if _, ok := genericRef.Metadata["type_args_pending_cross_module"]; ok {
+		t.Errorf("expected type_args_pending_cross_module absent for same-module TypeVar; metadata: %+v", genericRef.Metadata)
+	}
+}
+
+// TestPythonGrammar_TypeVarCrossModule_TypingExtensionsNotPending verifies that
+// an import from typing_extensions is still recorded as a pending candidate
+// (the grammar can't distinguish external packages from project-internal
+// modules — that check happens in the post-graph-pass resolver).
+func TestPythonGrammar_TypeVarCrossModule_TypingExtensionsNotPending(t *testing.T) {
+	src := []byte(`from typing_extensions import T
+
+class Foo(Generic[T]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic; refs: %+v", refs)
+	}
+	// At grammar level, the pending candidate is recorded (grammar can't check
+	// graph). Post-graph-pass won't find sym:typing_extensions.T as a TypeVar
+	// node, so type_args_resolved stays absent after the graph pass.
+	if _, ok := genericRef.Metadata["type_args_resolved"]; ok {
+		t.Errorf("expected type_args_resolved absent; metadata: %+v", genericRef.Metadata)
+	}
+	pending, _ := genericRef.Metadata["type_args_pending_cross_module"].(map[string]string)
+	if pending["T"] != "typing_extensions.T" {
+		t.Errorf("pending[T] = %q, want typing_extensions.T; metadata: %+v", pending["T"], genericRef.Metadata)
+	}
+}
+
 // --- lib-0pa.3: NamedTuple / TypedDict / namedtuple factory distinction ---
 
 // TestPythonGrammar_TypingNamedTuple_AttributeForm covers `class Foo(typing.NamedTuple):`.

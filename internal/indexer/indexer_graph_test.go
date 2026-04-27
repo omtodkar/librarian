@@ -1439,6 +1439,198 @@ func TestIntegration_Graph_PythonTypeVarProjectedAsSymbolNode(t *testing.T) {
 	}
 }
 
+// --- lib-0pa.5: cross-module TypeVar resolution integration tests ---
+
+// TestIntegration_Graph_PythonCrossModuleTypeVar_Resolved pins the lib-0pa.5
+// guarantee: when T is imported from another module in the same project and
+// that module declares T as a TypeVar, the post-graph-pass resolver populates
+// type_args_resolved on the inherits edge.
+//
+// Layout: mytypes.py declares T; repo.py imports T absolutely and uses
+// Generic[T]. After IndexProjectGraph the inherits edge from sym:repo.Foo
+// to the Generic target should carry type_args_resolved=["sym:mytypes.T"].
+func TestIntegration_Graph_PythonCrossModuleTypeVar_Resolved(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"mytypes.py": "from typing import TypeVar\nT = TypeVar(\"T\")\n",
+		"repo.py":    "from mytypes import T\nfrom typing import Generic\n\nclass Foo(Generic[T]):\n    pass\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	idx, s := newGraphTestIndexer(t, root)
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	// Find the inherits edge from sym:repo.Foo to the Generic symbol.
+	outEdges, err := s.Neighbors("sym:repo.Foo", "out", store.EdgeKindInherits)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	var genericEdge *store.Edge
+	for i := range outEdges {
+		if containsJSON(outEdges[i].Metadata, `"type_args"`) {
+			genericEdge = &outEdges[i]
+			break
+		}
+	}
+	if genericEdge == nil {
+		t.Fatalf("expected Generic inherits edge from sym:repo.Foo with type_args; edges: %+v", outEdges)
+	}
+
+	// type_args_resolved must be present and point to sym:mytypes.T.
+	if !containsJSON(genericEdge.Metadata, `"type_args_resolved":["sym:mytypes.T"]`) {
+		t.Errorf("type_args_resolved missing or wrong; edge metadata: %s", genericEdge.Metadata)
+	}
+	// type_args_pending_cross_module should be absent (cleaned up after resolution).
+	if containsJSON(genericEdge.Metadata, `"type_args_pending_cross_module"`) {
+		t.Errorf("type_args_pending_cross_module should be absent after resolution; edge metadata: %s", genericEdge.Metadata)
+	}
+}
+
+// TestIntegration_Graph_PythonCrossModuleTypeVar_ExternalUnresolved pins that
+// an import from an external (un-indexed) package does not pollute
+// type_args_resolved — sym:typing_extensions.T has no TypeVar symbol node
+// in the project, so the inherits edge should lack type_args_resolved.
+func TestIntegration_Graph_PythonCrossModuleTypeVar_ExternalUnresolved(t *testing.T) {
+	root := t.TempDir()
+	// Only repo.py; typing_extensions is not indexed as part of this project.
+	src := "from typing_extensions import T\nfrom typing import Generic\n\nclass Foo(Generic[T]):\n    pass\n"
+	if err := os.WriteFile(filepath.Join(root, "repo.py"), []byte(src), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	idx, s := newGraphTestIndexer(t, root)
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	outEdges, err := s.Neighbors("sym:repo.Foo", "out", store.EdgeKindInherits)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	var genericEdge *store.Edge
+	for i := range outEdges {
+		if containsJSON(outEdges[i].Metadata, `"type_args"`) {
+			genericEdge = &outEdges[i]
+			break
+		}
+	}
+	if genericEdge == nil {
+		t.Fatalf("expected Generic inherits edge from sym:repo.Foo with type_args; edges: %+v", outEdges)
+	}
+
+	// type_args_resolved must be absent — typing_extensions.T is not a project TypeVar node.
+	if containsJSON(genericEdge.Metadata, `"type_args_resolved"`) {
+		t.Errorf("expected type_args_resolved absent for external import; edge metadata: %s", genericEdge.Metadata)
+	}
+	// type_args_pending_cross_module must be cleaned up even when unresolved.
+	if containsJSON(genericEdge.Metadata, `"type_args_pending_cross_module"`) {
+		t.Errorf("expected type_args_pending_cross_module absent after resolver run; edge metadata: %s", genericEdge.Metadata)
+	}
+}
+
+// TestIntegration_Graph_PythonCrossModuleTypeVar_AliasedImport pins the
+// alias-import form: `from mytypes import T as MyT`. The resolved
+// type_args_resolved should contain sym:mytypes.T (the canonical path),
+// not sym:mytypes.MyT (the local alias).
+func TestIntegration_Graph_PythonCrossModuleTypeVar_AliasedImport(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"mytypes.py": "from typing import TypeVar\nT = TypeVar(\"T\")\n",
+		"repo.py":    "from mytypes import T as MyT\nfrom typing import Generic\n\nclass Foo(Generic[MyT]):\n    pass\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	idx, s := newGraphTestIndexer(t, root)
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	outEdges, err := s.Neighbors("sym:repo.Foo", "out", store.EdgeKindInherits)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	var genericEdge *store.Edge
+	for i := range outEdges {
+		if containsJSON(outEdges[i].Metadata, `"type_args"`) {
+			genericEdge = &outEdges[i]
+			break
+		}
+	}
+	if genericEdge == nil {
+		t.Fatalf("expected Generic inherits edge from sym:repo.Foo with type_args; edges: %+v", outEdges)
+	}
+
+	// type_args_resolved must use the canonical sym:mytypes.T path, not the local alias.
+	if !containsJSON(genericEdge.Metadata, `"type_args_resolved":["sym:mytypes.T"]`) {
+		t.Errorf("type_args_resolved missing or uses alias path; edge metadata: %s", genericEdge.Metadata)
+	}
+}
+
+// TestIntegration_Graph_PythonCrossModuleTypeVar_IncrementalReindex pins that
+// a second IndexProjectGraph call (incremental, files unchanged) preserves
+// type_args_resolved and does not re-introduce type_args_pending_cross_module.
+// On the first run, the resolver sets type_args_resolved and removes the
+// pending key. On the second run, repo.py is hash-skipped so the edge is not
+// rewritten, and ListEdgesWithMetadataContaining finds no pending edges.
+func TestIntegration_Graph_PythonCrossModuleTypeVar_IncrementalReindex(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"mytypes.py": "from typing import TypeVar\nT = TypeVar(\"T\")\n",
+		"repo.py":    "from mytypes import T\nfrom typing import Generic\n\nclass Foo(Generic[T]):\n    pass\n",
+	}
+	for rel, body := range files {
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	idx, s := newGraphTestIndexer(t, root)
+
+	// First run: force=true so all files are processed.
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph (first run): %v", err)
+	}
+
+	// Second run: force=false — files are unchanged, so both are hash-skipped.
+	if _, err := idx.IndexProjectGraph(root, false); err != nil {
+		t.Fatalf("IndexProjectGraph (second run): %v", err)
+	}
+
+	outEdges, err := s.Neighbors("sym:repo.Foo", "out", store.EdgeKindInherits)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	var genericEdge *store.Edge
+	for i := range outEdges {
+		if containsJSON(outEdges[i].Metadata, `"type_args"`) {
+			genericEdge = &outEdges[i]
+			break
+		}
+	}
+	if genericEdge == nil {
+		t.Fatalf("expected Generic inherits edge with type_args; edges: %+v", outEdges)
+	}
+
+	if !containsJSON(genericEdge.Metadata, `"type_args_resolved":["sym:mytypes.T"]`) {
+		t.Errorf("type_args_resolved lost on incremental reindex; edge metadata: %s", genericEdge.Metadata)
+	}
+	if containsJSON(genericEdge.Metadata, `"type_args_pending_cross_module"`) {
+		t.Errorf("type_args_pending_cross_module leaked into edge after incremental reindex; metadata: %s", genericEdge.Metadata)
+	}
+}
+
 // keys returns the sorted key set of a map[string]string for stable
 // failure messages.
 func keys(m map[string]string) []string {
