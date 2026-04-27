@@ -395,7 +395,7 @@ func extractFromImports(n *sitter.Node, source []byte) []ImportRef {
 //
 // Four argument shapes are handled:
 //   - identifier (`Base`)            → Name="Base", no metadata
-//   - attribute (`pkg.Base`)         → Name="pkg.Base" (dotted)
+//   - attribute (`pkg.mod.Base`)     → Name="Base" (leaf), Metadata["qualified_name"]="pkg.mod.Base"
 //   - subscript (`Generic[T, U]`)    → Name="Generic", Metadata["type_args"]=["T","U"]
 //   - call      (`factory()`)        → Name=<callee identifier best-effort>,
 //                                      Metadata["unresolved_expression"]=true
@@ -404,7 +404,7 @@ func extractFromImports(n *sitter.Node, source []byte) []ImportRef {
 // distinction; `typing.Protocol` is syntactically just another base.
 //
 // Fuller handling of call-expression bases (e.g., `namedtuple(...)`) is
-// deferred to lib-3xh per the plan's "don't silently skip; file a bead"
+// deferred to lib-0pa.3 per the plan's "don't silently skip; file a bead"
 // directive; the best-effort identifier fallback here keeps something in the
 // graph without pretending the resolution is complete.
 func (*PythonGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
@@ -443,11 +443,30 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 		ByteOffset: int(c.StartByte()),
 	}
 	switch c.Kind() {
-	case "identifier", "attribute":
+	case "identifier":
 		return &ParentRef{
 			Name:     strings.TrimSpace(c.Utf8Text(source)),
 			Relation: "extends",
 			Loc:      loc,
+		}
+	case "attribute":
+		// `pkg.mod.Base` — emit the leaf identifier as Name so the graph node
+		// stays a clean short name; stash the full dotted chain in
+		// qualified_name so downstream beads (lib-6wz, lib-0pa.2) can resolve
+		// the FQN without re-parsing.
+		attrField := c.ChildByFieldName("attribute")
+		if attrField == nil {
+			return nil
+		}
+		leaf := strings.TrimSpace(attrField.Utf8Text(source))
+		if leaf == "" {
+			return nil
+		}
+		return &ParentRef{
+			Name:     leaf,
+			Relation: "extends",
+			Loc:      loc,
+			Metadata: map[string]any{"qualified_name": strings.TrimSpace(c.Utf8Text(source))},
 		}
 	case "subscript":
 		// `Generic[T, U]` — base name is the subscripted value; slice entries
@@ -507,12 +526,15 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 // resolve against that canonical form directly.
 //
 // Resolution rules, in order:
-//  1. Target already dotted (attribute / FQN in source) → leave alone.
-//  2. Metadata.unresolved_expression=true (call-expression base) → leave
-//     alone; lib-3xh will tackle these.
-//  3. Bare name matches a local binding from the file's imports → rewrite
+//  1. Metadata.qualified_name set (attribute-chain base, e.g. pkg.mod.Base) →
+//     rewrite Target to the qualified_name FQN; resolveInheritsRefs then skips
+//     it as already-dotted.
+//  2. Target already dotted (FQN in source) → leave alone.
+//  3. Metadata.unresolved_expression=true (call-expression base) → leave
+//     alone; lib-0pa.3 will tackle these.
+//  4. Bare name matches a local binding from the file's imports → rewrite
 //     Target to the full path.
-//  4. Otherwise → mark Metadata.unresolved=true.
+//  5. Otherwise → mark Metadata.unresolved=true.
 //
 // Import forms that contribute a local binding:
 //   - `import pkg`          → local "pkg"    → target "pkg"
@@ -527,9 +549,18 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 // scoping rule: a plain dotted import binds ONLY the leaf in the local
 // scope, not the root. So `local["subpkg"] = "pkg.subpkg"` is correct even
 // though the `class Foo(subpkg):` form is rare — the common
-// `class Foo(pkg.subpkg.Base):` arrives already-dotted and is skipped by
-// ResolveInheritsRefs' early return.
+// `class Foo(pkg.subpkg.Base):` carries qualified_name and is handled by rule 1.
 func (*PythonGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
+	// Rule 1: attribute-chain bases carry qualified_name — use it as the FQN
+	// so resolveInheritsRefs sees a dotted target and leaves it alone cleanly.
+	for i, r := range refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if qn, ok := r.Metadata["qualified_name"].(string); ok && qn != "" {
+			refs[i].Target = qn
+		}
+	}
 	return resolveInheritsRefs(refs, localTypeBindings(refs, false /* skipStatic */))
 }
 

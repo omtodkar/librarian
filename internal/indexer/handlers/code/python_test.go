@@ -769,6 +769,207 @@ class Foo(UnknownBase):
 	}
 }
 
+// --- lib-0pa.1: expression-valued class bases — structured handling ---
+
+func TestPythonGrammar_SubscriptBase_GenericMultiArg(t *testing.T) {
+	src := []byte(`class Foo(Generic[T, U]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("g.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "g.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Generic" {
+		t.Errorf("Target = %q, want Generic", refs[0].Target)
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 2 || args[0] != "T" || args[1] != "U" {
+		t.Errorf("type_args = %v, want [T U]", args)
+	}
+}
+
+func TestPythonGrammar_SubscriptBase_Protocol(t *testing.T) {
+	src := []byte(`class Foo(Protocol[T]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("p.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "p.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Protocol" {
+		t.Errorf("Target = %q, want Protocol", refs[0].Target)
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 1 || args[0] != "T" {
+		t.Errorf("type_args = %v, want [T]", args)
+	}
+}
+
+func TestPythonGrammar_SubscriptBase_BuiltinList(t *testing.T) {
+	src := []byte(`class Foo(list[str]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("bl.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "bl.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "list" {
+		t.Errorf("Target = %q, want list", refs[0].Target)
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 1 || args[0] != "str" {
+		t.Errorf("type_args = %v, want [str]", args)
+	}
+}
+
+func TestPythonGrammar_AttributeBase_LeafPlusQualifiedName(t *testing.T) {
+	src := []byte(`class Foo(pkg.mod.Base):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("attr.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "attr.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	// After ResolveParents uses qualified_name, Target becomes the FQN.
+	if refs[0].Target != "pkg.mod.Base" {
+		t.Errorf("Target = %q, want pkg.mod.Base", refs[0].Target)
+	}
+	if qn, _ := refs[0].Metadata["qualified_name"].(string); qn != "pkg.mod.Base" {
+		t.Errorf("qualified_name = %q, want pkg.mod.Base", qn)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("attribute-chain base should not be marked unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+func TestPythonGrammar_AttributeBase_TypingProtocol(t *testing.T) {
+	src := []byte(`class Foo(typing.Protocol):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("tp.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "tp.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "typing.Protocol" {
+		t.Errorf("Target = %q, want typing.Protocol", refs[0].Target)
+	}
+	if qn, _ := refs[0].Metadata["qualified_name"].(string); qn != "typing.Protocol" {
+		t.Errorf("qualified_name = %q, want typing.Protocol", qn)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("attribute-chain base should not be marked unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+func TestPythonGrammar_CallBase_UnknownFactory(t *testing.T) {
+	src := []byte(`class Foo(make_base(Mixin)):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("cb.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "cb.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref (call fallback), got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "make_base" {
+		t.Errorf("Target = %q, want make_base (callee identifier fallback)", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved_expression"].(bool); !v {
+		t.Errorf("expected unresolved_expression=true; got metadata %+v", refs[0].Metadata)
+	}
+}
+
+func TestPythonGrammar_MetaclassKwargFiltered(t *testing.T) {
+	src := []byte(`class Foo(Base, metaclass=Meta):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mk.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mk.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected only Base as parent (1 ref), got %d: %+v", len(refs), refs)
+	}
+	// Base is unresolved (no import), but it is the only parent — metaclass is filtered.
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base (metaclass kwarg filtered)", refs[0].Target)
+	}
+}
+
+func TestPythonGrammar_MixedAttributeAndSubscriptBases(t *testing.T) {
+	src := []byte(`class Foo(pkg.mod.Base, Generic[T]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mx.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mx.Foo")
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs, got %d (%+v)", len(refs), refs)
+	}
+	// Collect refs by target.
+	byTarget := map[string]indexer.Reference{}
+	for _, r := range refs {
+		byTarget[r.Target] = r
+	}
+
+	// Attribute-chain base.
+	attrRef, ok := byTarget["pkg.mod.Base"]
+	if !ok {
+		t.Errorf("missing attribute-chain parent pkg.mod.Base; got %v", byTarget)
+	} else {
+		if qn, _ := attrRef.Metadata["qualified_name"].(string); qn != "pkg.mod.Base" {
+			t.Errorf("attribute parent qualified_name = %q, want pkg.mod.Base", qn)
+		}
+		if v, _ := attrRef.Metadata["unresolved"].(bool); v {
+			t.Errorf("attribute-chain base should not be unresolved: %+v", attrRef.Metadata)
+		}
+	}
+
+	// Subscript base.
+	subRef, ok := byTarget["Generic"]
+	if !ok {
+		t.Errorf("missing subscript parent Generic; got %v", byTarget)
+	} else {
+		args, _ := subRef.Metadata["type_args"].([]string)
+		if len(args) != 1 || args[0] != "T" {
+			t.Errorf("subscript parent type_args = %v, want [T]", args)
+		}
+	}
+}
+
 // --- lib-oyk: function-to-function call edges ---
 
 // TestPythonGrammar_CallEdges_SameFileResolved verifies that a same-file call
