@@ -1,6 +1,7 @@
 package jsresolve
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -109,5 +110,22 @@ func TestStatIsFile_RejectsDirectories(t *testing.T) {
 	dir := t.TempDir()
 	if StatIsFile(dir) {
 		t.Errorf("StatIsFile returned true for a directory %q", dir)
+	}
+}
+
+func TestStatIsFile_AcceptsRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "utils.ts")
+	if err := os.WriteFile(f, []byte("export const x = 1"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if !StatIsFile(f) {
+		t.Errorf("StatIsFile returned false for a regular file %q", f)
+	}
+}
+
+func TestStatIsFile_ReturnsFalseForMissing(t *testing.T) {
+	if StatIsFile("/tmp/this_path_should_not_exist_librarian_test.ts") {
+		t.Error("StatIsFile returned true for a non-existent path")
 	}
 }

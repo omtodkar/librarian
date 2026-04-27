@@ -537,7 +537,7 @@ func callSiteIsExported(n *sitter.Node) bool {
 		switch p.Kind() {
 		case "export_statement":
 			return true
-		case "program", "statement_block", "function_body":
+		case "program", "statement_block", "function_body", "class_body":
 			return false
 		}
 	}
