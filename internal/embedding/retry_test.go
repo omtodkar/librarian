@@ -314,3 +314,102 @@ func TestJitteredDelay_NegativeDelayReturnsZero(t *testing.T) {
 		t.Errorf("got %v want 0", d)
 	}
 }
+
+// --- Backoff progression test ---
+
+func TestRetryOn429_BackoffProgression(t *testing.T) {
+	// Patch only retrySleep; retryBaseDelay is intentionally left at its real
+	// 1s value to exercise the delay = min(delay*2, 30s) doubling path with a
+	// non-zero starting value (all existing tests zero retryBaseDelay out).
+	var sleeps []time.Duration
+	origSleep := retrySleep
+	retrySleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+	defer func() { retrySleep = origSleep }()
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	resp, _, err := retryOn429(3, func() (*http.Response, error) {
+		return http.Get(srv.URL)
+	})
+	if err != nil {
+		t.Fatalf("retryOn429: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("final status: got %d want 200", resp.StatusCode)
+	}
+	if len(sleeps) != 3 {
+		t.Fatalf("retrySleep call count: got %d want 3", len(sleeps))
+	}
+	// delay starts at 1s and doubles each retry: caps are 1s, 2s, 4s.
+	// jitteredDelay draws from [0, cap), so each recorded sleep must be < cap.
+	caps := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	for i, cap := range caps {
+		if sleeps[i] >= cap {
+			t.Errorf("sleep[%d] = %v: want < %v (cap doubled from previous)", i, sleeps[i], cap)
+		}
+	}
+}
+
+// --- Multi-wave 429 tests ---
+
+func TestGeminiEmbedder_MultiWave_Wave2RetriesAfter429(t *testing.T) {
+	zeroSleepDelay(t)
+	// 3 calls: wave-1 → 200, wave-2 attempt-1 → 429, wave-2 retry → 200.
+	mock := &geminiSequentialMock{statuses: []int{200, 429, 200}, dim: 2}
+	srv := httptest.NewServer(mock.handler(t))
+	defer srv.Close()
+
+	// batchSize=2, 3 inputs → wave-1: texts[0:2], wave-2: texts[2:3].
+	e, err := NewGeminiEmbedder("test-key", "test-model", 2, 1, 1)
+	if err != nil {
+		t.Fatalf("NewGeminiEmbedder: %v", err)
+	}
+	e.client = &http.Client{Transport: rewriteTransport{to: srv.URL}}
+
+	out, err := e.EmbedBatch([]string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("output length: got %d want 3", len(out))
+	}
+	if got := int(mock.calls.Load()); got != 3 {
+		t.Errorf("server calls: got %d want 3 (wave-1 ok + wave-2 429 + wave-2 retry ok)", got)
+	}
+}
+
+func TestOpenAIEmbedder_MultiWave_Wave2RetriesAfter429(t *testing.T) {
+	zeroSleepDelay(t)
+	// 3 calls: wave-1 → 200, wave-2 attempt-1 → 429, wave-2 retry → 200.
+	mock := &openAISequentialMock{statuses: []int{200, 429, 200}, dim: 2}
+	srv := httptest.NewServer(mock.handler(t))
+	defer srv.Close()
+
+	// batchSize=2, 3 inputs → wave-1: texts[0:2], wave-2: texts[2:3].
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 2, 1, 1)
+	if err != nil {
+		t.Fatalf("NewOpenAIEmbedder: %v", err)
+	}
+
+	out, err := e.EmbedBatch([]string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("output length: got %d want 3", len(out))
+	}
+	if got := int(mock.calls.Load()); got != 3 {
+		t.Errorf("server calls: got %d want 3 (wave-1 ok + wave-2 429 + wave-2 retry ok)", got)
+	}
+}
