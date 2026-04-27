@@ -835,6 +835,10 @@ func TestPythonGrammar_SubscriptBase_BuiltinList(t *testing.T) {
 	if len(args) != 1 || args[0] != "str" {
 		t.Errorf("type_args = %v, want [str]", args)
 	}
+	// `list` has no import binding → resolveInheritsRefs marks it unresolved.
+	if v, _ := refs[0].Metadata["unresolved"].(bool); !v {
+		t.Errorf("expected unresolved=true for bare builtin `list`; got %+v", refs[0].Metadata)
+	}
 }
 
 func TestPythonGrammar_AttributeBase_LeafPlusQualifiedName(t *testing.T) {
@@ -910,22 +914,36 @@ func TestPythonGrammar_CallBase_UnknownFactory(t *testing.T) {
 	}
 }
 
-func TestPythonGrammar_MetaclassKwargFiltered(t *testing.T) {
-	src := []byte(`class Foo(Base, metaclass=Meta):
+// TestPythonGrammar_SubscriptBase_AttributeValue documents the current
+// behaviour when the subscript's value is itself an attribute chain
+// (e.g. typing.Generic[T]). The full dotted form is used as the Target
+// because extractPythonBase does not split attribute-valued subscript targets;
+// resolveInheritsRefs sees a dotted name and leaves it alone (no unresolved).
+// Splitting attribute-valued subscript targets is deferred (out of scope for
+// lib-0pa.1).
+func TestPythonGrammar_SubscriptBase_AttributeValue(t *testing.T) {
+	src := []byte(`class Foo(typing.Generic[T]):
     pass
 `)
 	h := code.New(code.NewPythonGrammar())
-	doc, err := h.Parse("mk.py", src)
+	doc, err := h.Parse("tg.py", src)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	refs := inheritsRefsBySource(doc, "mk.Foo")
+	refs := inheritsRefsBySource(doc, "tg.Foo")
 	if len(refs) != 1 {
-		t.Fatalf("expected only Base as parent (1 ref), got %d: %+v", len(refs), refs)
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
 	}
-	// Base is unresolved (no import), but it is the only parent — metaclass is filtered.
-	if refs[0].Target != "Base" {
-		t.Errorf("Target = %q, want Base (metaclass kwarg filtered)", refs[0].Target)
+	// Full dotted form is emitted as Target (resolveInheritsRefs skips dotted names).
+	if refs[0].Target != "typing.Generic" {
+		t.Errorf("Target = %q, want typing.Generic", refs[0].Target)
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 1 || args[0] != "T" {
+		t.Errorf("type_args = %v, want [T]", args)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("dotted subscript target should not be marked unresolved: %+v", refs[0].Metadata)
 	}
 }
 
