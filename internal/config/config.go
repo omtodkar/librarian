@@ -120,6 +120,11 @@ type EmbeddingConfig struct {
 	// Default 1 (serial). Raise for paid API tiers with real concurrency
 	// headroom; keep at 1 for free-tier Gemini or local endpoints.
 	MaxParallelBatches int `mapstructure:"max_parallel_batches"`
+	// BatchFallback enables per-item Embed() fallback when a batch wave fails
+	// with a non-transient HTTP 4xx (not 429) or returns a partial-success 200
+	// with some items errored. Default false (opt-in) because the fallback
+	// pathologically slows large failing batches (batch_size API calls vs. one).
+	BatchFallback bool `mapstructure:"batch_fallback"`
 }
 
 type ChunkingConfig struct {

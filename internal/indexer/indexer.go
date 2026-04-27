@@ -943,6 +943,11 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 
 	model := idx.embedder.Model()
 	for i, chunk := range chunks {
+		if vectors[i] == nil {
+			// Nil vector indicates a per-item embedding failure from batch fallback.
+			result.Errors = append(result.Errors, fmt.Sprintf("chunk %d: embedding failed", chunk.ChunkIndex))
+			continue
+		}
 		_, err := idx.store.AddChunk(store.AddChunkInput{
 			Vector:           vectors[i],
 			Content:          chunk.EmbeddingText,

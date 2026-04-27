@@ -25,6 +25,7 @@ type OpenAIEmbedder struct {
 	batchSize          int
 	maxRetries         int
 	maxParallelBatches int
+	batchFallback      bool
 	client             *http.Client
 }
 
@@ -71,8 +72,9 @@ type openAIEmbeddingResponse struct {
 }
 
 type openAIEmbeddingData struct {
-	Embedding []float64 `json:"embedding"`
-	Index     int       `json:"index"`
+	Embedding []float64    `json:"embedding"`
+	Index     int          `json:"index"`
+	Error     *openAIError `json:"error,omitempty"` // per-item error in partial-success responses
 }
 
 type openAIError struct {
@@ -180,9 +182,14 @@ func (e *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 			return e.client.Do(req)
 		})
 		if err != nil {
+			// Network-level failure: not a fallback trigger.
 			return fmt.Errorf("calling batch embeddings API: %w", err)
 		}
 		if resp.StatusCode != http.StatusOK {
+			if e.batchFallback && is4xxFallback(resp.StatusCode) {
+				fallbackItems(e.Embed, wave, start, out)
+				return nil
+			}
 			return fmt.Errorf("batch embeddings API error (status %d): %s", resp.StatusCode, string(respBytes))
 		}
 		var batchResp openAIEmbeddingResponse
@@ -192,20 +199,43 @@ func (e *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 		if batchResp.Error != nil {
 			return fmt.Errorf("batch embeddings API error: %s", batchResp.Error.Message)
 		}
-		if len(batchResp.Data) != len(wave) {
-			return fmt.Errorf("batch API returned %d embeddings for %d inputs", len(batchResp.Data), len(wave))
+		if !e.batchFallback {
+			// Strict mode: exact count required, every embedding must be valid.
+			if len(batchResp.Data) != len(wave) {
+				return fmt.Errorf("batch API returned %d embeddings for %d inputs", len(batchResp.Data), len(wave))
+			}
+			for _, d := range batchResp.Data {
+				if d.Index < 0 || d.Index >= len(wave) {
+					return fmt.Errorf("batch embeddings API returned out-of-range index %d (wave size %d)", d.Index, len(wave))
+				}
+				if len(d.Embedding) == 0 {
+					return fmt.Errorf("batch embeddings API returned empty embedding at index %d", start+d.Index)
+				}
+				out[start+d.Index] = d.Embedding
+			}
+			return nil
 		}
-		// OpenAI's `index` field maps each datum to its position in the input
-		// wave (0-based per spec). Write directly by d.Index so out-of-order
-		// responses land in the correct global slot without a sort pass.
+		// Fallback-enabled: populate valid items; leave nil slots for failed ones.
+		// OpenAI's `index` field maps each datum to its wave-relative position.
 		for _, d := range batchResp.Data {
 			if d.Index < 0 || d.Index >= len(wave) {
-				return fmt.Errorf("batch embeddings API returned out-of-range index %d (wave size %d)", d.Index, len(wave))
+				continue // out-of-range index: fallbackItems will handle the nil slot
 			}
-			if len(d.Embedding) == 0 {
-				return fmt.Errorf("batch embeddings API returned empty embedding at index %d", start+d.Index)
+			if d.Error != nil || len(d.Embedding) == 0 {
+				continue // failed item: leave slot nil for fallbackItems
 			}
 			out[start+d.Index] = d.Embedding
+		}
+		// If any slot is nil (missing, errored, or empty), fall back per-item.
+		needsFallback := false
+		for i := start; i < end; i++ {
+			if out[i] == nil {
+				needsFallback = true
+				break
+			}
+		}
+		if needsFallback {
+			fallbackItems(e.Embed, wave, start, out)
 		}
 		return nil
 	}

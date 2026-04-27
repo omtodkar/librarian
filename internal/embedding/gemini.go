@@ -47,6 +47,7 @@ type GeminiEmbedder struct {
 	batchSize          int
 	maxRetries         int
 	maxParallelBatches int
+	batchFallback      bool
 	client             *http.Client
 }
 
@@ -223,9 +224,14 @@ func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 			return e.client.Post(url, "application/json", bytes.NewReader(bodyBytes))
 		})
 		if err != nil {
+			// Network-level failure: not a fallback trigger.
 			return fmt.Errorf("calling Gemini batch API: %w", err)
 		}
 		if resp.StatusCode != http.StatusOK {
+			if e.batchFallback && is4xxFallback(resp.StatusCode) {
+				fallbackItems(e.Embed, wave, start, out)
+				return nil
+			}
 			return fmt.Errorf("Gemini batch API error (status %d): %s", resp.StatusCode, string(respBytes))
 		}
 		var batchResp geminiBatchResponse
@@ -238,11 +244,21 @@ func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 		if len(batchResp.Embeddings) != len(wave) {
 			return fmt.Errorf("Gemini batch API returned %d embeddings for %d inputs", len(batchResp.Embeddings), len(wave))
 		}
+		// Populate successful items; detect partial-success 200 when fallback enabled.
+		hasMixed := false
 		for i, emb := range batchResp.Embeddings {
 			if len(emb.Values) == 0 {
-				return fmt.Errorf("Gemini batch API returned empty embedding at index %d", start+i)
+				if !e.batchFallback {
+					return fmt.Errorf("Gemini batch API returned empty embedding at index %d", start+i)
+				}
+				hasMixed = true
+				continue
 			}
 			out[start+i] = emb.Values
+		}
+		if hasMixed {
+			// Nil slots remain for items with empty Values; fall back per-item.
+			fallbackItems(e.Embed, wave, start, out)
 		}
 		return nil
 	}
