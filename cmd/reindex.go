@@ -12,6 +12,7 @@ import (
 	_ "librarian/internal/indexer/handlers/defaults" // register all built-in handlers
 	"librarian/internal/indexer/handlers/pdf"
 	"librarian/internal/store"
+	"librarian/internal/summarizer"
 )
 
 var (
@@ -85,7 +86,12 @@ func runReindex(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("clearing vector state: %w", err)
 	}
 
+	sum, err := summarizer.New(cfg.Summarization)
+	if err != nil {
+		return fmt.Errorf("creating summarizer: %w", err)
+	}
 	idx := indexer.New(s, cfg, embedder)
+	idx.SetSummarizer(sum)
 	if reindexJSON {
 		idx.SetProgressOverride("silent")
 	}

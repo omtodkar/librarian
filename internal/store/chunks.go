@@ -25,10 +25,10 @@ func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
 	}
 
 	res, err := s.db.Exec(`
-		INSERT INTO doc_chunks (file_path, section_heading, section_hierarchy, chunk_index, content, token_count, doc_id, signal_meta)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO doc_chunks (file_path, section_heading, section_hierarchy, chunk_index, content, summary, token_count, doc_id, signal_meta)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		input.FilePath, input.SectionHeading, input.SectionHierarchy,
-		input.ChunkIndex, input.Content, input.TokenCount, input.DocID, signalMeta,
+		input.ChunkIndex, input.Content, input.Summary, input.TokenCount, input.DocID, signalMeta,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("add_chunk: %w", err)
@@ -53,6 +53,7 @@ func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
 		SectionHierarchy: input.SectionHierarchy,
 		ChunkIndex:       input.ChunkIndex,
 		Content:          input.Content,
+		Summary:          input.Summary,
 		TokenCount:       input.TokenCount,
 		SignalMeta:       signalMeta,
 	}, nil
@@ -69,7 +70,7 @@ type scoredChunk struct {
 func (s *Store) vectorSearch(vector []float64, fetchLimit int) ([]scoredChunk, error) {
 	vecBytes := float64sToFloat32Bytes(vector)
 	rows, err := s.db.Query(`
-		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.token_count, c.signal_meta, v.distance
+		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.summary, c.token_count, c.signal_meta, v.distance
 		FROM doc_chunk_vectors v
 		JOIN doc_chunks c ON c.id = v.chunk_id
 		WHERE v.embedding MATCH ?
@@ -86,7 +87,7 @@ func (s *Store) vectorSearch(vector []float64, fetchLimit int) ([]scoredChunk, e
 		var id int64
 		if err := rows.Scan(&id, &sc.chunk.FilePath, &sc.chunk.SectionHeading,
 			&sc.chunk.SectionHierarchy, &sc.chunk.ChunkIndex, &sc.chunk.Content,
-			&sc.chunk.TokenCount, &sc.chunk.SignalMeta, &sc.distance); err != nil {
+			&sc.chunk.Summary, &sc.chunk.TokenCount, &sc.chunk.SignalMeta, &sc.distance); err != nil {
 			return nil, fmt.Errorf("search_chunks scan: %w", err)
 		}
 		sc.chunk.ID = strconv.FormatInt(id, 10)
@@ -108,7 +109,7 @@ func (s *Store) ftsSearch(queryText string, fetchLimit int) ([]scoredChunk, erro
 	}
 
 	rows, err := s.db.Query(`
-		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.token_count, c.signal_meta
+		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.summary, c.token_count, c.signal_meta
 		FROM doc_chunks_fts f
 		JOIN doc_chunks c ON c.id = f.rowid
 		WHERE doc_chunks_fts MATCH ?
@@ -125,7 +126,7 @@ func (s *Store) ftsSearch(queryText string, fetchLimit int) ([]scoredChunk, erro
 		var id int64
 		if err := rows.Scan(&id, &sc.chunk.FilePath, &sc.chunk.SectionHeading,
 			&sc.chunk.SectionHierarchy, &sc.chunk.ChunkIndex, &sc.chunk.Content,
-			&sc.chunk.TokenCount, &sc.chunk.SignalMeta); err != nil {
+			&sc.chunk.Summary, &sc.chunk.TokenCount, &sc.chunk.SignalMeta); err != nil {
 			return nil, fmt.Errorf("fts_search scan: %w", err)
 		}
 		sc.chunk.ID = strconv.FormatInt(id, 10)
@@ -317,7 +318,7 @@ func computeMetadataBoost(signalMetaJSON string) float64 {
 
 func (s *Store) GetChunksForDocument(docID string) ([]DocChunk, error) {
 	rows, err := s.db.Query(`
-		SELECT id, file_path, section_heading, section_hierarchy, chunk_index, content, token_count, signal_meta
+		SELECT id, file_path, section_heading, section_hierarchy, chunk_index, content, summary, token_count, signal_meta
 		FROM doc_chunks WHERE doc_id = ? ORDER BY chunk_index`, docID)
 	if err != nil {
 		return nil, fmt.Errorf("get_chunks_for_document: %w", err)
@@ -329,8 +330,8 @@ func (s *Store) GetChunksForDocument(docID string) ([]DocChunk, error) {
 		var chunk DocChunk
 		var id int64
 		if err := rows.Scan(&id, &chunk.FilePath, &chunk.SectionHeading,
-			&chunk.SectionHierarchy, &chunk.ChunkIndex, &chunk.Content, &chunk.TokenCount,
-			&chunk.SignalMeta); err != nil {
+			&chunk.SectionHierarchy, &chunk.ChunkIndex, &chunk.Content, &chunk.Summary,
+			&chunk.TokenCount, &chunk.SignalMeta); err != nil {
 			return nil, fmt.Errorf("get_chunks_for_document scan: %w", err)
 		}
 		chunk.ID = strconv.FormatInt(id, 10)

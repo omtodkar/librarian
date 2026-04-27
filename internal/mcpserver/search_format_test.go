@@ -51,7 +51,7 @@ func TestSearchDocsFormatNonDuplicatedSection(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rendered := formatChunkResult(tc.chunk)
+			rendered := formatChunkResult(tc.chunk, true)
 
 			// The section label must appear exactly once.
 			if count := strings.Count(rendered, tc.wantLabel); count != 1 {
@@ -97,8 +97,7 @@ func TestGetContextFormatNonDuplicatedSection(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Reproduce the exact format string used in registerGetContext.
-			line := fmt.Sprintf("### %s > %s\n", tc.chunk.FilePath, tc.chunk.SectionHeading)
+			line := formatContextChunkHeader(tc.chunk)
 
 			if count := strings.Count(line, tc.wantSection); count != 1 {
 				t.Errorf("section label %q appears %d times in output line %q (want 1)", tc.wantSection, count, line)

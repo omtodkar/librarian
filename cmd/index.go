@@ -12,6 +12,7 @@ import (
 	_ "librarian/internal/indexer/handlers/defaults" // register all built-in handlers
 	"librarian/internal/indexer/handlers/pdf"
 	"librarian/internal/store"
+	"librarian/internal/summarizer"
 )
 
 var (
@@ -105,7 +106,13 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	// reinit but wasteful to leave running after indexing completes.
 	defer pdf.Shutdown()
 
+	sum, err := summarizer.New(cfg.Summarization)
+	if err != nil {
+		return fmt.Errorf("creating summarizer: %w", err)
+	}
+
 	idx := indexer.New(s, cfg, embedder)
+	idx.SetSummarizer(sum)
 
 	// Per-run progress override from CLI flags. --json wins (we must keep
 	// stdout clean for the JSON blob); --quiet / --verbose apply when

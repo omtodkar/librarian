@@ -20,6 +20,7 @@ func TestMCPStableSchema(t *testing.T) {
 	// Register all tools with nil deps — registration only captures deps in
 	// handler closures; the closures are never invoked in this test.
 	registerSearchDocs(srv, nil, nil, false)
+	registerExpandChunks(srv, nil)
 	registerGetDocument(srv, nil, nil)
 	registerGetContext(srv, nil, nil, false)
 	registerListDocuments(srv, nil)
@@ -39,6 +40,10 @@ func TestMCPStableSchema(t *testing.T) {
 			{"query", "string"},
 			{"limit", "number"},
 			{"include_refs", "boolean"},
+			{"include_body", "boolean"},
+		},
+		"expand_chunks": {
+			{"ids", "array"},
 		},
 		"get_context": {
 			{"query", "string"},

@@ -11,6 +11,13 @@ import (
 	"librarian/internal/store"
 )
 
+// formatContextChunkHeader renders the "### file > section" header line used
+// by get_context for each primary-source chunk. Extracted so tests can call
+// the same function rather than duplicating the format string.
+func formatContextChunkHeader(chunk store.DocChunk) string {
+	return fmt.Sprintf("### %s > %s\n", chunk.FilePath, chunk.SectionHeading)
+}
+
 func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding.Embedder, hybridSearch bool) {
 	tool := mcp.NewTool("get_context",
 		mcp.WithDescription("Comprehensive briefing: semantic search combined with graph traversal for related docs and code references. Use this for understanding a topic in depth. Adjust limit for broader or narrower results."),
@@ -58,7 +65,7 @@ func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding
 			output += "No direct matches found.\n\n"
 		} else {
 			for _, chunk := range chunks {
-				output += fmt.Sprintf("### %s > %s\n", chunk.FilePath, chunk.SectionHeading)
+				output += formatContextChunkHeader(chunk)
 				output += chunk.Content + "\n\n"
 			}
 		}

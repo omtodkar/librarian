@@ -14,6 +14,7 @@ import (
 	"librarian/internal/indexer"
 	_ "librarian/internal/indexer/handlers/defaults" // register all built-in handlers
 	"librarian/internal/store"
+	"librarian/internal/summarizer"
 )
 
 var (
@@ -86,7 +87,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
+	sum, err := summarizer.New(cfg.Summarization)
+	if err != nil {
+		return fmt.Errorf("creating summarizer: %w", err)
+	}
 	idx := indexer.New(s, cfg, embedder)
+	idx.SetSummarizer(sum)
 	var result *indexer.IndexResult
 	if updateReindex == "full" {
 		result, err = idx.IndexDirectory(cfg.DocsDir, true)

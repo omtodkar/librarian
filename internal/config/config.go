@@ -3,17 +3,18 @@ package config
 import "github.com/spf13/viper"
 
 type Config struct {
-	DocsDir          string          `mapstructure:"docs_dir"`
-	DBPath           string          `mapstructure:"db_path"`
-	Embedding        EmbeddingConfig `mapstructure:"embedding"`
-	Chunking         ChunkingConfig  `mapstructure:"chunking"`
-	Office           OfficeConfig    `mapstructure:"office"`
-	PDF              PDFConfig       `mapstructure:"pdf"`
-	Graph            GraphConfig     `mapstructure:"graph"`
-	Search           SearchConfig    `mapstructure:"search"`
-	Python           PythonConfig    `mapstructure:"python"`
-	CodeFilePatterns []string        `mapstructure:"code_file_patterns"`
-	ExcludePatterns  []string        `mapstructure:"exclude_patterns"`
+	DocsDir          string               `mapstructure:"docs_dir"`
+	DBPath           string               `mapstructure:"db_path"`
+	Embedding        EmbeddingConfig      `mapstructure:"embedding"`
+	Summarization    SummarizationConfig  `mapstructure:"summarization"`
+	Chunking         ChunkingConfig       `mapstructure:"chunking"`
+	Office           OfficeConfig         `mapstructure:"office"`
+	PDF              PDFConfig            `mapstructure:"pdf"`
+	Graph            GraphConfig          `mapstructure:"graph"`
+	Search           SearchConfig         `mapstructure:"search"`
+	Python           PythonConfig         `mapstructure:"python"`
+	CodeFilePatterns []string             `mapstructure:"code_file_patterns"`
+	ExcludePatterns  []string             `mapstructure:"exclude_patterns"`
 
 	// ProjectRoot is the absolute path of the workspace root (the directory
 	// containing .librarian/). Populated by cmd/root.go after workspace.Find()
@@ -63,6 +64,17 @@ type GraphConfig struct {
 	// convenience for users who always want CI runs to stay quiet without
 	// relying on TTY auto-detection.
 	ProgressMode string `mapstructure:"progress_mode"`
+}
+
+// SummarizationConfig controls optional per-chunk summary generation at index
+// time. When Provider is empty or "disabled", summarization is skipped and
+// doc_chunks.summary stays empty. Gemini flash and OpenAI haiku-class models
+// work well here; configure a cheaper model than embedding where possible.
+type SummarizationConfig struct {
+	Provider string `mapstructure:"provider"` // "gemini", "openai", "" or "disabled"
+	Model    string `mapstructure:"model"`
+	APIKey   string `mapstructure:"api_key"`
+	BaseURL  string `mapstructure:"base_url"` // for openai-compatible providers
 }
 
 type EmbeddingConfig struct {

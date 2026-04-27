@@ -15,13 +15,15 @@ import (
 	"librarian/internal/config"
 	"librarian/internal/embedding"
 	"librarian/internal/store"
+	"librarian/internal/summarizer"
 )
 
 type Indexer struct {
-	store    *store.Store
-	cfg      *config.Config
-	embedder embedding.Embedder
-	registry *Registry
+	store      *store.Store
+	cfg        *config.Config
+	embedder   embedding.Embedder
+	summarizer summarizer.Summarizer
+	registry   *Registry
 
 	// progressOverride forces a specific progress reporting mode on both
 	// passes (docs + graph), bypassing the file-count + TTY auto-select
@@ -118,9 +120,17 @@ func NewWithRegistry(s *store.Store, cfg *config.Config, embedder embedding.Embe
 		store:          s,
 		cfg:            cfg,
 		embedder:       embedder,
+		summarizer:     summarizer.Noop{},
 		registry:       reg,
 		pythonSrcRoots: resolvePythonSrcRoots(cfg),
 	}
+}
+
+// SetSummarizer installs an optional summarizer for per-chunk summary
+// generation. Call before IndexDirectory / IndexSingleFile. The default
+// is summarizer.Noop (no summarization).
+func (idx *Indexer) SetSummarizer(s summarizer.Summarizer) {
+	idx.summarizer = s
 }
 
 // resolvePythonSrcRoots produces the absolute, cleaned src-root list the
@@ -918,11 +928,18 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		result.Errors = append(result.Errors, fmt.Sprintf("batch embed (%d chunks): %s", len(chunks), err))
 		return nil
 	}
+
+	// Resolve per-chunk summaries via summary_cache (keyed on SHA-256 of
+	// chunk content). Cache misses are generated one at a time via the
+	// configured summarizer; unchanged chunks skip the API call entirely.
+	summaries := idx.resolveSummaries(chunks, result)
+
 	model := idx.embedder.Model()
 	for i, chunk := range chunks {
 		_, err := idx.store.AddChunk(store.AddChunkInput{
 			Vector:           vectors[i],
 			Content:          chunk.EmbeddingText,
+			Summary:          summaries[i],
 			FilePath:         file.FilePath,
 			SectionHeading:   chunk.SectionHeading,
 			SectionHierarchy: HierarchyToJSON(chunk.SectionHierarchy),
@@ -1000,6 +1017,47 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 
 	result.DocumentsIndexed++
 	return nil
+}
+
+// resolveSummaries returns one summary string per chunk in order. It checks
+// summary_cache first (keyed on SHA-256 of chunk.EmbeddingText); only cache
+// misses are passed to the summarizer. Errors from the summarizer are
+// recorded in result.Errors but never abort the indexing run — the
+// affected chunk simply gets an empty summary.
+func (idx *Indexer) resolveSummaries(chunks []Chunk, result *IndexResult) []string {
+	summaries := make([]string, len(chunks))
+
+	hashes := make([]string, len(chunks))
+	for i, c := range chunks {
+		hashes[i] = computeHash(c.EmbeddingText)
+	}
+
+	cached, err := idx.store.GetChunkSummariesByHashes(hashes)
+	if err != nil {
+		// Non-fatal: fall through to generate all summaries.
+		result.Errors = append(result.Errors, fmt.Sprintf("summary cache lookup: %s", err))
+	}
+
+	for i, h := range hashes {
+		if s, ok := cached[h]; ok {
+			summaries[i] = s
+			continue
+		}
+		// Cache miss: generate via summarizer (Noop returns "" instantly).
+		s, serr := idx.summarizer.Summarize(chunks[i].EmbeddingText)
+		if serr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("summarize chunk %d: %s", chunks[i].ChunkIndex, serr))
+			continue
+		}
+		summaries[i] = s
+		// Cache the result even for empty strings — prevents repeat API calls
+		// for content the model consistently returns nothing for.
+		if uerr := idx.store.UpsertChunkSummary(h, s); uerr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("cache summary chunk %d: %s", chunks[i].ChunkIndex, uerr))
+		}
+	}
+
+	return summaries
 }
 
 // refEdgeSource returns the graph node ID that should be the `from_node` of

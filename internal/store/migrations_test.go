@@ -22,15 +22,16 @@ func TestOpen_FreshDB(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT max(version_id) FROM goose_db_version WHERE is_applied = 1`).Scan(&maxVersion); err != nil {
 		t.Fatalf("reading goose_db_version: %v", err)
 	}
-	if maxVersion != 2 {
-		t.Errorf("max applied version_id: got %d want 2", maxVersion)
+	if maxVersion != 3 {
+		t.Errorf("max applied version_id: got %d want 3", maxVersion)
 	}
 
 	// Every baseline table must exist after goose.Up. Include embedding_meta
 	// so a regression that drops it from 0001 fails this test rather than
 	// later at the first AddChunk (cryptic "no such table" from a live run).
 	// doc_chunks_fts is the FTS5 virtual table added in migration 0002.
-	wantTables := []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta", "doc_chunks_fts"}
+	// summary_cache is added in migration 0003.
+	wantTables := []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta", "doc_chunks_fts", "summary_cache"}
 	for _, tbl := range wantTables {
 		var name string
 		err := s.db.QueryRow(
@@ -133,7 +134,7 @@ func TestGooseDown_RestoresEmptyState(t *testing.T) {
 		t.Fatalf("goose.DownTo(0): %v", err)
 	}
 
-	for _, tbl := range []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta", "doc_chunks_fts"} {
+	for _, tbl := range []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta", "doc_chunks_fts", "summary_cache"} {
 		var name string
 		err := s.db.QueryRow(
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl,

@@ -28,6 +28,9 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 		mcp.WithBoolean("include_refs",
 			mcp.Description("Include referenced code files for each result"),
 		),
+		mcp.WithBoolean("include_body",
+			mcp.Description("Return full chunk content instead of the 1-2 line summary. Default false — summaries reduce token cost; use expand_chunks or set include_body=true to retrieve full bodies."),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -38,6 +41,7 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 		}
 		limit := req.GetInt("limit", 5)
 		includeRefs := req.GetBool("include_refs", false)
+		includeBody := req.GetBool("include_body", false)
 
 		vector, err := embedder.Embed(query)
 		if err != nil {
@@ -72,7 +76,7 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 
 		for i, chunk := range chunks {
 			output += fmt.Sprintf("### Result %d\n", i+1)
-			output += formatChunkResult(chunk)
+			output += formatChunkResult(chunk, includeBody)
 
 			if includeRefs {
 				paths, ok := refs[chunk.FilePath]
@@ -88,8 +92,14 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 }
 
 // formatChunkResult renders the per-chunk block for search_docs output.
-// Extracted so tests can import the same format strings and catch drift.
-func formatChunkResult(chunk store.DocChunk) string {
-	return fmt.Sprintf("**File:** %s\n**Section:** %s\n**Content:**\n%s\n\n",
-		chunk.FilePath, chunk.SectionHeading, chunk.Content)
+// When includeBody is false and a summary exists, the summary is shown
+// instead of the full content body. Callers that always want the full body
+// (expand_chunks, get_context) pass includeBody=true.
+func formatChunkResult(chunk store.DocChunk, includeBody bool) string {
+	if !includeBody && chunk.Summary != "" {
+		return fmt.Sprintf("**File:** %s\n**Section:** %s\n**ID:** %s\n**Summary:**\n%s\n\n",
+			chunk.FilePath, chunk.SectionHeading, chunk.ID, chunk.Summary)
+	}
+	return fmt.Sprintf("**File:** %s\n**Section:** %s\n**ID:** %s\n**Content:**\n%s\n\n",
+		chunk.FilePath, chunk.SectionHeading, chunk.ID, chunk.Content)
 }

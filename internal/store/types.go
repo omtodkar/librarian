@@ -22,6 +22,7 @@ type DocChunk struct {
 	SectionHierarchy string `json:"section_hierarchy"`
 	ChunkIndex       uint32 `json:"chunk_index"`
 	Content          string `json:"content"`
+	Summary          string `json:"summary"`
 	TokenCount       uint32 `json:"token_count"`
 	SignalMeta       string `json:"signal_meta"`
 }
@@ -49,6 +50,7 @@ type AddDocumentInput struct {
 type AddChunkInput struct {
 	Vector           []float64 `json:"vector"`
 	Content          string    `json:"content"`
+	Summary          string    `json:"summary"`
 	FilePath         string    `json:"file_path"`
 	SectionHeading   string    `json:"section_heading"`
 	SectionHierarchy string    `json:"section_hierarchy"`

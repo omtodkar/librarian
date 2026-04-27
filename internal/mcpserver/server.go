@@ -22,6 +22,7 @@ func Serve(s *store.Store, cfg *config.Config, embedder embedding.Embedder) erro
 	)
 
 	registerSearchDocs(srv, s, embedder, cfg.Search.HybridSearch)
+	registerExpandChunks(srv, s)
 	registerGetDocument(srv, s, cfg)
 	registerGetContext(srv, s, embedder, cfg.Search.HybridSearch)
 	registerListDocuments(srv, s)
