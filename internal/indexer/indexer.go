@@ -836,7 +836,8 @@ func isSymbolKind(kind string) bool {
 		"service",        // Proto service declarations (lib-cym)
 		"rpc",            // Proto service RPC methods (lib-cym)
 		"message",        // Proto message declarations (lib-cym)
-		"oneof":          // Proto oneof declarations (lib-cym)
+		"oneof",          // Proto oneof declarations (lib-cym)
+		"typevar":         // Python TypeVar declarations (lib-0pa.2)
 		return true
 	}
 	return false

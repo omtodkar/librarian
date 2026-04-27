@@ -9,6 +9,8 @@ import (
 	"librarian/internal/indexer"
 )
 
+var _ parsedDocPostProcessor = (*PythonGrammar)(nil)
+
 // PythonGrammar indexes .py source files.
 //
 // Symbol extraction:
@@ -667,6 +669,209 @@ func pyCalleeIdent(funcNode *sitter.Node, source []byte) string {
 		}
 	}
 	return ""
+}
+
+// PostProcess implements parsedDocPostProcessor for Python. Runs after all
+// Units have been extracted and imports have been resolved. Two passes:
+//
+//  1. TypeVar detection: walks module-level expression_statement nodes for
+//     VARNAME = TypeVar(...) calls, emitting a Unit{Kind="typevar"} for each.
+//     Import alias resolution (e.g. from typing import TypeVar as TV) is done
+//     by cross-referencing the already-resolved doc.Refs.
+//
+//  2. Generic[T] resolution: for each inherits ref whose Metadata["type_args"]
+//     contains bare names, looks up each name in the TypeVar map built in
+//     pass 1. Matches are appended to Metadata["type_args_resolved"] as
+//     "sym:<module>.<Name>" ids. Unmatched names remain as bare strings in
+//     type_args (unchanged from lib-0pa.1 behaviour).
+func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, source []byte) {
+	typeVarNames := buildTypeVarLocalNames(doc.Refs)
+
+	// Pass 1: collect module-scope TypeVar assignments.
+	typeVarSymPaths := map[string]string{} // bare name → "sym:<module>.<Name>"
+	moduleName := doc.Title
+	for i := uint(0); i < root.NamedChildCount(); i++ {
+		child := root.NamedChild(i)
+		if child == nil || child.Kind() != "expression_statement" {
+			continue
+		}
+		varName, callNode := detectTypeVarAssign(child, source, typeVarNames)
+		if varName == "" {
+			continue
+		}
+		meta := extractTypeVarMeta(callNode, varName, source)
+		unitPath := joinPath(moduleName, varName)
+		doc.Units = append(doc.Units, indexer.Unit{
+			Kind:    "typevar",
+			Title:   varName,
+			Path:    unitPath,
+			Content: strings.TrimSpace(child.Utf8Text(source)),
+			Loc: indexer.Location{
+				Line:       int(child.StartPosition().Row) + 1,
+				Column:     int(child.StartPosition().Column) + 1,
+				ByteOffset: int(child.StartByte()),
+			},
+			Metadata: meta,
+		})
+		typeVarSymPaths[varName] = "sym:" + unitPath
+	}
+
+	// Pass 2: annotate type_args_resolved on Generic[T] inherits refs.
+	for i, ref := range doc.Refs {
+		if ref.Kind != "inherits" {
+			continue
+		}
+		typeArgs, ok := ref.Metadata["type_args"].([]string)
+		if !ok || len(typeArgs) == 0 {
+			continue
+		}
+		var resolved []string
+		for _, arg := range typeArgs {
+			if symPath, ok := typeVarSymPaths[arg]; ok {
+				resolved = append(resolved, symPath)
+			}
+		}
+		if len(resolved) > 0 {
+			doc.Refs[i].Metadata["type_args_resolved"] = resolved
+		}
+	}
+}
+
+// buildTypeVarLocalNames returns a set of local identifier names that resolve
+// to typing.TypeVar in the file's imports. "TypeVar" is always included so
+// bare TypeVar(...) calls work without an explicit typing import.
+//
+// Handles:
+//   - from typing import TypeVar        → adds "TypeVar"
+//   - from typing import TypeVar as TV  → adds "TV"
+//
+// Does NOT handle `import typing; typing.TypeVar(...)` — attribute-form calls
+// are out of scope for v1; only bare identifier call targets are matched.
+func buildTypeVarLocalNames(refs []indexer.Reference) map[string]bool {
+	names := map[string]bool{"TypeVar": true}
+	for _, r := range refs {
+		if r.Kind != "import" || r.Target == "" {
+			continue
+		}
+		// HasSuffix is intentionally broad for v1 — it also matches user-defined
+		// classes named TypeVar (e.g. mylib.TypeVar). Tracked for tightening
+		// to require a typing/typing_extensions origin in lib-9j4.
+		if r.Target != "typing.TypeVar" && !strings.HasSuffix(r.Target, ".TypeVar") {
+			continue
+		}
+		local := ""
+		if r.Metadata != nil {
+			if a, ok := r.Metadata["alias"].(string); ok {
+				local = a
+			}
+		}
+		if local == "" {
+			if dot := strings.LastIndex(r.Target, "."); dot >= 0 {
+				local = r.Target[dot+1:]
+			} else {
+				local = r.Target
+			}
+		}
+		if local != "" {
+			names[local] = true
+		}
+	}
+	return names
+}
+
+// detectTypeVarAssign checks whether n (an expression_statement node) is a
+// module-scope TypeVar assignment of the form VARNAME = <typeVarCall>(...).
+// Returns the variable name and call node when matched, or ("", nil) otherwise.
+//
+// Recognises:
+//   - T = TypeVar("T")   — bare TypeVar identifier
+//   - T = TV("T")        — aliased import (TV ∈ typeVarNames)
+//
+// Does NOT recognise:
+//   - TV = TypeVar              — bare assignment without a call
+//   - T: TypeAlias = ...        — annotated assignment (PEP 613, handled elsewhere)
+func detectTypeVarAssign(n *sitter.Node, source []byte, typeVarNames map[string]bool) (string, *sitter.Node) {
+	if n.NamedChildCount() == 0 {
+		return "", nil
+	}
+	assign := n.NamedChild(0)
+	if assign == nil || assign.Kind() != "assignment" {
+		return "", nil
+	}
+	// Annotated assignments (PEP 613) have a "type" field — skip them.
+	if assign.ChildByFieldName("type") != nil {
+		return "", nil
+	}
+	left := assign.ChildByFieldName("left")
+	if left == nil || left.Kind() != "identifier" {
+		return "", nil
+	}
+	right := assign.ChildByFieldName("right")
+	if right == nil || right.Kind() != "call" {
+		return "", nil
+	}
+	fn := right.ChildByFieldName("function")
+	if fn == nil || fn.Kind() != "identifier" {
+		return "", nil
+	}
+	if !typeVarNames[fn.Utf8Text(source)] {
+		return "", nil
+	}
+	return strings.TrimSpace(left.Utf8Text(source)), right
+}
+
+// extractTypeVarMeta pulls bound/constraints/variance out of a TypeVar(...)
+// call node. String forms are the raw Utf8Text of argument nodes.
+//
+// Defaults: kind_hint="typevar", variance="invariant".
+func extractTypeVarMeta(callNode *sitter.Node, varName string, source []byte) map[string]any {
+	meta := map[string]any{
+		"kind_hint": "typevar",
+		"variance":  "invariant",
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil {
+		return meta
+	}
+	var positionals []string
+	for i := uint(0); i < args.NamedChildCount(); i++ {
+		arg := args.NamedChild(i)
+		if arg == nil {
+			continue
+		}
+		if arg.Kind() == "keyword_argument" {
+			key := arg.ChildByFieldName("name")
+			val := arg.ChildByFieldName("value")
+			if key == nil || val == nil {
+				continue
+			}
+			switch key.Utf8Text(source) {
+			case "bound":
+				meta["bound"] = strings.TrimSpace(val.Utf8Text(source))
+			case "covariant":
+				if strings.TrimSpace(val.Utf8Text(source)) == "True" {
+					meta["variance"] = "covariant"
+				}
+			case "contravariant":
+				if strings.TrimSpace(val.Utf8Text(source)) == "True" {
+					meta["variance"] = "contravariant"
+				}
+			}
+		} else {
+			positionals = append(positionals, strings.TrimSpace(arg.Utf8Text(source)))
+		}
+	}
+	if len(positionals) > 0 {
+		// First positional is the TypeVar name string; strip quotes for comparison.
+		nameStr := strings.Trim(positionals[0], `"' `)
+		if nameStr != varName {
+			meta["name_mismatch"] = true
+		}
+		if len(positionals) > 1 {
+			meta["constraints"] = positionals[1:]
+		}
+	}
+	return meta
 }
 
 // pyCallerLocalPath builds the local caller path (without the module prefix)

@@ -1362,6 +1362,83 @@ func TestIntegration_Graph_CrossFileEdgeReconstitution(t *testing.T) {
 	}
 }
 
+// TestIntegration_Graph_PythonTypeVarProjectedAsSymbolNode pins the lib-0pa.2
+// guarantee: a module-scope TypeVar declaration (`T = TypeVar("T")`) is
+// projected into graph_nodes as a symbol node with id="sym:mymod.T" and
+// kind_hint="typevar" in metadata. This guards the isSymbolKind gate in the
+// graph pass — without "typevar" in that switch the Unit is silently dropped.
+func TestIntegration_Graph_PythonTypeVarProjectedAsSymbolNode(t *testing.T) {
+	root := t.TempDir()
+	content := "T = TypeVar(\"T\")\nU = TypeVar(\"U\", bound=Hashable)\n"
+	abs := filepath.Join(root, "mymod.py")
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		t.Fatalf("write mymod.py: %v", err)
+	}
+
+	dbPath := filepath.Join(root, ".librarian", "test.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(dbPath, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{
+		DocsDir:     filepath.Join(root, "docs"),
+		DBPath:      dbPath,
+		ProjectRoot: root,
+		Chunking:    config.ChunkingConfig{MaxTokens: 512, MinTokens: 1},
+		Graph:       config.GraphConfig{HonorGitignore: false, DetectGenerated: true, MaxWorkers: 1},
+	}
+	idx := indexer.New(s, cfg, fakeEmbedder{dim: 4})
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	nodes, err := s.ListNodes()
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+
+	byID := map[string]store.Node{}
+	for _, n := range nodes {
+		byID[n.ID] = n
+	}
+
+	// T must project as a symbol node.
+	tNode, ok := byID["sym:mymod.T"]
+	if !ok {
+		var symIDs []string
+		for id, n := range byID {
+			if n.Kind == "symbol" {
+				symIDs = append(symIDs, id)
+			}
+		}
+		t.Fatalf("sym:mymod.T not found in graph; symbol nodes: %v", symIDs)
+	}
+	if tNode.Kind != "symbol" {
+		t.Errorf("sym:mymod.T kind = %q, want symbol", tNode.Kind)
+	}
+	if !containsJSON(tNode.Metadata, `"kind_hint":"typevar"`) {
+		t.Errorf("sym:mymod.T metadata missing kind_hint=typevar; metadata=%s", tNode.Metadata)
+	}
+
+	// U must also project as a symbol node with bound="Hashable".
+	uNode, ok := byID["sym:mymod.U"]
+	if !ok {
+		t.Errorf("sym:mymod.U not found in graph; all nodes: %v", strings.Join(func() []string {
+			var ids []string
+			for id := range byID {
+				ids = append(ids, id)
+			}
+			return ids
+		}(), ", "))
+	} else if !containsJSON(uNode.Metadata, `"bound":"Hashable"`) {
+		t.Errorf("sym:mymod.U metadata missing bound=Hashable; metadata=%s", uNode.Metadata)
+	}
+}
+
 // keys returns the sorted key set of a map[string]string for stable
 // failure messages.
 func keys(m map[string]string) []string {

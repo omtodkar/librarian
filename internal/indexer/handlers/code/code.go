@@ -301,11 +301,18 @@ type inheritanceResolver interface {
 // parsedDocPostProcessor is an optional interface a Grammar implements when
 // it needs to stash file-level information onto the ParsedDoc AFTER the
 // shared walker finishes — not per-symbol Metadata, which has its own
-// symbolMetadataExtractor hook. Today the only user is the Protobuf grammar,
-// which projects `option go_package` / `option java_package` etc. onto
-// ParsedDoc.Metadata["options"] (feeds lib-4kb's buf.gen.yaml awareness).
-// ParseCtx invokes it last, after imports and inheritance have been emitted
-// so the grammar can read (but not mutate) the final Refs list.
+// symbolMetadataExtractor hook. Current users:
+//
+//   - Protobuf: projects `option go_package` / `option java_package` etc.
+//     onto ParsedDoc.Metadata["options"] (feeds lib-4kb's buf.gen.yaml
+//     awareness).
+//   - Python: emits TypeVar Units and annotates type_args_resolved on
+//     existing inherits Refs (lib-0pa.2).
+//   - Ruby: expands multi-symbol attr_accessor / attr_reader / attr_writer
+//     calls into one field Unit per symbol.
+//
+// ParseCtx invokes it last, after imports and inheritance have been emitted.
+// Implementations may mutate doc.Units and doc.Refs[i].Metadata.
 type parsedDocPostProcessor interface {
 	PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, source []byte)
 }

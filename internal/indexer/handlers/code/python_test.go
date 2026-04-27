@@ -1058,6 +1058,286 @@ class Service:
 	}
 }
 
+// --- lib-0pa.2: TypeVar detection and Generic[T] resolution ---
+
+// typeVarUnits returns all Units with Kind="typevar" from doc.
+func typeVarUnits(doc *indexer.ParsedDoc) []indexer.Unit {
+	var out []indexer.Unit
+	for _, u := range doc.Units {
+		if u.Kind == "typevar" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// findTypeVarUnit returns the first typevar Unit with the given Title, or nil.
+func findTypeVarUnit(doc *indexer.ParsedDoc, title string) *indexer.Unit {
+	for i := range doc.Units {
+		if doc.Units[i].Kind == "typevar" && doc.Units[i].Title == title {
+			return &doc.Units[i]
+		}
+	}
+	return nil
+}
+
+func TestPythonGrammar_TypeVarBasic(t *testing.T) {
+	src := []byte(`T = TypeVar("T")
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T; got units: %+v", typeVarUnits(doc))
+	}
+	if u.Path != "mymod.T" {
+		t.Errorf("Path = %q, want mymod.T", u.Path)
+	}
+	if kh, _ := u.Metadata["kind_hint"].(string); kh != "typevar" {
+		t.Errorf("kind_hint = %q, want typevar", kh)
+	}
+	if v, _ := u.Metadata["variance"].(string); v != "invariant" {
+		t.Errorf("variance = %q, want invariant", v)
+	}
+	if _, ok := u.Metadata["bound"]; ok {
+		t.Errorf("unexpected bound key; metadata = %+v", u.Metadata)
+	}
+}
+
+func TestPythonGrammar_TypeVarWithBound(t *testing.T) {
+	src := []byte(`from typing import TypeVar
+U = TypeVar("U", bound=Hashable)
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "U")
+	if u == nil {
+		t.Fatalf("expected typevar unit U; got units: %+v", typeVarUnits(doc))
+	}
+	if bound, _ := u.Metadata["bound"].(string); bound != "Hashable" {
+		t.Errorf("bound = %q, want Hashable", bound)
+	}
+	if v, _ := u.Metadata["variance"].(string); v != "invariant" {
+		t.Errorf("variance = %q, want invariant", v)
+	}
+}
+
+func TestPythonGrammar_TypeVarWithConstraints(t *testing.T) {
+	src := []byte(`V = TypeVar("V", int, str)
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "V")
+	if u == nil {
+		t.Fatalf("expected typevar unit V; got units: %+v", typeVarUnits(doc))
+	}
+	constraints, _ := u.Metadata["constraints"].([]string)
+	if len(constraints) != 2 || constraints[0] != "int" || constraints[1] != "str" {
+		t.Errorf("constraints = %v, want [int str]", constraints)
+	}
+}
+
+func TestPythonGrammar_TypeVarCovariant(t *testing.T) {
+	src := []byte(`K_co = TypeVar("K_co", covariant=True)
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "K_co")
+	if u == nil {
+		t.Fatalf("expected typevar unit K_co; got units: %+v", typeVarUnits(doc))
+	}
+	if v, _ := u.Metadata["variance"].(string); v != "covariant" {
+		t.Errorf("variance = %q, want covariant", v)
+	}
+}
+
+func TestPythonGrammar_TypeVarContravariant(t *testing.T) {
+	src := []byte(`KT_contra = TypeVar("KT_contra", contravariant=True)
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "KT_contra")
+	if u == nil {
+		t.Fatalf("expected typevar unit KT_contra; got units: %+v", typeVarUnits(doc))
+	}
+	if v, _ := u.Metadata["variance"].(string); v != "contravariant" {
+		t.Errorf("variance = %q, want contravariant", v)
+	}
+}
+
+func TestPythonGrammar_TypeVarAliasedImport(t *testing.T) {
+	src := []byte(`from typing import TypeVar as TV
+T = TV("T")
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T (via aliased import TV); got units: %+v", typeVarUnits(doc))
+	}
+	if u.Path != "mymod.T" {
+		t.Errorf("Path = %q, want mymod.T", u.Path)
+	}
+}
+
+func TestPythonGrammar_TypeVarNameMismatch(t *testing.T) {
+	// T = TypeVar("U") — variable name and TypeVar name string differ.
+	// The unit must still be created, but name_mismatch=true must be set.
+	src := []byte(`T = TypeVar("U")
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T; got units: %+v", typeVarUnits(doc))
+	}
+	if nm, _ := u.Metadata["name_mismatch"].(bool); !nm {
+		t.Errorf("expected name_mismatch=true for T=TypeVar(\"U\"); metadata=%+v", u.Metadata)
+	}
+}
+
+func TestPythonGrammar_TypeVarBareAssignmentNotRecognised(t *testing.T) {
+	// TV = TypeVar (not a call) must NOT produce a typevar unit.
+	src := []byte(`TV = TypeVar
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tvs := typeVarUnits(doc)
+	if len(tvs) != 0 {
+		t.Errorf("expected no typevar units for bare assignment; got %+v", tvs)
+	}
+}
+
+func TestPythonGrammar_TypeVarResolvedInGenericBase(t *testing.T) {
+	src := []byte(`T = TypeVar("T")
+
+class Foo(Generic[T]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// TypeVar unit must exist.
+	if findTypeVarUnit(doc, "T") == nil {
+		t.Fatalf("expected typevar unit T; got %+v", typeVarUnits(doc))
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "Generic" || refs[i].Target == "typing.Generic" {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic; refs: %+v", refs)
+	}
+	resolved, _ := genericRef.Metadata["type_args_resolved"].([]string)
+	if len(resolved) != 1 || resolved[0] != "sym:mymod.T" {
+		t.Errorf("type_args_resolved = %v, want [sym:mymod.T]", resolved)
+	}
+	// type_args (bare names) must be preserved.
+	typeArgs, _ := genericRef.Metadata["type_args"].([]string)
+	if len(typeArgs) != 1 || typeArgs[0] != "T" {
+		t.Errorf("type_args = %v, want [T] (original preserved)", typeArgs)
+	}
+}
+
+func TestPythonGrammar_TypeVarImportedNotResolved(t *testing.T) {
+	// U is imported from another module — not declared as TypeVar in this file.
+	// type_args_resolved must be absent; type_args must preserve bare "U".
+	src := []byte(`from other_module import U
+
+class Foo(Generic[U]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "Generic" || strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic; refs: %+v", refs)
+	}
+	if _, ok := genericRef.Metadata["type_args_resolved"]; ok {
+		t.Errorf("expected type_args_resolved absent for cross-module TypeVar; metadata: %+v", genericRef.Metadata)
+	}
+	typeArgs, _ := genericRef.Metadata["type_args"].([]string)
+	if len(typeArgs) != 1 || typeArgs[0] != "U" {
+		t.Errorf("type_args = %v, want [U] (preserved)", typeArgs)
+	}
+}
+
+func TestPythonGrammar_TypeVarMixedResolvedUnresolved(t *testing.T) {
+	// T is local TypeVar; U is imported from elsewhere.
+	// type_args_resolved should contain only sym:mymod.T.
+	// type_args should preserve both T and U.
+	src := []byte(`from other_module import U
+T = TypeVar("T")
+
+class Foo(Generic[T, U]):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "Generic" || strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic; refs: %+v", refs)
+	}
+	resolved, _ := genericRef.Metadata["type_args_resolved"].([]string)
+	if len(resolved) != 1 || resolved[0] != "sym:mymod.T" {
+		t.Errorf("type_args_resolved = %v, want [sym:mymod.T] (only T resolved)", resolved)
+	}
+	typeArgs, _ := genericRef.Metadata["type_args"].([]string)
+	if len(typeArgs) != 2 || typeArgs[0] != "T" || typeArgs[1] != "U" {
+		t.Errorf("type_args = %v, want [T U] (full list preserved)", typeArgs)
+	}
+}
+
 // TestPythonGrammar_CallEdges_ExternalUnresolved verifies that a call to a
 // name not in the same file gets confidence="unresolved".
 func TestPythonGrammar_CallEdges_ExternalUnresolved(t *testing.T) {
