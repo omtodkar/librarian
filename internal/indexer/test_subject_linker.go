@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// TestSubjectLinker returns the known file paths that are likely the
+// testSubjectLinker returns the known file paths that are likely the
 // subject-under-test for testFilePath, based on path-naming conventions.
 // Multiple candidates are returned when the heuristic produces more than one
 // match; false positives are cheap (extra edges answer "possibly tests this"
@@ -16,15 +16,19 @@ import (
 //   - Go:     foo_test.go         → foo.go (same dir)
 //   - Python: test_foo.py         → foo.py (same dir)
 //             tests/test_foo.py   → ../foo.py (one level up)
-//             fooTests.py         → foo.py (same dir)
+//             fooTests.py         → foo.py (same dir; skipped when name also
+//             starts with test_, i.e. test_fooTests.py is handled by the
+//             test_ branch only, avoiding a duplicate probe for test_foo.py)
 //   - Java:   FooTest.java        → Foo.java (same dir)
 //   - JS/TS:  foo.test.ts         → foo.ts (same dir)
 //             foo.spec.ts         → foo.ts (same dir)
 //             __tests__/foo.test.ts → ../foo.ts (one level up)
+//             __tests__/auth.ts   → ../auth.ts (plain-named files inside
+//             __tests__/ map one level up; no .test./.spec. infix required)
 //
 // knownPaths is the set of all indexed code-file paths against which
 // candidate paths are validated. Only paths present in the set are returned.
-func TestSubjectLinker(testFilePath string, knownPaths map[string]struct{}) []string {
+func testSubjectLinker(testFilePath string, knownPaths map[string]struct{}) []string {
 	dir := filepath.Dir(testFilePath)
 	base := filepath.Base(testFilePath)
 	ext := filepath.Ext(base)
@@ -54,7 +58,11 @@ func TestSubjectLinker(testFilePath string, knownPaths map[string]struct{}) []st
 				probe(filepath.Join(filepath.Dir(dir), subject))
 			}
 		}
-		if strings.HasSuffix(stem, "Tests") {
+		// fooTests.py → foo.py. Guard: skip when the stem also starts with
+		// "test_" — those names (e.g. test_authTests.py) are already handled
+		// by the branch above, and the "Tests" suffix refers to the test
+		// prefix pattern, not a standalone capitalized suffix.
+		if strings.HasSuffix(stem, "Tests") && !strings.HasPrefix(stem, "test_") {
 			probe(filepath.Join(dir, strings.TrimSuffix(stem, "Tests")+".py"))
 		}
 
@@ -74,6 +82,15 @@ func TestSubjectLinker(testFilePath string, knownPaths map[string]struct{}) []st
 				for _, se := range tsSubjectExts(ext) {
 					probe(filepath.Join(filepath.Dir(dir), subjectStem+se))
 				}
+			}
+		}
+		// Files directly inside __tests__/ without a .test./.spec. infix
+		// map to the same-named file one level up
+		// (e.g. __tests__/auth.ts → ../auth.ts). Covers test suites that
+		// place plain-named files inside __tests__/.
+		if !matched && filepath.Base(dir) == "__tests__" {
+			for _, se := range tsSubjectExts(ext) {
+				probe(filepath.Join(filepath.Dir(dir), stem+se))
 			}
 		}
 	}

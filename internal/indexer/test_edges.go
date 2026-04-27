@@ -28,7 +28,7 @@ func (idx *Indexer) buildTestEdges(result *GraphResult) {
 		if n.SourcePath == "" {
 			continue
 		}
-		subjects := TestSubjectLinker(n.SourcePath, knownPaths)
+		subjects := testSubjectLinker(n.SourcePath, knownPaths)
 		for _, sub := range subjects {
 			if err := idx.store.UpsertEdge(store.Edge{
 				From:     store.CodeFileNodeID(n.SourcePath),

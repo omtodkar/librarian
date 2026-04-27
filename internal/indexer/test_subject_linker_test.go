@@ -53,7 +53,7 @@ func TestTestSubjectLinker_Go(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := TestSubjectLinker(tc.testFile, tc.known)
+			got := testSubjectLinker(tc.testFile, tc.known)
 			assertStringSlicesEqual(t, tc.want, got)
 		})
 	}
@@ -96,10 +96,19 @@ func TestTestSubjectLinker_Python(t *testing.T) {
 			known:    mkKnown("mypkg/other.py"),
 			want:     nil,
 		},
+		{
+			// test_authTests.py: only the "test_" branch fires, producing
+			// "authTests.py". The "Tests" branch is guarded to skip names that
+			// also start with "test_", so "test_auth.py" is NOT probed.
+			name:     "test_fooTests.py — only test_ branch fires",
+			testFile: "mypkg/test_authTests.py",
+			known:    mkKnown("mypkg/authTests.py", "mypkg/test_auth.py"),
+			want:     []string{"mypkg/authTests.py"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := TestSubjectLinker(tc.testFile, tc.known)
+			got := testSubjectLinker(tc.testFile, tc.known)
 			assertStringSlicesEqual(t, tc.want, got)
 		})
 	}
@@ -139,7 +148,7 @@ func TestTestSubjectLinker_Java(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := TestSubjectLinker(tc.testFile, tc.known)
+			got := testSubjectLinker(tc.testFile, tc.known)
 			assertStringSlicesEqual(t, tc.want, got)
 		})
 	}
@@ -189,6 +198,21 @@ func TestTestSubjectLinker_JSTS(t *testing.T) {
 			want:     []string{"src/__tests__/auth.ts", "src/auth.ts"},
 		},
 		{
+			// __tests__/auth.ts has no .test./.spec. infix; the plain-name
+			// case maps it one level up to ../auth.ts.
+			name:     "__tests__/auth.ts (no infix) → ../auth.ts",
+			testFile: "src/__tests__/auth.ts",
+			known:    mkKnown("src/auth.ts"),
+			want:     []string{"src/auth.ts"},
+		},
+		{
+			// Plain-name __tests__ file where no sibling exists: yields nothing.
+			name:     "__tests__/auth.ts no match when sibling absent",
+			testFile: "src/__tests__/auth.ts",
+			known:    mkKnown("src/other.ts"),
+			want:     nil,
+		},
+		{
 			name:     "no match when subject absent",
 			testFile: "src/missing.test.ts",
 			known:    mkKnown("src/other.ts"),
@@ -203,7 +227,7 @@ func TestTestSubjectLinker_JSTS(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := TestSubjectLinker(tc.testFile, tc.known)
+			got := testSubjectLinker(tc.testFile, tc.known)
 			assertStringSlicesEqual(t, tc.want, got)
 		})
 	}
@@ -218,8 +242,8 @@ func TestTestSubjectLinker_NonTestFile(t *testing.T) {
 		"src/foo.py",
 	}
 	for _, f := range nonTestFiles {
-		if got := TestSubjectLinker(f, known); got != nil {
-			t.Errorf("TestSubjectLinker(%q): expected nil, got %v", f, got)
+		if got := testSubjectLinker(f, known); got != nil {
+			t.Errorf("testSubjectLinker(%q): expected nil, got %v", f, got)
 		}
 	}
 }
