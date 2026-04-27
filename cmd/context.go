@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	contextLimit int
-	contextJSON  bool
+	contextLimit  int
+	contextBudget int
+	contextJSON   bool
 )
 
 var contextCmd = &cobra.Command{
@@ -28,6 +29,7 @@ shared code references. Use 'search' for a lighter query; use 'context' to orien
 
 func init() {
 	contextCmd.Flags().IntVar(&contextLimit, "limit", 5, "Maximum primary-source chunks (1-10)")
+	contextCmd.Flags().IntVar(&contextBudget, "budget", 0, "Token budget: stop including chunks once cumulative tokens would exceed this value (0 = disabled)")
 	contextCmd.Flags().BoolVar(&contextJSON, "json", false, "Output as JSON")
 	rootCmd.AddCommand(contextCmd)
 }
@@ -67,6 +69,8 @@ func runContext(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
+
+	chunks = store.ApplyTokenBudget(chunks, contextBudget)
 
 	// Collect unique source documents.
 	seenDocs := make(map[string]bool)

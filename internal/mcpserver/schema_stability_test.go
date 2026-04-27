@@ -50,6 +50,7 @@ func TestMCPStableSchema(t *testing.T) {
 		"get_context": {
 			{"query", "string"},
 			{"limit", "number"},
+			{"budget", "number"},
 		},
 		"get_document": {
 			{"file_path", "string"},

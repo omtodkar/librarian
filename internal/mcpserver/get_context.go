@@ -31,6 +31,11 @@ func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding
 			mcp.Min(1),
 			mcp.Max(10),
 		),
+		mcp.WithNumber("budget",
+			mcp.Description("Token budget: stop including chunks once cumulative tokens would exceed this value. 0 = disabled (return up to limit chunks). Approximate — uses whitespace-split heuristic (words/0.75)."),
+			mcp.DefaultNumber(0),
+			mcp.Min(0),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -40,6 +45,7 @@ func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		limit := req.GetInt("limit", 5)
+		budget := req.GetInt("budget", 0)
 
 		// Step 1: Embed query and run semantic search
 		vector, err := embedder.Embed(query)
@@ -56,6 +62,8 @@ func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
+
+		chunks = store.ApplyTokenBudget(chunks, budget)
 
 		output := fmt.Sprintf("=== BRIEFING: %q ===\n\n", query)
 
