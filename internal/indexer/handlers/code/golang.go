@@ -182,27 +182,31 @@ func (*GoGrammar) PackageName(root *sitter.Node, source []byte) string {
 	return ""
 }
 
-// SymbolParents implements inheritanceExtractor for Go. Scope is deliberately
-// narrow: interface embedding only — `type Reader interface { io.Reader }`
-// produces an `inherits` edge with Relation="embeds" from Reader to io.Reader.
+// SymbolParents implements inheritanceExtractor for Go. Handles two embedding
+// forms:
 //
-// Go struct embedding (anonymous fields like `type Service struct { *Handler }`)
-// is composition, not inheritance; it's deferred to lib-ek3 which will decide
-// whether to share `relation=embeds` under the inherits edge kind or to
-// introduce a dedicated `composes` kind.
+//   - Interface embedding: `type Reader interface { io.Reader }` → `inherits`
+//     edge with Relation="embeds" from Reader to io.Reader.
+//   - Struct embedding: `type Service struct { *Handler }` → `inherits` edge
+//     with Relation="embeds" and Metadata["pointer"]=true from Service to
+//     Handler.
 //
-// Type aliases and other type_spec shapes return nil — this hook fires for
-// any Unit with Kind="type" (per classFamilyUnitKinds gating) but only
-// interface embedding yields parents.
+// Type aliases and other type_spec shapes return nil.
 func (*GoGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 	if n.Kind() != "type_spec" {
 		return nil
 	}
 	typeField := n.ChildByFieldName("type")
-	if typeField == nil || typeField.Kind() != "interface_type" {
+	if typeField == nil {
 		return nil
 	}
-	return goInterfaceEmbeddings(typeField, source)
+	switch typeField.Kind() {
+	case "interface_type":
+		return goInterfaceEmbeddings(typeField, source)
+	case "struct_type":
+		return goStructEmbeddings(typeField, source)
+	}
+	return nil
 }
 
 // goInterfaceEmbeddings walks an interface_type node's named children and
@@ -265,6 +269,123 @@ func goInterfaceEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 		}
 	}
 	return out
+}
+
+// goStructEmbeddings walks a struct_type node and emits one ParentRef per
+// anonymous (embedded) field. Named fields are skipped.
+//
+// Type forms handled:
+//   - type_identifier (Base)     → Name="Base"
+//   - pointer (*Base)            → Name="Base", Metadata["pointer"]=true
+//   - qualified (pkg.Base)       → Name="Base", Metadata["qualified_name"]="pkg.Base"
+//   - pointer+qualified (*pkg.B) → Name="Base", pointer=true, qualified_name="pkg.Base"
+//   - generic (Base[T])          → Name="Base", Metadata["type_args"]=["T"]
+func goStructEmbeddings(n *sitter.Node, source []byte) []ParentRef {
+	var fdl *sitter.Node
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		c := n.NamedChild(i)
+		if c != nil && c.Kind() == "field_declaration_list" {
+			fdl = c
+			break
+		}
+	}
+	if fdl == nil {
+		return nil
+	}
+	var out []ParentRef
+	for i := uint(0); i < fdl.NamedChildCount(); i++ {
+		fd := fdl.NamedChild(i)
+		if fd == nil || fd.Kind() != "field_declaration" {
+			continue
+		}
+		if fd.ChildByFieldName("name") != nil {
+			continue
+		}
+		typeNode := fd.ChildByFieldName("type")
+		if typeNode == nil {
+			continue
+		}
+		// Detect pointer embedding: field_declaration has an anonymous `*` child.
+		pointer := false
+		for k := uint(0); k < fd.ChildCount(); k++ {
+			c := fd.Child(k)
+			if c != nil && !c.IsNamed() && c.Kind() == "*" {
+				pointer = true
+				break
+			}
+		}
+		loc := indexer.Location{
+			Line:       int(fd.StartPosition().Row) + 1,
+			Column:     int(fd.StartPosition().Column) + 1,
+			ByteOffset: int(fd.StartByte()),
+		}
+		var ref *ParentRef
+		switch typeNode.Kind() {
+		case "type_identifier":
+			ref = &ParentRef{
+				Name:     strings.TrimSpace(typeNode.Utf8Text(source)),
+				Relation: "embeds",
+				Loc:      loc,
+			}
+		case "qualified_type":
+			nameChild := typeNode.ChildByFieldName("name")
+			if nameChild == nil {
+				continue
+			}
+			ref = &ParentRef{
+				Name:     strings.TrimSpace(nameChild.Utf8Text(source)),
+				Relation: "embeds",
+				Loc:      loc,
+				Metadata: map[string]any{
+					"qualified_name": strings.TrimSpace(typeNode.Utf8Text(source)),
+				},
+			}
+		case "generic_type":
+			typeNameChild := typeNode.ChildByFieldName("type")
+			if typeNameChild == nil {
+				continue
+			}
+			args := goTypeArgs(typeNode.ChildByFieldName("type_arguments"), source)
+			meta := map[string]any{}
+			if len(args) > 0 {
+				meta["type_args"] = args
+			}
+			ref = &ParentRef{
+				Name:     strings.TrimSpace(typeNameChild.Utf8Text(source)),
+				Relation: "embeds",
+				Loc:      loc,
+				Metadata: meta,
+			}
+		}
+		if ref == nil {
+			continue
+		}
+		if pointer {
+			if ref.Metadata == nil {
+				ref.Metadata = map[string]any{}
+			}
+			ref.Metadata["pointer"] = true
+		}
+		out = append(out, *ref)
+	}
+	return out
+}
+
+// goTypeArgs extracts the string representation of each type argument from a
+// type_arguments node. Each named child is a type_elem whose text is the raw
+// argument (e.g., "T", "K", "V").
+func goTypeArgs(n *sitter.Node, source []byte) []string {
+	if n == nil {
+		return nil
+	}
+	var args []string
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		c := n.NamedChild(i)
+		if c != nil {
+			args = append(args, strings.TrimSpace(c.Utf8Text(source)))
+		}
+	}
+	return args
 }
 
 // CallExpressions implements callExtractor for Go. Walks the file AST for

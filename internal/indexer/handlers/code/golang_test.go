@@ -473,8 +473,7 @@ func X() {}
 // --- lib-wji.1: interface embedding ---
 
 // Single embedded interface: `type Reader interface { io.Reader }`.
-// Relation is "embeds" — distinct from Java/TS "extends" so struct embedding
-// (lib-ek3) can reuse the same relation vocabulary cleanly.
+// Relation is "embeds" — distinct from Java/TS "extends".
 func TestGoGrammar_SingleInterfaceEmbedding(t *testing.T) {
 	src := []byte(`package s
 
@@ -558,9 +557,9 @@ type X interface {
 	}
 }
 
-// Struct definitions produce Kind="type" Units but must NOT emit inherits
-// edges — struct embedding is deferred to lib-ek3.
-func TestGoGrammar_StructEmbeddingNotEmittedYet(t *testing.T) {
+// Plain struct embedding emits one inherits edge with relation=embeds.
+// Named fields (db *DB) are filtered out.
+func TestGoGrammar_StructEmbeddingPlain(t *testing.T) {
 	src := []byte(`package s
 
 type Base struct{}
@@ -576,8 +575,157 @@ type Service struct {
 		t.Fatalf("Parse: %v", err)
 	}
 	refs := inheritsRefsBySource(doc, "s.Service")
-	if len(refs) != 0 {
-		t.Fatalf("struct embedding should not emit inherits refs in lib-wji.1 (deferred to lib-ek3); got %+v", refs)
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
+	}
+}
+
+// --- lib-r4s.7: struct embedding ---
+
+// Pointer embedding: *Base produces pointer=true in Metadata.
+func TestGoGrammar_StructEmbeddingPointer(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	*Base
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["pointer"] != true {
+		t.Errorf("pointer = %v, want true", refs[0].Metadata["pointer"])
+	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
+	}
+}
+
+// Qualified embedding: pkg.Base produces qualified_name="pkg.Base" and leaf Name="Base".
+func TestGoGrammar_StructEmbeddingQualified(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	pkg.Base
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["qualified_name"] != "pkg.Base" {
+		t.Errorf("qualified_name = %v, want pkg.Base", refs[0].Metadata["qualified_name"])
+	}
+}
+
+// Pointer+qualified embedding: *pkg.Base produces both pointer=true and qualified_name.
+func TestGoGrammar_StructEmbeddingPointerQualified(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	*pkg.Base
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["pointer"] != true {
+		t.Errorf("pointer = %v, want true", refs[0].Metadata["pointer"])
+	}
+	if refs[0].Metadata["qualified_name"] != "pkg.Base" {
+		t.Errorf("qualified_name = %v, want pkg.Base", refs[0].Metadata["qualified_name"])
+	}
+}
+
+// Generic embedding: Base[T] produces type_args=["T"].
+func TestGoGrammar_StructEmbeddingGeneric(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	Base[T]
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 1 || args[0] != "T" {
+		t.Errorf("type_args = %v, want [T]", args)
+	}
+}
+
+// Multiple embeddings: A, B, C all produce edges; named field filtered out.
+func TestGoGrammar_StructEmbeddingMultiple(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	A
+	B
+	C
+	name string
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 3 {
+		t.Fatalf("expected 3 refs (A, B, C), got %d (%+v)", len(refs), refs)
+	}
+	seen := map[string]bool{}
+	for _, r := range refs {
+		seen[r.Target] = true
+		if r.Metadata["relation"] != "embeds" {
+			t.Errorf("ref %q: relation = %v, want embeds", r.Target, r.Metadata["relation"])
+		}
+	}
+	for _, want := range []string{"A", "B", "C"} {
+		if !seen[want] {
+			t.Errorf("missing embedded target %q (got %v)", want, seen)
+		}
 	}
 }
 

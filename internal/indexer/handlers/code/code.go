@@ -53,8 +53,7 @@ type ImportRef struct {
 // values: "extends" (single-parent class / interface-extends-interface),
 // "implements" (Java-style interface conformance), "mixes" (Dart `with`
 // mixins — reserved for lib-wji.3), "conforms" (Swift protocol conformance —
-// reserved for lib-wji.4), "embeds" (Go interface embedding; Go struct
-// embedding deferred to a separate bead).
+// reserved for lib-wji.4), "embeds" (Go interface embedding and Go struct embedding).
 //
 // Loc points at the parent identifier within the source, not the class header
 // — so multiple parents on separate lines each carry their own line number.
