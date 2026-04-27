@@ -178,7 +178,7 @@ func TestGraph_ShortestPath_NoPath(t *testing.T) {
 func TestGraph_FindNodes(t *testing.T) {
 	s := newTestStore(t)
 	s.UpsertNode(Node{ID: "doc:auth", Kind: NodeKindDocument, Label: "Authentication", SourcePath: "docs/auth.md"})
-	s.UpsertNode(Node{ID: "doc:user", Kind: NodeKindDocument, Label: "Users", SourcePath: "docs/user.md"})
+	s.UpsertNode(Node{ID: "doc:user", Kind: NodeKindDocument, Label: "Users", SourcePath: "docs/user.md", LineNumber: 17})
 
 	match, _ := s.FindNodes("uth", 10)
 	if len(match) < 1 {
@@ -188,6 +188,68 @@ func TestGraph_FindNodes(t *testing.T) {
 	exact, _ := s.FindNodes("doc:user", 10)
 	if len(exact) == 0 || exact[0].ID != "doc:user" {
 		t.Errorf("exact id lookup failed: %+v", exact)
+	}
+	if len(exact) > 0 && exact[0].LineNumber != 17 {
+		t.Errorf("FindNodes LineNumber = %d, want 17", exact[0].LineNumber)
+	}
+}
+
+func TestGraph_ListNodes_LineNumber(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertNode(Node{ID: "sym:pkg.Foo", Kind: NodeKindSymbol, Label: "Foo", LineNumber: 10})
+	s.UpsertNode(Node{ID: "sym:pkg.Bar", Kind: NodeKindSymbol, Label: "Bar", LineNumber: 20})
+
+	nodes, err := s.ListNodes()
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	byID := make(map[string]Node, len(nodes))
+	for _, n := range nodes {
+		byID[n.ID] = n
+	}
+	if byID["sym:pkg.Foo"].LineNumber != 10 {
+		t.Errorf("ListNodes sym:pkg.Foo LineNumber = %d, want 10", byID["sym:pkg.Foo"].LineNumber)
+	}
+	if byID["sym:pkg.Bar"].LineNumber != 20 {
+		t.Errorf("ListNodes sym:pkg.Bar LineNumber = %d, want 20", byID["sym:pkg.Bar"].LineNumber)
+	}
+}
+
+func TestGraph_ListNodesByKind_LineNumber(t *testing.T) {
+	s := newTestStore(t)
+	s.UpsertNode(Node{ID: "sym:pkg.Method", Kind: NodeKindSymbol, Label: "Method", LineNumber: 55})
+	s.UpsertNode(Node{ID: "file:pkg/a.go", Kind: NodeKindCodeFile, Label: "pkg/a.go"})
+
+	nodes, err := s.ListNodesByKind(NodeKindSymbol)
+	if err != nil {
+		t.Fatalf("ListNodesByKind: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("ListNodesByKind returned %d nodes, want 1", len(nodes))
+	}
+	if nodes[0].LineNumber != 55 {
+		t.Errorf("ListNodesByKind LineNumber = %d, want 55", nodes[0].LineNumber)
+	}
+}
+
+func TestGraph_ListOrphanNodes_LineNumber(t *testing.T) {
+	s := newTestStore(t)
+	// Orphan node: no incident edges.
+	s.UpsertNode(Node{ID: "sym:orphan.Func", Kind: NodeKindSymbol, Label: "Func", LineNumber: 33})
+	// Non-orphan: has an edge.
+	s.UpsertNode(Node{ID: "file:root.go", Kind: NodeKindCodeFile, Label: "root.go"})
+	s.UpsertNode(Node{ID: "sym:root.Init", Kind: NodeKindSymbol, Label: "Init", LineNumber: 1})
+	s.UpsertEdge(Edge{From: "file:root.go", To: "sym:root.Init", Kind: EdgeKindContains})
+
+	orphans, err := s.ListOrphanNodes([]string{NodeKindSymbol})
+	if err != nil {
+		t.Fatalf("ListOrphanNodes: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0].ID != "sym:orphan.Func" {
+		t.Fatalf("ListOrphanNodes = %+v, want exactly sym:orphan.Func", orphans)
+	}
+	if orphans[0].LineNumber != 33 {
+		t.Errorf("ListOrphanNodes LineNumber = %d, want 33", orphans[0].LineNumber)
 	}
 }
 
