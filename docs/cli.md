@@ -25,6 +25,7 @@ Librarian's CLI is organised around a project-local **workspace** at `.librarian
 | `report` | Write `GRAPH_REPORT.md`, `graph.html`, `graph.json` to `.librarian/out/` |
 | `install` | Write assistant-platform integration pointers |
 | `uninstall` | Reverse `install`; optionally delete the workspace with `--full` |
+| `faq` | Extract FAQs from git history and bd issues, write to `docs/faqs/` |
 | `mcp serve` | Start the MCP stdio server |
 
 ## Workspace discovery
@@ -193,6 +194,7 @@ Use this for "how does X work" or architecture questions — it returns a curate
 | Flag | Default | Description |
 |---|---|---|
 | `--limit <n>` | `5` | Initial search results (1–10); graph joins fan out from these |
+| `--budget <n>` | `0` | Token budget: stop including chunks once cumulative tokens would exceed this value (0 = disabled) |
 | `--json` | `false` | Emit the briefing as JSON |
 
 ### `librarian doc <path>`
@@ -266,6 +268,26 @@ Compute community structure + centrality over the entire graph and write three f
 | `--json` | `false` | Print a JSON summary instead of the default text summary |
 
 ## MCP server
+
+### `librarian faq --regenerate`
+
+Scans the last N git commits and all closed bd issues for question-shaped content (subjects/titles starting with *how/what/why/where/when*, or containing `?`), clusters near-duplicates by embedding cosine similarity (default threshold 0.85), and writes each cluster as a markdown FAQ file under `docs/faqs/`. Each written file is re-indexed immediately so it is searchable via `librarian search` and `get_context`.
+
+```sh
+librarian faq --regenerate
+librarian faq --regenerate --git-commits=200 --threshold=0.80
+librarian faq --regenerate --json
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--regenerate` | `false` | Required. Runs the extraction (batch-only guard). |
+| `--git-commits <n>` | `100` | Number of recent git commits to scan. |
+| `--threshold <f>` | `0.85` | Cosine similarity threshold for clustering (0–1). |
+| `--json` | `false` | Emit results as JSON. |
+
+The last-run timestamp is stored via `bd remember --key faq-last-run` when bd is available.
+Generated files live at `docs/faqs/<slug>.md` and are re-indexed on each run.
 
 ### `librarian mcp serve`
 
