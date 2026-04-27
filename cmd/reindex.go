@@ -70,7 +70,7 @@ func runReindex(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating embedder: %w", err)
 	}
 
-	s, err := store.Open(cfg.DBPath)
+	s, err := store.Open(cfg.DBPath, nil, 0)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}

@@ -44,6 +44,13 @@ func init() {
 	goose.SetBaseFS(db.MigrationsFS)
 }
 
+// Reranker scores (query, document) pairs jointly. Implemented by
+// embedding.OpenAIReranker. Declared here so the store package does not
+// depend on the embedding package — structural typing connects them.
+type Reranker interface {
+	Rerank(query string, documents []string) ([]float64, error)
+}
+
 type Store struct {
 	db            *sql.DB
 	vecTableReady bool
@@ -52,6 +59,8 @@ type Store struct {
 	// Zero-value means "never recorded"; ensureVecTable uses model=="" as the
 	// first-insert sentinel.
 	embedMeta embedMetaCache
+	reranker  Reranker // nil when cross-encoder reranking is disabled
+	rerankTopK int     // candidates fed to cross-encoder; 0 → rerankDefaultTopK
 }
 
 type embedMetaCache struct {
@@ -63,7 +72,11 @@ type embedMetaCache struct {
 // extension, enables WAL mode and foreign keys, and applies any pending
 // goose migrations from db.MigrationsFS. Returns an error for pre-goose
 // databases — see detectLegacyPreGooseDB.
-func Open(dbPath string) (*Store, error) {
+//
+// reranker may be nil to disable cross-encoder reranking (default behaviour).
+// rerankTopK is the number of signal-reranked candidates fed to the cross-encoder;
+// 0 resolves to 20 inside SearchChunks.
+func Open(dbPath string, reranker Reranker, rerankTopK int) (*Store, error) {
 	if err := initDialect(); err != nil {
 		return nil, err
 	}
@@ -86,7 +99,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying migrations: %w", err)
 	}
 
-	s := &Store{db: sqlDB}
+	s := &Store{db: sqlDB, reranker: reranker, rerankTopK: rerankTopK}
 
 	// Check if the vector table already exists (from a previous indexing run).
 	// Lazy-created on first chunk insert so the dimension matches the live

@@ -17,7 +17,7 @@ import (
 // the captureEmbedder (also returning zero) gets uniform similarity scores.
 func newSearchTestStore(t *testing.T, n int, tokenCount uint32) *store.Store {
 	t.Helper()
-	st, err := store.Open(t.TempDir() + "/test.db")
+	st, err := store.Open(t.TempDir() + "/test.db", nil, 0)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

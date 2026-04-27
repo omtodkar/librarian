@@ -6,6 +6,7 @@ type Config struct {
 	DocsDir          string               `mapstructure:"docs_dir"`
 	DBPath           string               `mapstructure:"db_path"`
 	Embedding        EmbeddingConfig      `mapstructure:"embedding"`
+	Rerank           RerankConfig         `mapstructure:"rerank"`
 	Summarization    SummarizationConfig  `mapstructure:"summarization"`
 	Chunking         ChunkingConfig       `mapstructure:"chunking"`
 	Office           OfficeConfig         `mapstructure:"office"`
@@ -75,6 +76,19 @@ type SummarizationConfig struct {
 	Model    string `mapstructure:"model"`
 	APIKey   string `mapstructure:"api_key"`
 	BaseURL  string `mapstructure:"base_url"` // for openai-compatible providers
+}
+
+// RerankConfig controls optional cross-encoder reranking at query time.
+// When Provider is empty (default), reranking is disabled and SearchChunks
+// behaves identically to today. Infinity's /rerank endpoint (no /v1/ prefix)
+// is the supported v1 target — start it with `make infinity-start`.
+type RerankConfig struct {
+	Provider  string `mapstructure:"provider"`   // "" (disabled) | "openai"
+	Model     string `mapstructure:"model"`      // e.g. "Alibaba-NLP/gte-reranker-modernbert-base"
+	BaseURL   string `mapstructure:"base_url"`   // e.g. "http://127.0.0.1:7997"
+	APIKey    string `mapstructure:"api_key"`    // usually empty for Infinity
+	TopK      int    `mapstructure:"top_k"`      // signal-reranked candidates fed to cross-encoder; default 20
+	TimeoutMs int    `mapstructure:"timeout_ms"` // per-call deadline in ms; default 3000
 }
 
 type EmbeddingConfig struct {

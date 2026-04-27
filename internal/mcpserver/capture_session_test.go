@@ -37,7 +37,7 @@ func setupCaptureEnv(t *testing.T) (*store.Store, *config.Config) {
 	if err := os.MkdirAll(docsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(tmp, "test.db"))
+	st, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestCaptureSession_IsSearchable(t *testing.T) {
 	}
 
 	vec := make([]float64, 4)
-	chunks, err := st.SearchChunks(vec, 10)
+	chunks, err := st.SearchChunks("", vec, 10)
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}

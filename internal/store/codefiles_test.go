@@ -140,13 +140,13 @@ func TestEnsureColumn_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.db"
 
-	s1, err := Open(path)
+	s1, err := Open(path, nil, 0)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
 	s1.Close()
 
-	s2, err := Open(path)
+	s2, err := Open(path, nil, 0)
 	if err != nil {
 		t.Fatalf("second Open (idempotent migration): %v", err)
 	}

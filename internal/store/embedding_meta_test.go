@@ -157,14 +157,14 @@ func TestAddChunk_ModelMismatchErrors(t *testing.T) {
 func TestOpen_PopulatesEmbedMetaFromDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "reopen.db")
 
-	s1, err := Open(dbPath)
+	s1, err := Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
 	seedChunk(t, s1, "model-a", 768)
 	s1.Close()
 
-	s2, err := Open(dbPath)
+	s2, err := Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}

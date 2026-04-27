@@ -65,7 +65,7 @@ func TestHybridSearch_LiteralBeatsVectorOnlyResults(t *testing.T) {
 
 	// Vector-only: the literal chunk scores 0 (1-distance = 1-1.0 = 0) and must
 	// not appear in the top-4.
-	vecOnly, err := s.SearchChunks(queryVec, limit)
+	vecOnly, err := s.SearchChunks("", queryVec, limit)
 	if err != nil {
 		t.Fatalf("SearchChunks: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestHybridSearch_CorpusIntegration(t *testing.T) {
 		t.Run(tc.queryText, func(t *testing.T) {
 			// Vector-only top-5: all 11 base chunks score > 0; all 3 targets
 			// score 0.9*(1-1.0)=0 and must not appear.
-			vecOnly, err := s.SearchChunks(queryVec, limit)
+			vecOnly, err := s.SearchChunks("", queryVec, limit)
 			if err != nil {
 				t.Fatalf("SearchChunks: %v", err)
 			}

@@ -45,7 +45,7 @@ func TestSearchChunks_DeterministicOrderOnScoreTie(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		results, err := s.SearchChunks(queryVec, 2)
+		results, err := s.SearchChunks("", queryVec, 2)
 		if err != nil {
 			t.Fatalf("SearchChunks iter %d: %v", i, err)
 		}
@@ -216,11 +216,11 @@ func TestSearchChunks_SameQuerySameIDOrder(t *testing.T) {
 		}
 	}
 
-	run1, err := s.SearchChunks(queryVec, 5)
+	run1, err := s.SearchChunks("", queryVec, 5)
 	if err != nil {
 		t.Fatalf("SearchChunks run1: %v", err)
 	}
-	run2, err := s.SearchChunks(queryVec, 5)
+	run2, err := s.SearchChunks("", queryVec, 5)
 	if err != nil {
 		t.Fatalf("SearchChunks run2: %v", err)
 	}

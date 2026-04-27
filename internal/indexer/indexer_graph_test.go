@@ -60,7 +60,7 @@ func newGraphTestIndexer(t *testing.T, projectDir string) (*indexer.Indexer, *st
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(dbPath)
+	s, err := store.Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func newGraphTestIndexerWithWorkers(t *testing.T, projectDir string, workers int
 	}
 	dbPath := filepath.Join(dbDir, "test.db")
 
-	s, err := store.Open(dbPath)
+	s, err := store.Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +542,7 @@ func TestIntegration_Graph_PythonRelativeImportsResolveToSingleSymNode(t *testin
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(dbPath)
+	s, err := store.Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +781,7 @@ func TestIntegration_Graph_PythonSrcRootsResolvesWithoutInitPy(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(dbPath)
+	s, err := store.Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -958,7 +958,7 @@ extend Base {
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(cfg.DBPath)
+	s, err := store.Open(cfg.DBPath, nil, 0)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

@@ -56,7 +56,7 @@ func runReport(cmd *cobra.Command, args []string) error {
 	// Use the workspace's DB path rather than cfg.DBPath — cfg's default is
 	// a CWD-relative ".librarian/librarian.db" which is wrong whenever the
 	// user runs `librarian report` from a subdirectory of the workspace.
-	s, err := store.Open(ws.DBPath())
+	s, err := store.Open(ws.DBPath(), nil, 0)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}

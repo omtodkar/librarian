@@ -37,7 +37,12 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating embedder: %w", err)
 	}
 
-	s, err := store.Open(cfg.DBPath)
+	reranker, err := embedding.NewReranker(cfg.Rerank)
+	if err != nil {
+		return fmt.Errorf("creating reranker: %w", err)
+	}
+
+	s, err := store.Open(cfg.DBPath, reranker, cfg.Rerank.TopK)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}

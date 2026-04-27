@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -41,12 +42,20 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating embedder: %w", err)
 	}
 
+	reranker, err := embedding.NewReranker(cfg.Rerank)
+	if err != nil {
+		return fmt.Errorf("creating reranker: %w", err)
+	}
+	if reranker != nil {
+		slog.Debug("reranker enabled", "model", reranker.Model())
+	}
+
 	vector, err := embedder.Embed(query)
 	if err != nil {
 		return fmt.Errorf("embedding query: %w", err)
 	}
 
-	s, err := store.Open(cfg.DBPath)
+	s, err := store.Open(cfg.DBPath, reranker, cfg.Rerank.TopK)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
@@ -56,7 +65,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	if cfg.Search.HybridSearch {
 		chunks, err = s.HybridSearch(vector, query, searchLimit)
 	} else {
-		chunks, err = s.SearchChunks(vector, searchLimit)
+		chunks, err = s.SearchChunks(query, vector, searchLimit)
 	}
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)

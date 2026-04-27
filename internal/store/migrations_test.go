@@ -61,13 +61,13 @@ func TestOpen_FreshDB(t *testing.T) {
 // case — every librarian CLI invocation opens the DB fresh.
 func TestOpen_RerunIsNoOp(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	s1, err := Open(dbPath)
+	s1, err := Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
 	s1.Close()
 
-	s2, err := Open(dbPath)
+	s2, err := Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestOpen_PreGooseDBIsRefused(t *testing.T) {
 	}
 	sqlDB.Close()
 
-	_, err = Open(dbPath)
+	_, err = Open(dbPath, nil, 0)
 	if err == nil {
 		t.Fatal("Open: expected error for pre-goose DB, got nil")
 	}
@@ -122,7 +122,7 @@ func TestOpen_PreGooseDBIsRefused(t *testing.T) {
 // leave orphan tables that a fresh Up would then trip over via unique constraints.
 func TestGooseDown_RestoresEmptyState(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "rollback.db")
-	s, err := Open(dbPath)
+	s, err := Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestOpen_ReturnsErrorNotPanic(t *testing.T) {
 	}
 	sqlDB.Close()
 
-	_, err = Open(dbPath)
+	_, err = Open(dbPath, nil, 0)
 	if err == nil {
 		t.Fatal("Open: expected error, got nil")
 	}

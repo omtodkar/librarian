@@ -38,7 +38,7 @@ func openImplementsRPCStore(t *testing.T, dir string) (*indexer.Indexer, *store.
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(dbPath)
+	s, err := store.Open(dbPath, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

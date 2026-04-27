@@ -35,7 +35,7 @@ func TestDeduplicateByContent_IdenticalChunksAcrossFiles(t *testing.T) {
 		}
 	}
 
-	chunks, err := s.SearchChunks(queryVec, 5)
+	chunks, err := s.SearchChunks("", queryVec, 5)
 	if err != nil {
 		t.Fatalf("SearchChunks: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestDeduplicateByContent_SingletonPassthrough(t *testing.T) {
 		}
 	}
 
-	chunks, err := s.SearchChunks(queryVec, 5)
+	chunks, err := s.SearchChunks("", queryVec, 5)
 	if err != nil {
 		t.Fatalf("SearchChunks: %v", err)
 	}

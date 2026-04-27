@@ -71,7 +71,7 @@ func (a *Auth) Validate(user, pass string) bool {
 		t.Fatal(err)
 	}
 
-	s, err := store.Open(filepath.Join(tmp, "test.db"))
+	s, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

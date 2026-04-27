@@ -92,6 +92,31 @@ exclude_patterns:
 
 See [Embedding](embedding.md) for provider-specific detail.
 
+### `rerank`
+
+Optional cross-encoder reranking applied after signal-weighted re-ranking. When `provider` is empty (the default), the rerank step is skipped and `SearchChunks` behaves identically to prior versions. Set `provider: openai` to point at Infinity's `/rerank` endpoint (same process that serves `/embeddings` — start with `make infinity-start`).
+
+```yaml
+rerank:
+  provider: openai
+  model: Alibaba-NLP/gte-reranker-modernbert-base
+  base_url: http://127.0.0.1:7997   # NO /v1 prefix — Infinity serves /rerank directly
+  # api_key: ""                     # usually empty for Infinity
+  # top_k: 20                       # signal-reranked candidates fed to cross-encoder
+  # timeout_ms: 3000                # per-call deadline; query falls back on timeout
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `provider` | `""` (disabled) | `""` or `"openai"` (any OpenAI-compatible `/rerank` endpoint) |
+| `model` | — | Required when `provider` is set; e.g. `Alibaba-NLP/gte-reranker-modernbert-base` |
+| `base_url` | `http://localhost:7997` | Endpoint base URL — **no `/v1` suffix** for Infinity |
+| `api_key` | — | Usually empty for Infinity; passed as `Authorization: Bearer` header when set |
+| `top_k` | `20` | Candidates passed from signal-rerank to cross-encoder. Higher values give the reranker more room to reorder; lower values reduce latency |
+| `timeout_ms` | `3000` | Per-call deadline in milliseconds. Queries fall back to signal-reranked results when the deadline fires — never fails the caller |
+
+See [Local embedding + rerank via Infinity](#local-embedding--rerank-via-infinity) for setup instructions.
+
 ### `chunking`
 
 | Field | Default | Description |
@@ -260,8 +285,6 @@ Override via env var:
 ```sh
 INFINITY_RERANK_MODEL=BAAI/bge-reranker-v2-m3 make infinity-start
 ```
-
-Librarian's `/rerank` caller doesn't exist yet (tracked in `bd show lib-5ny`). When that lands, the config will gain a sibling `rerank:` block pointing at the same `127.0.0.1:7997`.
 
 ### Platform notes
 

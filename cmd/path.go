@@ -31,7 +31,7 @@ func init() {
 }
 
 func runPath(cmd *cobra.Command, args []string) error {
-	s, err := store.Open(cfg.DBPath)
+	s, err := store.Open(cfg.DBPath, nil, 0)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -139,8 +140,13 @@ func (s *Store) ftsSearch(queryText string, fetchLimit int) ([]scoredChunk, erro
 	return candidates, nil
 }
 
-// SearchChunks performs vector KNN search followed by signal-weighted re-ranking.
-func (s *Store) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
+// rerankDefaultTopK is the number of signal-reranked candidates fed to the
+// cross-encoder when the caller does not specify a topK override.
+const rerankDefaultTopK = 20
+
+// SearchChunks performs vector KNN search, signal-weighted re-ranking, and
+// optionally cross-encoder reranking when a Reranker is configured.
+func (s *Store) SearchChunks(query string, vector []float64, limit int) ([]DocChunk, error) {
 	// vec0 may be absent on a fresh DB, between ClearVectorState and the
 	// first AddChunk of a reindex, or in a long-lived process (MCP server)
 	// that held an open Store while another process dropped the table.
@@ -159,7 +165,54 @@ func (s *Store) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rerankWithSignals(candidates, limit), nil
+
+	if s.reranker == nil {
+		return rerankWithSignals(candidates, limit), nil
+	}
+
+	// Cross-encoder path: signal-rerank to topK, then cross-encoder rerank.
+	topK := s.rerankTopK
+	if topK <= 0 {
+		topK = rerankDefaultTopK
+	}
+	if topK < limit {
+		topK = limit
+	}
+
+	signalTop := signalRankToK(candidates, topK)
+
+	docs := make([]string, len(signalTop))
+	for i, sc := range signalTop {
+		docs[i] = sc.chunk.Content
+	}
+
+	scores, rerankErr := s.reranker.Rerank(query, docs)
+	if rerankErr != nil {
+		slog.Debug("reranker fallback", "error", rerankErr)
+		if len(signalTop) > limit {
+			signalTop = signalTop[:limit]
+		}
+		return toDocChunks(signalTop), nil
+	}
+	if len(scores) != len(signalTop) {
+		slog.Debug("reranker score count mismatch, falling back", "want", len(signalTop), "got", len(scores))
+		if len(signalTop) > limit {
+			signalTop = signalTop[:limit]
+		}
+		return toDocChunks(signalTop), nil
+	}
+
+	// Apply cross-encoder scores, re-sort descending, truncate to limit.
+	for i := range signalTop {
+		signalTop[i].finalScore = scores[i]
+	}
+	sort.Slice(signalTop, func(i, j int) bool {
+		return signalTop[i].finalScore > signalTop[j].finalScore
+	})
+	if len(signalTop) > limit {
+		signalTop = signalTop[:limit]
+	}
+	return toDocChunks(signalTop), nil
 }
 
 // HybridSearch combines vector KNN and FTS5 BM25 results via Reciprocal Rank
@@ -248,28 +301,36 @@ func hybridRerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 	return chunks
 }
 
-func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
+// signalRankToK applies signal-weighted scoring, sorts, deduplicates, and
+// truncates to the top-k candidates. Returns []scoredChunk so callers that
+// need to re-rank further (e.g. cross-encoder) can work with the raw scores.
+func signalRankToK(candidates []scoredChunk, k int) []scoredChunk {
 	for i := range candidates {
 		vectorScore := 1.0 - candidates[i].distance
 		boost := computeMetadataBoost(candidates[i].chunk.SignalMeta)
 		candidates[i].finalScore = 0.90*vectorScore + 0.10*boost
 	}
-
 	sort.Slice(candidates, func(i, j int) bool {
 		return rankLess(candidates[i], candidates[j])
 	})
-
 	candidates = deduplicateByContent(candidates)
-
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
+	if len(candidates) > k {
+		candidates = candidates[:k]
 	}
+	return candidates
+}
 
+// toDocChunks extracts the chunk field from a slice of scoredChunks.
+func toDocChunks(candidates []scoredChunk) []DocChunk {
 	chunks := make([]DocChunk, len(candidates))
 	for i, sc := range candidates {
 		chunks[i] = sc.chunk
 	}
 	return chunks
+}
+
+func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
+	return toDocChunks(signalRankToK(candidates, limit))
 }
 
 // dedupWindow is the maximum number of top-ranked candidates scanned for

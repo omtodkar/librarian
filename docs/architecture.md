@@ -199,7 +199,7 @@ Every indexed thing — documents, code files, code symbols, config keys — pro
 
 ### Signal-aware re-ranking
 
-Each chunk carries `signal_meta` JSON: warnings, decisions, TODO/FIXME, risk markers (deprecated, breaking-change, unsafe), code annotations (`@Deprecated`, `@Transactional`), emphasis terms. After the vector KNN fetch, a weighted re-rank (`0.90 × vector + 0.10 × metadata boost`) promotes chunks with actionable signals — so a query for "authentication" will surface the chunk that mentions a **decision** about OAuth ahead of a neutral paragraph of the same semantic distance. See [Storage Layer](storage.md#search-re-ranking).
+Each chunk carries `signal_meta` JSON: warnings, decisions, TODO/FIXME, risk markers (deprecated, breaking-change, unsafe), code annotations (`@Deprecated`, `@Transactional`), emphasis terms. After the vector KNN fetch, a weighted re-rank (`0.90 × vector + 0.10 × metadata boost`) promotes chunks with actionable signals — so a query for "authentication" will surface the chunk that mentions a **decision** about OAuth ahead of a neutral paragraph of the same semantic distance. When `rerank.provider` is configured, the top-N signal-ranked candidates are then passed through a cross-encoder (`POST /rerank`) for a final re-order before truncation to `limit`. On any error or timeout the cross-encoder step is skipped and the signal-ranked result is returned unchanged. See [Storage Layer](storage.md#search-re-ranking) and [Configuration](configuration.md#rerank).
 
 ### Pluggable embedding providers
 

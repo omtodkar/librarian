@@ -58,7 +58,7 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 		if hybridSearch {
 			chunks, err = st.HybridSearch(vector, query, limit)
 		} else {
-			chunks, err = st.SearchChunks(vector, limit)
+			chunks, err = st.SearchChunks(query, vector, limit)
 		}
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil

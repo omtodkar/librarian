@@ -54,7 +54,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	s, err := store.Open(ws.DBPath())
+	s, err := store.Open(ws.DBPath(), nil, 0)
 	if err != nil {
 		return fmt.Errorf("initializing database: %w", err)
 	}

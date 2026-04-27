@@ -51,7 +51,7 @@ after one hour; refresh tokens rotate on each use.
 		t.Fatal(err)
 	}
 
-	s, err := store.Open(filepath.Join(tmp, "test.db"))
+	s, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestSummarization_SummaryStoredAndShorterThanBody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := store.Open(filepath.Join(tmp, "test.db"))
+	s, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestSummarization_SummaryStoredAndShorterThanBody(t *testing.T) {
 	// Verify summary flows through the vector-search path (same code path as
 	// the search_docs MCP handler). SearchChunks must return Summary populated.
 	zeroVec := make([]float64, 4)
-	searchResults, err := s.SearchChunks(zeroVec, 10)
+	searchResults, err := s.SearchChunks("", zeroVec, 10)
 	if err != nil {
 		t.Fatalf("SearchChunks: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestSummarization_Noop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := store.Open(filepath.Join(tmp, "test.db"))
+	s, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
