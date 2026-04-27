@@ -146,8 +146,9 @@ CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:wsgi"]`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 1 {
-		t.Errorf("expected 1 Unit for single-stage Dockerfile, got %d", len(doc.Units))
+	// v2 adds one "stage" Unit per stage alongside the "section" Unit.
+	if len(doc.Units) != 2 {
+		t.Errorf("expected 2 Units (1 section + 1 stage) for single-stage Dockerfile, got %d", len(doc.Units))
 	}
 
 	chunks, err := h.Chunk(doc, indexer.DefaultChunkConfig())
@@ -199,12 +200,13 @@ CMD ["/server"]`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 2 {
-		t.Errorf("expected 2 Units for 2-stage Dockerfile, got %d", len(doc.Units))
+	// v2 adds one "stage" Unit per stage: 2 section + 2 stage = 4 total.
+	if len(doc.Units) != 4 {
+		t.Errorf("expected 4 Units (2 section + 2 stage) for 2-stage Dockerfile, got %d", len(doc.Units))
 		return
 	}
 
-	// First stage should be named after the AS clause.
+	// First two units are the "section" units named after the AS clause.
 	if doc.Units[0].Title != "stage: builder" {
 		t.Errorf("Units[0].Title = %q, want stage: builder", doc.Units[0].Title)
 	}
@@ -259,8 +261,9 @@ CMD ["node", "/app/dist/server.js"]`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 3 {
-		t.Errorf("expected 3 Units, got %d", len(doc.Units))
+	// v2: 3 section + 3 stage = 6 total.
+	if len(doc.Units) != 6 {
+		t.Errorf("expected 6 Units (3 section + 3 stage), got %d", len(doc.Units))
 	}
 	for i, want := range []string{"stage: deps", "stage: build", "stage: runner"} {
 		if doc.Units[i].Title != want {
@@ -283,8 +286,9 @@ CMD ["/server"]`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 2 {
-		t.Errorf("expected 2 Units, got %d", len(doc.Units))
+	// v2: 2 section + 2 stage = 4 total.
+	if len(doc.Units) != 4 {
+		t.Errorf("expected 4 Units (2 section + 2 stage), got %d", len(doc.Units))
 	}
 	if doc.Units[0].Title != "stage 1" {
 		t.Errorf("Units[0].Title = %q, want stage 1", doc.Units[0].Title)
@@ -322,8 +326,9 @@ CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 1 {
-		t.Fatalf("expected 1 Unit, got %d", len(doc.Units))
+	// v2: 1 section + 1 stage = 2 total.
+	if len(doc.Units) != 2 {
+		t.Fatalf("expected 2 Units (1 section + 1 stage), got %d", len(doc.Units))
 	}
 
 	content := doc.Units[0].Content
@@ -348,8 +353,9 @@ RUN echo hello`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 1 {
-		t.Fatalf("expected 1 Unit, got %d", len(doc.Units))
+	// v2: 1 section + 1 stage = 2 total.
+	if len(doc.Units) != 2 {
+		t.Fatalf("expected 2 Units (1 section + 1 stage), got %d", len(doc.Units))
 	}
 	if !strings.Contains(doc.Units[0].Content, "# syntax=docker/dockerfile:1") {
 		t.Error("preamble before first FROM should be included in stage 1 content")
@@ -476,8 +482,9 @@ CMD ["/server"]`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 2 {
-		t.Fatalf("expected 2 Units, got %d", len(doc.Units))
+	// v2: 2 section + 2 stage = 4 total.
+	if len(doc.Units) != 4 {
+		t.Fatalf("expected 4 Units (2 section + 2 stage), got %d", len(doc.Units))
 	}
 	if doc.Units[0].Title != "stage: cross-builder" {
 		t.Errorf("Units[0].Title = %q, want stage: cross-builder", doc.Units[0].Title)
@@ -518,8 +525,9 @@ CMD ["/server"]`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 2 {
-		t.Fatalf("expected 2 Units, got %d", len(doc.Units))
+	// v2: 2 section + 2 stage = 4 total.
+	if len(doc.Units) != 4 {
+		t.Fatalf("expected 4 Units (2 section + 2 stage), got %d", len(doc.Units))
 	}
 	chunks, err := h.Chunk(doc, indexer.DefaultChunkConfig())
 	if err != nil {
@@ -548,9 +556,9 @@ func TestHandler_FromScratch_NoBody(t *testing.T) {
 	if doc.Format != "dockerfile" {
 		t.Errorf("Format = %q, want dockerfile", doc.Format)
 	}
-	// One unit expected: the stage whose content is the FROM line.
-	if len(doc.Units) != 1 {
-		t.Errorf("expected 1 Unit for single FROM-only Dockerfile, got %d", len(doc.Units))
+	// v2: 1 section + 1 stage = 2 total. No inherits/import edge because "scratch" is special.
+	if len(doc.Units) != 2 {
+		t.Errorf("expected 2 Units for single FROM-only Dockerfile, got %d", len(doc.Units))
 	}
 }
 
@@ -701,13 +709,357 @@ cmd ["node", "server.js"]`
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(doc.Units) != 2 {
-		t.Fatalf("expected 2 Units for lowercase from/as Dockerfile, got %d", len(doc.Units))
+	// v2: 2 section + 2 stage = 4 total.
+	if len(doc.Units) != 4 {
+		t.Fatalf("expected 4 Units (2 section + 2 stage) for lowercase from/as Dockerfile, got %d", len(doc.Units))
 	}
 	if doc.Units[0].Title != "stage: deps" {
 		t.Errorf("Units[0].Title = %q, want stage: deps", doc.Units[0].Title)
 	}
 	if doc.Units[1].Title != "stage: runner" {
 		t.Errorf("Units[1].Title = %q, want stage: runner", doc.Units[1].Title)
+	}
+}
+
+// ── Graph-pass tests (v2, lib-nf6) ──────────────────────────────────────────
+
+// stageUnits returns only the "stage" Kind units from a slice (graph-pass units).
+func stageUnits(units []indexer.Unit) []indexer.Unit {
+	var out []indexer.Unit
+	for _, u := range units {
+		if u.Kind == "stage" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// refsOfKind returns refs filtered by Kind and, optionally, relation metadata.
+func refsOfKind(refs []indexer.Reference, kind, relation string) []indexer.Reference {
+	var out []indexer.Reference
+	for _, r := range refs {
+		if r.Kind != kind {
+			continue
+		}
+		if relation != "" {
+			if r.Metadata == nil {
+				continue
+			}
+			if r.Metadata["relation"] != relation {
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// TestGraphPass_MultiStage_StageNodes verifies that a two-stage Dockerfile emits
+// exactly two "stage" Units (one per FROM) with the correct Path / Title and that
+// a stage-to-stage inherits edge is emitted when the second stage uses the first
+// stage as its base image.
+func TestGraphPass_MultiStage_StageNodes(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM ubuntu:22.04 AS base\nRUN echo setup\n\nFROM base AS runtime\nRUN echo run\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stage Units, got %d", len(stages))
+	}
+
+	if stages[0].Path != "stage:base" {
+		t.Errorf("stages[0].Path = %q, want stage:base", stages[0].Path)
+	}
+	if stages[0].Title != "base" {
+		t.Errorf("stages[0].Title = %q, want base", stages[0].Title)
+	}
+	if stages[1].Path != "stage:runtime" {
+		t.Errorf("stages[1].Path = %q, want stage:runtime", stages[1].Path)
+	}
+	if stages[1].Title != "runtime" {
+		t.Errorf("stages[1].Title = %q, want runtime", stages[1].Title)
+	}
+
+	// Stage-to-stage inherits edge: runtime → base.
+	stageEdges := refsOfKind(doc.Refs, "inherits", "stage")
+	if len(stageEdges) != 1 {
+		t.Fatalf("expected 1 stage inherits edge, got %d: %+v", len(stageEdges), stageEdges)
+	}
+	if stageEdges[0].Source != "stage:runtime" {
+		t.Errorf("edge Source = %q, want stage:runtime", stageEdges[0].Source)
+	}
+	if stageEdges[0].Target != "stage:base" {
+		t.Errorf("edge Target = %q, want stage:base", stageEdges[0].Target)
+	}
+}
+
+// TestGraphPass_ExternalBaseImage verifies that a stage whose base is an external
+// image (not a prior stage) emits an import Reference with node_kind="external" and
+// the normalized docker.io/library/ prefix for official images.
+func TestGraphPass_ExternalBaseImage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM alpine:3.18\nRUN echo hello\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+	if stages[0].Path != "stage:stage-1" {
+		t.Errorf("unnamed stage path = %q, want stage:stage-1", stages[0].Path)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 1 {
+		t.Fatalf("expected 1 external import ref, got %d: %+v", len(extRefs), extRefs)
+	}
+	if extRefs[0].Target != "docker.io/library/alpine:3.18" {
+		t.Errorf("external ref Target = %q, want docker.io/library/alpine:3.18", extRefs[0].Target)
+	}
+	if extRefs[0].Metadata["node_kind"] != "external" {
+		t.Errorf("external ref node_kind = %q, want external", extRefs[0].Metadata["node_kind"])
+	}
+	if extRefs[0].Source != "stage:stage-1" {
+		t.Errorf("external ref Source = %q, want stage:stage-1", extRefs[0].Source)
+	}
+}
+
+// TestGraphPass_DockerHubUserImage verifies that a Docker Hub user image
+// (single slash, no registry dot) gets the docker.io/ prefix without /library/.
+func TestGraphPass_DockerHubUserImage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM myuser/myapp:1.0\nCMD [\"./myapp\"]\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 1 {
+		t.Fatalf("expected 1 external import ref, got %d", len(extRefs))
+	}
+	if extRefs[0].Target != "docker.io/myuser/myapp:1.0" {
+		t.Errorf("Target = %q, want docker.io/myuser/myapp:1.0", extRefs[0].Target)
+	}
+}
+
+// TestGraphPass_CustomRegistryImage verifies that an image with a registry prefix
+// (contains a dot in the first path segment) is left unchanged.
+func TestGraphPass_CustomRegistryImage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM gcr.io/distroless/base:nonroot\nCMD [\"/app\"]\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 1 {
+		t.Fatalf("expected 1 external import ref, got %d", len(extRefs))
+	}
+	if extRefs[0].Target != "gcr.io/distroless/base:nonroot" {
+		t.Errorf("Target = %q, want gcr.io/distroless/base:nonroot", extRefs[0].Target)
+	}
+}
+
+// TestGraphPass_ExposeCmdEntrypoint verifies that EXPOSE, CMD, and ENTRYPOINT
+// directives are captured as metadata on the stage Unit.
+func TestGraphPass_ExposeCmdEntrypoint(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM ubuntu:22.04 AS web
+EXPOSE 8080 443
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]
+`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+	meta := stages[0].Metadata
+
+	expose, ok := meta["expose"].([]string)
+	if !ok || len(expose) != 2 {
+		t.Errorf("expose metadata = %v, want [\"8080\", \"443\"]", meta["expose"])
+	} else {
+		if expose[0] != "8080" || expose[1] != "443" {
+			t.Errorf("expose = %v, want [8080 443]", expose)
+		}
+	}
+
+	cmd, ok := meta["cmd"].([]string)
+	if !ok || len(cmd) != 1 {
+		t.Errorf("cmd metadata = %v, want 1 entry", meta["cmd"])
+	}
+
+	ep, ok := meta["entrypoint"].([]string)
+	if !ok || len(ep) != 1 {
+		t.Errorf("entrypoint metadata = %v, want 1 entry", meta["entrypoint"])
+	}
+
+	// base_image must always be present.
+	if meta["base_image"] != "ubuntu:22.04" {
+		t.Errorf("base_image = %q, want ubuntu:22.04", meta["base_image"])
+	}
+}
+
+// TestGraphPass_CopyFromEdge verifies that COPY --from=<stage> emits an inherits
+// edge with relation="copy-from" from the current stage to the source stage.
+func TestGraphPass_CopyFromEdge(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN go build -o /server .
+
+FROM alpine:3.19 AS runtime
+COPY --from=builder /server /server
+CMD ["/server"]
+`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 1 {
+		t.Fatalf("expected 1 copy-from edge, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	if copyEdges[0].Source != "stage:runtime" {
+		t.Errorf("copy edge Source = %q, want stage:runtime", copyEdges[0].Source)
+	}
+	if copyEdges[0].Target != "stage:builder" {
+		t.Errorf("copy edge Target = %q, want stage:builder", copyEdges[0].Target)
+	}
+}
+
+// TestGraphPass_CopyFromIndex verifies that COPY --from=<N> (numeric index) resolves
+// to the correct stage name.
+func TestGraphPass_CopyFromIndex(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22
+RUN go build -o /server .
+
+FROM alpine
+COPY --from=0 /server /server
+CMD ["/server"]
+`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 1 {
+		t.Fatalf("expected 1 copy-from edge for index 0, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	if copyEdges[0].Source != "stage:stage-2" {
+		t.Errorf("copy edge Source = %q, want stage:stage-2", copyEdges[0].Source)
+	}
+	if copyEdges[0].Target != "stage:stage-1" {
+		t.Errorf("copy edge Target = %q, want stage:stage-1", copyEdges[0].Target)
+	}
+}
+
+// TestGraphPass_ScratchBase verifies that a FROM scratch stage emits a stage Unit
+// but no inherits or import edge (scratch is a special built-in with no real image).
+func TestGraphPass_ScratchBase(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM scratch\nCOPY --from=0 /server /server\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	// No FROM dependency edge for scratch.
+	stageEdges := refsOfKind(doc.Refs, "inherits", "stage")
+	if len(stageEdges) != 0 {
+		t.Errorf("expected no stage inherits edges for scratch base, got %d", len(stageEdges))
+	}
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 0 {
+		t.Errorf("expected no external import refs for scratch, got %d", len(extRefs))
+	}
+}
+
+// TestGraphPass_StageLineNumbers verifies that stage Units carry the correct
+// 1-indexed line number of the FROM directive.
+func TestGraphPass_StageLineNumbers(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM golang:1.22 AS build\nRUN go build .\n\nFROM alpine AS final\nCMD [\"/app\"]\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stage Units, got %d", len(stages))
+	}
+	if stages[0].Loc.Line != 1 {
+		t.Errorf("stages[0] line = %d, want 1", stages[0].Loc.Line)
+	}
+	if stages[1].Loc.Line != 4 {
+		t.Errorf("stages[1] line = %d, want 4", stages[1].Loc.Line)
+	}
+}
+
+// TestGraphPass_MultipleExternalImages verifies that a Dockerfile with multiple
+// FROM lines each using external images emits one external import edge per stage.
+func TestGraphPass_MultipleExternalImages(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN go build -o /app .
+
+FROM node:20 AS frontend
+RUN npm run build
+
+FROM nginx:alpine AS web
+COPY --from=frontend /dist /usr/share/nginx/html
+COPY --from=builder /app /app
+`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 3 {
+		t.Fatalf("expected 3 external import refs, got %d: %+v", len(extRefs), extRefs)
+	}
+
+	// Two COPY --from edges from the web stage.
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 2 {
+		t.Fatalf("expected 2 copy-from edges, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	for _, e := range copyEdges {
+		if e.Source != "stage:web" {
+			t.Errorf("copy edge Source = %q, want stage:web", e.Source)
+		}
 	}
 }

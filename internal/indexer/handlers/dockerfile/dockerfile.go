@@ -3,8 +3,14 @@
 // v1 is a docs-pass-only handler: it makes Dockerfile content queryable via
 // search_docs and get_context without building a full instruction AST. Stage-boundary
 // chunking (split at each FROM directive) keeps each build stage retrievable
-// separately. Structural extraction (stage graph, base-image nodes,
-// EXPOSE/CMD/ENTRYPOINT metadata) is deferred to v2 (lib-nf6).
+// separately.
+//
+// v2 (lib-nf6) adds a graph-pass: Parse() also emits "stage" Units and References
+// so the graph layer can answer queries like "what base image does auth use?" or
+// "which port does orders expose?". Stage nodes land under sym:stage:<name>;
+// external base images project to ext:<registry>/<image>:<tag> via import edges
+// with node_kind="external"; stage-to-stage dependencies and COPY --from edges
+// use inherits with relation="stage" / "copy-from".
 //
 // Detected by both extension (.dockerfile) and filename pattern (Dockerfile,
 // Dockerfile.*), registered via RegisterByFilenameGlob alongside the standard
@@ -43,6 +49,11 @@ func (*Handler) Extensions() []string { return []string{".dockerfile"} }
 // Parse converts raw Dockerfile bytes to a ParsedDoc with one Unit per build stage.
 // Each FROM directive starts a new stage; any content before the first FROM
 // (e.g. # syntax= directives) is included with stage 1.
+//
+// In addition to the v1 "section" Units (for the docs pass), Parse also emits
+// "stage" Units and References for the graph pass (v2, lib-nf6). The docs-pass
+// Chunk() method already skips non-"section" Units, so the graph data is
+// transparently ignored during docs indexing.
 func (*Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error) {
 	raw := string(content)
 	base := filepath.Base(path)
@@ -58,6 +69,12 @@ func (*Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error) {
 
 	doc.Units = splitIntoStageUnits(raw)
 	doc.Signals = indexer.ExtractRationaleSignals(raw)
+
+	// Append graph-pass stage Units and References (v2).
+	graphUnits, graphRefs := parseStageGraph(raw)
+	doc.Units = append(doc.Units, graphUnits...)
+	doc.Refs = graphRefs
+
 	return doc, nil
 }
 
@@ -166,4 +183,286 @@ func stageTitle(fromLine string, n int) string {
 		}
 	}
 	return fmt.Sprintf("stage %d", n)
+}
+
+// parseStageGraph extracts the stage dependency graph from a Dockerfile and
+// returns "stage" Units and References for the graph pass.
+//
+// Stage nodes use Path="stage:<name>" so they land under a distinct sym:stage:
+// namespace in the graph, avoiding collisions with code symbols. External base
+// images project to ext:<registry>/<image>:<tag> via import edges with
+// Metadata["node_kind"]="external". Stage-to-stage FROM dependencies use
+// inherits edges with Metadata["relation"]="stage". COPY --from edges use
+// inherits with Metadata["relation"]="copy-from".
+func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
+	lines := strings.Split(raw, "\n")
+
+	type stageInfo struct {
+		name       string   // full path: "stage:<rawName>"
+		rawName    string   // bare stage name or "stage-N" for unnamed
+		baseImage  string   // raw image ref from FROM line
+		lineIdx    int      // 0-indexed line number of the FROM directive
+		expose     []string // ports from EXPOSE directives
+		cmd        []string // CMD directive bodies
+		entrypoint []string // ENTRYPOINT directive bodies
+	}
+
+	// First pass: collect FROM lines.
+	var stages []stageInfo
+	stageNum := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		upper := strings.ToUpper(trimmed)
+		if !strings.HasPrefix(upper, "FROM ") && !strings.EqualFold(trimmed, "FROM") {
+			continue
+		}
+		stageNum++
+		baseImage, stageName := parseFromLine(trimmed)
+		if stageName == "" {
+			stageName = fmt.Sprintf("stage-%d", stageNum)
+		}
+		stages = append(stages, stageInfo{
+			name:      "stage:" + stageName,
+			rawName:   stageName,
+			baseImage: baseImage,
+			lineIdx:   i,
+		})
+	}
+
+	if len(stages) == 0 {
+		return nil, nil
+	}
+
+	// Build lookup tables for local stage resolution.
+	// Keyed on lower-cased rawName so stage references are case-insensitive.
+	stageByRawName := make(map[string]string, len(stages)) // lower(rawName) → path
+	stageByIdx := make(map[string]string, len(stages))     // "0", "1", ... → path
+	for i, s := range stages {
+		stageByRawName[strings.ToLower(s.rawName)] = s.name
+		stageByIdx[fmt.Sprintf("%d", i)] = s.name
+	}
+
+	type copyFromEdge struct {
+		fromStage string
+		toRef     string
+	}
+	var copyFromEdges []copyFromEdge
+
+	// Second pass: collect EXPOSE/CMD/ENTRYPOINT/COPY per stage.
+	currentStage := -1
+	for lineIdx, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			continue
+		}
+		keyword := strings.ToUpper(fields[0])
+
+		if keyword == "FROM" {
+			for j := range stages {
+				if stages[j].lineIdx == lineIdx {
+					currentStage = j
+					break
+				}
+			}
+			continue
+		}
+
+		if currentStage < 0 {
+			continue
+		}
+
+		// body is the directive argument (after the keyword), preserving original case.
+		body := strings.TrimSpace(trimmed[len(fields[0]):])
+		switch keyword {
+		case "EXPOSE":
+			stages[currentStage].expose = append(stages[currentStage].expose, strings.Fields(body)...)
+		case "CMD":
+			if body != "" {
+				stages[currentStage].cmd = append(stages[currentStage].cmd, body)
+			}
+		case "ENTRYPOINT":
+			if body != "" {
+				stages[currentStage].entrypoint = append(stages[currentStage].entrypoint, body)
+			}
+		case "COPY":
+			// Extract --from=<ref> flag.
+			for _, f := range fields[1:] {
+				if strings.HasPrefix(strings.ToLower(f), "--from=") {
+					ref := f[len("--from="):]
+					if ref != "" {
+						copyFromEdges = append(copyFromEdges, copyFromEdge{
+							fromStage: stages[currentStage].name,
+							toRef:     ref,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Build stage Units and References.
+	var units []indexer.Unit
+	var refs []indexer.Reference
+
+	for _, s := range stages {
+		meta := map[string]any{
+			"base_image": s.baseImage,
+		}
+		if len(s.expose) > 0 {
+			meta["expose"] = s.expose
+		}
+		if len(s.cmd) > 0 {
+			meta["cmd"] = s.cmd
+		}
+		if len(s.entrypoint) > 0 {
+			meta["entrypoint"] = s.entrypoint
+		}
+
+		units = append(units, indexer.Unit{
+			Kind:  "stage",
+			Path:  s.name,
+			Title: s.rawName,
+			Loc: indexer.Location{
+				Line: s.lineIdx + 1, // 1-indexed
+			},
+			Metadata: meta,
+		})
+
+		// FROM dependency edge — skip if no base image or special "scratch" base.
+		if s.baseImage == "" || strings.EqualFold(s.baseImage, "scratch") {
+			continue
+		}
+
+		lowerBase := strings.ToLower(s.baseImage)
+		// Strip tag for stage name lookup; stage-to-stage refs rarely include tags.
+		baseNameOnly := lowerBase
+		if colonIdx := strings.Index(lowerBase, ":"); colonIdx > 0 {
+			baseNameOnly = lowerBase[:colonIdx]
+		}
+
+		if parentPath, ok := stageByRawName[lowerBase]; ok {
+			// Exact match on a local stage name.
+			refs = append(refs, indexer.Reference{
+				Kind:     "inherits",
+				Source:   s.name,
+				Target:   parentPath,
+				Metadata: map[string]any{"relation": "stage"},
+			})
+		} else if parentPath, ok := stageByRawName[baseNameOnly]; ok {
+			// Match after stripping the tag — handles `FROM builder:latest AS x`.
+			refs = append(refs, indexer.Reference{
+				Kind:     "inherits",
+				Source:   s.name,
+				Target:   parentPath,
+				Metadata: map[string]any{"relation": "stage"},
+			})
+		} else {
+			// External image — normalize to include a registry prefix.
+			extImage := normalizeDockerImage(s.baseImage)
+			refs = append(refs, indexer.Reference{
+				Kind:     "import",
+				Source:   s.name,
+				Target:   extImage,
+				Metadata: map[string]any{"node_kind": "external"},
+			})
+		}
+	}
+
+	// COPY --from edges: resolve stage name or index to full stage path.
+	for _, c := range copyFromEdges {
+		lowerRef := strings.ToLower(c.toRef)
+		var targetPath string
+		if p, ok := stageByRawName[lowerRef]; ok {
+			targetPath = p
+		} else if p, ok := stageByIdx[lowerRef]; ok {
+			targetPath = p
+		}
+		if targetPath == "" {
+			continue
+		}
+		refs = append(refs, indexer.Reference{
+			Kind:     "inherits",
+			Source:   c.fromStage,
+			Target:   targetPath,
+			Metadata: map[string]any{"relation": "copy-from"},
+		})
+	}
+
+	return units, refs
+}
+
+// parseFromLine extracts the base image and optional stage name from a FROM
+// directive line. Returns ("", "") for the bare "FROM" form (no image).
+//
+// Examples:
+//
+//	"FROM ubuntu:22.04 AS base"               → ("ubuntu:22.04", "base")
+//	"FROM --platform=linux/amd64 ubuntu AS x" → ("ubuntu", "x")
+//	"FROM golang:1.22"                        → ("golang:1.22", "")
+func parseFromLine(line string) (baseImage, stageName string) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", ""
+	}
+	// Skip the FROM keyword itself.
+	fields = fields[1:]
+
+	// Skip --flags (--platform, --network, etc.).
+	for len(fields) > 0 && strings.HasPrefix(fields[0], "--") {
+		fields = fields[1:]
+	}
+
+	if len(fields) == 0 {
+		return "", ""
+	}
+
+	baseImage = fields[0]
+	fields = fields[1:]
+
+	// Look for AS <name>.
+	if len(fields) >= 2 && strings.EqualFold(fields[0], "AS") {
+		stageName = fields[1]
+	}
+
+	return baseImage, stageName
+}
+
+// normalizeDockerImage normalizes a Docker image reference to include a registry
+// prefix. Images without a registry prefix are assumed to be Docker Hub.
+//
+// Examples:
+//
+//	"ubuntu:22.04"           → "docker.io/library/ubuntu:22.04"
+//	"myuser/myapp:1.0"       → "docker.io/myuser/myapp:1.0"
+//	"gcr.io/distroless/base" → "gcr.io/distroless/base" (unchanged)
+//	"localhost:5000/myapp"   → "localhost:5000/myapp" (unchanged)
+func normalizeDockerImage(image string) string {
+	// Extract the name part (before tag or digest) to examine the registry component.
+	namePart := image
+	if idx := strings.Index(image, "@"); idx >= 0 {
+		namePart = image[:idx]
+	} else if idx := strings.Index(image, ":"); idx >= 0 {
+		namePart = image[:idx]
+	}
+
+	slashIdx := strings.Index(namePart, "/")
+	if slashIdx < 0 {
+		// No slash: official Docker Hub library image (e.g. "ubuntu:22.04").
+		return "docker.io/library/" + image
+	}
+
+	// Has a slash. Check if the segment before the first slash looks like a
+	// registry (contains a dot or colon, or equals "localhost").
+	prefix := namePart[:slashIdx]
+	if strings.Contains(prefix, ".") || strings.Contains(prefix, ":") || prefix == "localhost" {
+		return image
+	}
+
+	// Docker Hub user image (e.g. "myuser/myapp:1.0").
+	return "docker.io/" + image
 }
