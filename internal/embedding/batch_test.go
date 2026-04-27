@@ -77,7 +77,7 @@ func (m *geminiBatchMock) handler(t *testing.T) http.HandlerFunc {
 // to redirect all requests to the mock. Simpler than parameterising the URL.
 func newGeminiTestEmbedder(t *testing.T, batchSize int, mockURL string) *GeminiEmbedder {
 	t.Helper()
-	e, err := NewGeminiEmbedder("test-key", "test-model", batchSize)
+	e, err := NewGeminiEmbedder("test-key", "test-model", batchSize, 0)
 	if err != nil {
 		t.Fatalf("NewGeminiEmbedder: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestOpenAIEmbedder_EmbedBatchPreservesOrder(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestOpenAIEmbedder_EmbedBatchEmptyInput(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}

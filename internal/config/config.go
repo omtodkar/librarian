@@ -111,6 +111,11 @@ type EmbeddingConfig struct {
 	// provider's documented max are silently clamped down. This is the
 	// ceiling, not a demand.
 	BatchSize int `mapstructure:"batch_size"`
+	// MaxRetries is the number of retry attempts for EmbedBatch calls that
+	// receive HTTP 429 (Too Many Requests). Default 3; set to 0 to disable
+	// retry entirely. Backoff is exponential with full jitter, capped at 30s;
+	// a Retry-After response header overrides the computed delay.
+	MaxRetries int `mapstructure:"max_retries"`
 }
 
 type ChunkingConfig struct {
@@ -172,7 +177,8 @@ func Load() *Config {
 		DocsDir: "docs",
 		DBPath:  ".librarian/librarian.db",
 		Embedding: EmbeddingConfig{
-			Provider: "gemini",
+			Provider:   "gemini",
+			MaxRetries: 3,
 		},
 		Chunking: ChunkingConfig{
 			MaxTokens:    512,
@@ -217,6 +223,9 @@ func Load() *Config {
 	}
 	if !viper.IsSet("graph.test_edges.enabled") {
 		cfg.Graph.TestEdges.Enabled = true
+	}
+	if !viper.IsSet("embedding.max_retries") {
+		cfg.Embedding.MaxRetries = 3
 	}
 
 	if dbPath := viper.GetString("db_path"); dbPath != "" {

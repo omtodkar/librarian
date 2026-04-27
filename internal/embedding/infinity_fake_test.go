@@ -69,7 +69,7 @@ func TestInfinityFakeServer_Embed(t *testing.T) {
 	defer srv.Close()
 
 	// Infinity baseURL has NO /v1 suffix — the embedder appends /embeddings.
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestInfinityFakeServer_EmbedPath(t *testing.T) {
 	srv := httptest.NewServer(fake.handler(t))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestInfinityFakeServer_V1PathFails(t *testing.T) {
 
 	// Deliberately add /v1 to simulate an OpenAI-style configuration — the
 	// fake Infinity server only answers /embeddings, so this must fail.
-	e, err := NewOpenAIEmbedder(srv.URL+"/v1", "test-model", "", 100)
+	e, err := NewOpenAIEmbedder(srv.URL+"/v1", "test-model", "", 100, 0)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestInfinityFakeServer_EmbedBatch(t *testing.T) {
 	srv := httptest.NewServer(fake.handler(t))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}

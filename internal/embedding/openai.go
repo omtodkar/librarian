@@ -19,17 +19,19 @@ const openaiBatchMax = 2048
 
 // OpenAIEmbedder calls an OpenAI-compatible embeddings API (LM Studio, Ollama, vLLM, etc.).
 type OpenAIEmbedder struct {
-	baseURL   string
-	model     string
-	apiKey    string
-	batchSize int
-	client    *http.Client
+	baseURL    string
+	model      string
+	apiKey     string
+	batchSize  int
+	maxRetries int
+	client     *http.Client
 }
 
 // NewOpenAIEmbedder creates an OpenAIEmbedder. baseURL defaults to
 // http://localhost:1234/v1 (LM Studio's default) if empty. batchSize <= 0
 // resolves to defaultBatchSize; values above openaiBatchMax clamp down.
-func NewOpenAIEmbedder(baseURL, model, apiKey string, batchSize int) (*OpenAIEmbedder, error) {
+// maxRetries controls 429 retry behavior (0 = disabled).
+func NewOpenAIEmbedder(baseURL, model, apiKey string, batchSize, maxRetries int) (*OpenAIEmbedder, error) {
 	if baseURL == "" {
 		baseURL = "http://localhost:1234/v1"
 	}
@@ -38,11 +40,12 @@ func NewOpenAIEmbedder(baseURL, model, apiKey string, batchSize int) (*OpenAIEmb
 		return nil, fmt.Errorf("embedding model is required for openai provider: set embedding.model in .librarian/config.yaml")
 	}
 	return &OpenAIEmbedder{
-		baseURL:   baseURL,
-		model:     model,
-		apiKey:    apiKey,
-		batchSize: resolveBatchSize(batchSize, openaiBatchMax),
-		client:    &http.Client{},
+		baseURL:    baseURL,
+		model:      model,
+		apiKey:     apiKey,
+		batchSize:  resolveBatchSize(batchSize, openaiBatchMax),
+		maxRetries: maxRetries,
+		client:     &http.Client{},
 	}, nil
 }
 
@@ -152,22 +155,19 @@ func (e *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 		if err != nil {
 			return nil, fmt.Errorf("marshaling batch request: %w", err)
 		}
-		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, fmt.Errorf("creating batch request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if e.apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+e.apiKey)
-		}
-		resp, err := e.client.Do(req)
+		resp, respBytes, err := retryOn429(e.maxRetries, func() (*http.Response, error) {
+			req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+			if err != nil {
+				return nil, fmt.Errorf("creating batch request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if e.apiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+e.apiKey)
+			}
+			return e.client.Do(req)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("calling batch embeddings API: %w", err)
-		}
-		respBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("reading batch response: %w", err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("batch embeddings API error (status %d): %s", resp.StatusCode, string(respBytes))

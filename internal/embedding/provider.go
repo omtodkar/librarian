@@ -10,9 +10,9 @@ import (
 func NewEmbedder(cfg config.EmbeddingConfig) (Embedder, error) {
 	switch cfg.Provider {
 	case "gemini":
-		return NewGeminiEmbedder(cfg.APIKey, cfg.Model, cfg.BatchSize)
+		return NewGeminiEmbedder(cfg.APIKey, cfg.Model, cfg.BatchSize, cfg.MaxRetries)
 	case "openai":
-		return NewOpenAIEmbedder(cfg.BaseURL, cfg.Model, cfg.APIKey, cfg.BatchSize)
+		return NewOpenAIEmbedder(cfg.BaseURL, cfg.Model, cfg.APIKey, cfg.BatchSize, cfg.MaxRetries)
 	default:
 		return nil, fmt.Errorf("unknown embedding provider %q: supported providers are \"gemini\" and \"openai\"", cfg.Provider)
 	}

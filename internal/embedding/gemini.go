@@ -41,17 +41,18 @@ const geminiBatchMax = 100
 
 // GeminiEmbedder calls the Gemini :embedContent / :batchEmbedContents APIs.
 type GeminiEmbedder struct {
-	apiKey    string
-	model     string
-	batchSize int
-	client    *http.Client
+	apiKey     string
+	model      string
+	batchSize  int
+	maxRetries int
+	client     *http.Client
 }
 
 // NewGeminiEmbedder creates a GeminiEmbedder. Model defaults to
 // defaultGeminiModel when empty. apiKey falls back to GEMINI_API_KEY.
 // batchSize <= 0 resolves to defaultBatchSize; values above geminiBatchMax
-// clamp down.
-func NewGeminiEmbedder(apiKey, model string, batchSize int) (*GeminiEmbedder, error) {
+// clamp down. maxRetries controls 429 retry behavior (0 = disabled).
+func NewGeminiEmbedder(apiKey, model string, batchSize, maxRetries int) (*GeminiEmbedder, error) {
 	if apiKey == "" {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
@@ -62,10 +63,11 @@ func NewGeminiEmbedder(apiKey, model string, batchSize int) (*GeminiEmbedder, er
 		model = defaultGeminiModel
 	}
 	return &GeminiEmbedder{
-		apiKey:    apiKey,
-		model:     model,
-		batchSize: resolveBatchSize(batchSize, geminiBatchMax),
-		client:    &http.Client{},
+		apiKey:     apiKey,
+		model:      model,
+		batchSize:  resolveBatchSize(batchSize, geminiBatchMax),
+		maxRetries: maxRetries,
+		client:     &http.Client{},
 	}, nil
 }
 
@@ -206,14 +208,11 @@ func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 			return nil, fmt.Errorf("marshaling batch request: %w", err)
 		}
 
-		resp, err := e.client.Post(url, "application/json", bytes.NewReader(bodyBytes))
+		resp, respBytes, err := retryOn429(e.maxRetries, func() (*http.Response, error) {
+			return e.client.Post(url, "application/json", bytes.NewReader(bodyBytes))
+		})
 		if err != nil {
 			return nil, fmt.Errorf("calling Gemini batch API: %w", err)
-		}
-		respBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("reading batch response: %w", err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("Gemini batch API error (status %d): %s", resp.StatusCode, string(respBytes))
