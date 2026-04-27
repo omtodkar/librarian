@@ -844,8 +844,14 @@ func isSymbolKind(kind string) bool {
 		"rpc",            // Proto service RPC methods (lib-cym)
 		"message",        // Proto message declarations (lib-cym)
 		"oneof",          // Proto oneof declarations (lib-cym)
-		"typevar": // Python TypeVar declarations (lib-0pa.2)
-		"stage":   // Dockerfile build stage (lib-nf6)
+		"typevar",  // Python TypeVar declarations (lib-0pa.2)
+		"stage",    // Dockerfile build stage (lib-nf6)
+		"table",    // SQL CREATE TABLE (lib-do0)
+		"column",   // SQL column definition (lib-do0)
+		"index",    // SQL CREATE INDEX (lib-do0)
+		"view",     // SQL CREATE VIEW / MATERIALIZED VIEW (lib-do0)
+		"sequence", // SQL CREATE SEQUENCE (lib-do0)
+		"schema":   // SQL CREATE SCHEMA (lib-do0)
 		return true
 	}
 	return false
@@ -1285,20 +1291,13 @@ func graphTargetID(ref Reference) string {
 			return store.ExternalPackageNodeID(ref.Target)
 		}
 		return store.SymbolNodeID(ref.Target)
-	case "call", "inherits", "requires", "extends", "implements":
+	case "call", "inherits", "requires", "implements_rpc", "extends", "implements", "references":
 		// An inherits target with an "ext:" prefix is an external-package node
 		// (e.g. "ext:typing.NamedTuple" from lib-0pa.3). Route to
 		// ExternalPackageNodeID so the graph node lands in the right namespace.
 		if ref.Kind == "inherits" && strings.HasPrefix(ref.Target, "ext:") {
 			return store.ExternalPackageNodeID(strings.TrimPrefix(ref.Target, "ext:"))
 		}
-		return store.SymbolNodeID(ref.Target)
-	case "implements_rpc":
-		// Forward-compatibility scaffolding: no grammar currently emits
-		// Reference.Kind="implements_rpc" — the resolver uses store.UpsertEdge
-		// directly (see buildImplementsRPCEdges in implements_rpc.go). The case
-		// is kept so a future grammar that emits this kind routes correctly
-		// without a separate code change here.
 		return store.SymbolNodeID(ref.Target)
 	case "part":
 		return store.CodeFileNodeID(ref.Target)
@@ -1319,14 +1318,10 @@ func graphNodeKindFromRef(ref Reference) string {
 			return k
 		}
 		return store.NodeKindSymbol
-	case "call", "inherits", "requires", "extends", "implements":
+	case "call", "inherits", "requires", "implements_rpc", "extends", "implements", "references":
 		if ref.Kind == "inherits" && strings.HasPrefix(ref.Target, "ext:") {
 			return store.NodeKindExternal
 		}
-		return store.NodeKindSymbol
-	case "implements_rpc":
-		// Forward-compatibility scaffolding: no grammar currently emits
-		// Reference.Kind="implements_rpc" — see note in graphTargetID above.
 		return store.NodeKindSymbol
 	case "part":
 		return store.NodeKindCodeFile
