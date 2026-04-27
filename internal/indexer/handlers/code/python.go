@@ -522,7 +522,7 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 		}
 	case "call":
 		// `factory()` / `namedtuple(...)` — best-effort identifier fallback.
-		// Full handling of call-expression bases lives in lib-3xh.
+		// Full handling of call-expression bases lives in lib-0pa.3.
 		fn := c.ChildByFieldName("function")
 		if fn == nil {
 			return nil
