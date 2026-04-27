@@ -153,7 +153,10 @@ func (idx *Indexer) linkRPCImplementations(rpcPath, rpcSourcePath string) int {
 		{pkg + "." + svc + "." + lcMethod, "ts"},
 		// protoc-gen-grpc-web (Google): file stem is `{pkg}_grpc_web_pb` —
 		// stem-fallback drift because JS/TS modules have no package clause.
+		// Two class shapes per service: callback-based SvcClient and
+		// promise-based SvcPromiseClient.
 		{pkg + "_grpc_web_pb." + svc + "Client." + lcMethod, "ts"},
+		{pkg + "_grpc_web_pb." + svc + "PromiseClient." + lcMethod, "ts"},
 		// @improbable-eng/grpc-web (ts-protoc-gen): file stem `{pkg}_pb_service`.
 		{pkg + "_pb_service." + svc + "Client." + lcMethod, "ts"},
 	}

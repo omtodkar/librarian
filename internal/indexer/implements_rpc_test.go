@@ -2276,6 +2276,54 @@ message LoginReply {}
 	}
 }
 
+// TestImplementsRPC_GrpcWebPromiseClientLinks pins the promise-based client
+// shape emitted by protoc-gen-grpc-web: AuthServicePromiseClient (in addition
+// to AuthServiceClient) must link to its proto rpc via implements_rpc.
+// protoc-gen-grpc-web generates two class shapes per service — SvcClient
+// (callback-based) and SvcPromiseClient (promise-based) — both in the same
+// {pkg}_grpc_web_pb file. This test guards the SvcPromiseClient candidate
+// added by lib-bo0.
+func TestImplementsRPC_GrpcWebPromiseClientLinks(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`,
+		// Mirrors protoc-gen-grpc-web output: file stem auth_grpc_web_pb, class
+		// AuthServicePromiseClient with lowerCamelCase method login.
+		"gen/ts/api/auth_grpc_web_pb.ts": `export class AuthServicePromiseClient {
+  login(): void {}
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	want := store.SymbolNodeID("auth_grpc_web_pb.AuthServicePromiseClient.login")
+
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected exactly 1 implements_rpc edge; got %d: %+v", len(edges), edges)
+	}
+	if edges[0].From != want {
+		t.Errorf("edge source = %s, want %s", edges[0].From, want)
+	}
+}
+
 // splitLines splits s on newlines without the stdlib dependency on strings
 // package — a simple helper so the test body stays self-contained.
 func splitLines(s string) []string {
