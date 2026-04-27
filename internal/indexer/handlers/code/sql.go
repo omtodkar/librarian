@@ -132,7 +132,10 @@ func sqlExtractAll(root *sitter.Node, source []byte, doc *indexer.ParsedDoc) {
 			sqlExtractView(stmt, source, doc, false, migTool)
 		case "create_materialized_view":
 			sqlExtractView(stmt, source, doc, true, migTool)
-		case "create_function", "create_procedure":
+		case "create_function":
+			// Note: CREATE PROCEDURE is not supported by the DerekStride grammar
+			// (v0.3.11 emits ERROR for it). Procedure extraction deferred to a
+			// future grammar update.
 			sqlExtractFunction(stmt, source, doc, migTool)
 		case "create_sequence":
 			sqlExtractSequence(stmt, source, doc, migTool)

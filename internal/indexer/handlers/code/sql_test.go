@@ -17,6 +17,16 @@ import (
 // shared invariant harness exempts "sql_graph" from the title-prefix check
 // because there is no meaningful relationship between a migration filename stem
 // and the canonical schema-qualified symbol path.
+//
+// ALTER TABLE FK statements are deliberately excluded from this fixture.
+// ALTER TABLE emits References with Source = "public.orders.user_id" (column
+// path from a table defined in a prior migration), but the column Unit itself
+// only exists in the fixture that defines the table — not here. The invariant
+// harness checks that every non-empty Reference.Source matches a Unit.Path in
+// the SAME parsed doc, so a standalone ALTER TABLE would fail that check even
+// though the real graph will resolve the edge correctly via the multi-file
+// graph pass. Cross-file FK edges are covered by the dedicated ALTER TABLE
+// tests (TestSQLGrammar_AlterTableFKAddConstraint, etc.).
 func TestSQLGrammar_SatisfiesGrammarInvariants(t *testing.T) {
 	h := code.New(code.NewSQLGrammar())
 	src := []byte(`
@@ -370,6 +380,23 @@ CREATE FUNCTION add(a text, b text) RETURNS text LANGUAGE sql AS $$ SELECT a || 
 	}
 }
 
+// TestSQLGrammar_CreateProcedureSkippedGracefully documents that CREATE PROCEDURE
+// is not supported by the DerekStride tree-sitter-sql v0.3.11 grammar (the
+// grammar emits ERROR for it). The handler must not crash — it simply skips
+// the ERROR node and extracts nothing for the procedure. If grammar support is
+// added in a future version, this test should be updated to assert extraction.
+func TestSQLGrammar_CreateProcedureSkippedGracefully(t *testing.T) {
+	src := `CREATE PROCEDURE transfer(amount INT) LANGUAGE plpgsql AS $$ BEGIN UPDATE accounts SET balance = balance - amount; END; $$;`
+	doc := parseSQLDoc(t, "schema.sql", src)
+
+	// No crash, no procedure unit (grammar emits ERROR for CREATE PROCEDURE).
+	for _, u := range doc.Units {
+		if u.Kind == "function" && u.Title == "transfer" {
+			t.Errorf("unexpected procedure unit extracted; grammar doesn't support CREATE PROCEDURE in v0.3.11")
+		}
+	}
+}
+
 // ---------- CREATE SEQUENCE ----------
 
 func TestSQLGrammar_CreateSequence(t *testing.T) {
@@ -454,6 +481,16 @@ func TestSQLGrammar_MigrationDetection_Flyway(t *testing.T) {
 
 	if tool, _ := doc.Metadata["migration_tool"].(string); tool != "flyway" {
 		t.Errorf("migration_tool = %q, want %q", tool, "flyway")
+	}
+}
+
+func TestSQLGrammar_MigrationDetection_Sqlx(t *testing.T) {
+	src := `CREATE TABLE users (id SERIAL);`
+	// sqlx convention: migrations/001_create_users.sql (shorter numeric prefix, not 14 digits)
+	doc := parseSQLDoc(t, "migrations/001_create_users.sql", src)
+
+	if tool, _ := doc.Metadata["migration_tool"].(string); tool != "sqlx" {
+		t.Errorf("migration_tool = %q, want %q", tool, "sqlx")
 	}
 }
 

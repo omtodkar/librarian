@@ -193,3 +193,15 @@ func TestProbeSQLReferencesNoColumn(t *testing.T) {
 		})
 	}
 }
+
+func TestProbeSQLProcedure(t *testing.T) {
+	lang := sitter.NewLanguage(tree_sitter_sql.Language())
+	src := `CREATE PROCEDURE transfer(amount INT) LANGUAGE plpgsql AS $$ BEGIN UPDATE accounts SET balance = balance - amount; END; $$;`
+	parser := sitter.NewParser()
+	defer parser.Close()
+	_ = parser.SetLanguage(lang)
+	tree := parser.ParseCtx(context.Background(), []byte(src), nil)
+	defer tree.Close()
+	t.Logf("SQL: %s", src)
+	dumpNode(t, tree.RootNode(), []byte(src), 0)
+}
