@@ -905,6 +905,9 @@ func TestPythonGrammar_CallBase_UnknownFactory(t *testing.T) {
 	if v, _ := refs[0].Metadata["unresolved_expression"].(bool); !v {
 		t.Errorf("expected unresolved_expression=true; got metadata %+v", refs[0].Metadata)
 	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("call base should not carry unresolved=true: %+v", refs[0].Metadata)
+	}
 }
 
 func TestPythonGrammar_MetaclassKwargFiltered(t *testing.T) {
