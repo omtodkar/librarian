@@ -572,7 +572,7 @@ func buildTraceRPCDefinition(node *store.Node, projectRoot string) (traceRPCDefi
 		def.LineNumber = node.LineNumber
 		if node.SourcePath != "" {
 			abs := resolveTraceRPCPath(projectRoot, node.SourcePath)
-			if _, doc := scanTraceRPCDefinitionSite(abs, method); doc != "" {
+			if _, doc := scanTraceRPCDefinitionSite(abs, method); doc != "" { // line discarded: node.LineNumber is authoritative
 				def.Docstring = doc
 			}
 		}
