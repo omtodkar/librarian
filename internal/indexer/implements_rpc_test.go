@@ -2095,6 +2095,185 @@ message LoginReply {}
 	}
 }
 
+// TestImplementsRPC_GrpcWebManifestTightening verifies that when a buf.gen.yaml
+// manifest is present with a TS plugin output prefix, candidateWithinCodegenTree
+// correctly handles the _grpc_web_pb stem candidates:
+//   - in-tree file (under manifest prefix) links
+//   - out-of-tree file (outside prefix, no competing in-tree node) is dropped
+//
+// Two sub-fixtures are used because both files produce the same sym:id
+// (UpsertNode is last-write-wins); running them in separate dirs isolates each
+// path through the tightening check.
+func TestImplementsRPC_GrpcWebManifestTightening(t *testing.T) {
+	manifest := `version: v2
+plugins:
+  - remote: buf.build/bufbuild/es
+    out: gen/ts
+`
+	proto := `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`
+	stub := `export class AuthServiceClient {
+  login(): void {}
+}
+`
+
+	t.Run("InTreeLinks", func(t *testing.T) {
+		dir := t.TempDir()
+		writeImplementsRPCFixture(t, dir, map[string]string{
+			"buf.gen.yaml":                   manifest,
+			"api/auth.proto":                  proto,
+			"gen/ts/api/auth_grpc_web_pb.ts": stub,
+		})
+		idx, s := openImplementsRPCStore(t, dir)
+		if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+			t.Fatalf("IndexProjectGraph: %v", err)
+		}
+		target := store.SymbolNodeID("auth.AuthService.Login")
+		edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		if len(edges) == 0 {
+			t.Errorf("expected implements_rpc edge for in-tree auth_grpc_web_pb.ts; got none")
+		}
+	})
+
+	t.Run("OutOfTreeDropped", func(t *testing.T) {
+		dir := t.TempDir()
+		writeImplementsRPCFixture(t, dir, map[string]string{
+			"buf.gen.yaml":                        manifest,
+			"api/auth.proto":                       proto,
+			"handwritten/auth_grpc_web_pb.ts": stub,
+		})
+		idx, s := openImplementsRPCStore(t, dir)
+		if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+			t.Fatalf("IndexProjectGraph: %v", err)
+		}
+		target := store.SymbolNodeID("auth.AuthService.Login")
+		edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		if len(edges) != 0 {
+			t.Errorf("expected no edge for out-of-tree auth_grpc_web_pb.ts; got %d: %+v", len(edges), edges)
+		}
+	})
+}
+
+// TestImplementsRPC_ImprobableGrpcWebManifestTightening mirrors
+// TestImplementsRPC_GrpcWebManifestTightening for the _pb_service stem
+// (@improbable-eng/grpc-web / ts-protoc-gen): in-tree links, out-of-tree drops.
+func TestImplementsRPC_ImprobableGrpcWebManifestTightening(t *testing.T) {
+	manifest := `version: v2
+plugins:
+  - remote: buf.build/bufbuild/es
+    out: gen/ts
+`
+	proto := `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`
+	stub := `export class AuthServiceClient {
+  login(): void {}
+}
+`
+
+	t.Run("InTreeLinks", func(t *testing.T) {
+		dir := t.TempDir()
+		writeImplementsRPCFixture(t, dir, map[string]string{
+			"buf.gen.yaml":                  manifest,
+			"api/auth.proto":                 proto,
+			"gen/ts/api/auth_pb_service.ts": stub,
+		})
+		idx, s := openImplementsRPCStore(t, dir)
+		if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+			t.Fatalf("IndexProjectGraph: %v", err)
+		}
+		target := store.SymbolNodeID("auth.AuthService.Login")
+		edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		if len(edges) == 0 {
+			t.Errorf("expected implements_rpc edge for in-tree auth_pb_service.ts; got none")
+		}
+	})
+
+	t.Run("OutOfTreeDropped", func(t *testing.T) {
+		dir := t.TempDir()
+		writeImplementsRPCFixture(t, dir, map[string]string{
+			"buf.gen.yaml":                       manifest,
+			"api/auth.proto":                      proto,
+			"handwritten/auth_pb_service.ts": stub,
+		})
+		idx, s := openImplementsRPCStore(t, dir)
+		if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+			t.Fatalf("IndexProjectGraph: %v", err)
+		}
+		target := store.SymbolNodeID("auth.AuthService.Login")
+		edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		if len(edges) != 0 {
+			t.Errorf("expected no edge for out-of-tree auth_pb_service.ts; got %d: %+v", len(edges), edges)
+		}
+	})
+}
+
+// TestImplementsRPC_UnknownStemSuffixDoesNotLink pins that an unrecognised file
+// suffix (e.g. auth_wrong_suffix.ts) does not produce an implements_rpc edge.
+// This verifies the suffix list in the resolver is closed: only the known
+// suffixes (_grpc_web_pb, _pb_service) match; arbitrary decorations do not.
+func TestImplementsRPC_UnknownStemSuffixDoesNotLink(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth;
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+
+message LoginRequest {}
+message LoginReply {}
+`,
+		// Unknown suffix — should not match any resolver candidate.
+		"gen/ts/api/auth_wrong_suffix.ts": `export class AuthServiceClient {
+  login(): void {}
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	target := store.SymbolNodeID("auth.AuthService.Login")
+	edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Errorf("expected no implements_rpc edges for unknown suffix; got %d: %+v", len(edges), edges)
+	}
+}
+
 // splitLines splits s on newlines without the stdlib dependency on strings
 // package — a simple helper so the test body stays self-contained.
 func splitLines(s string) []string {
