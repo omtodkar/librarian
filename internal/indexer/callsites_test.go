@@ -231,6 +231,141 @@ export function handleAuth() {
 	}
 }
 
+// TestCallRPC_Destructuring_Renamed verifies that a destructured rename binding
+// (const { login: signIn } = createPromiseClient(...)) correctly links the call
+// site using the local name (signIn) to the proto rpc (AuthService.Login).
+func TestCallRPC_Destructuring_Renamed(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+message LoginRequest {}
+message LoginReply {}
+`,
+		"gen/ts/auth_connect.ts": `export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: {
+    login: { name: "Login" },
+  },
+} as const;
+`,
+		"src/auth_handler.ts": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../gen/ts/auth_connect";
+
+const transport = {};
+
+export function handleAuth() {
+  const { login: signIn } = createPromiseClient(AuthService, transport);
+  signIn({ user: "alice" });
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	callerID := store.SymbolNodeID("auth_handler.handleAuth")
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc, auth.v1.AuthService.Login): %v", err)
+	}
+	// Exactly one edge: guards against a dual-keying bug that would store both
+	// methodName and localName and emit two edges for the same call site.
+	if len(edges) != 1 {
+		t.Fatalf("expected exactly 1 call_rpc edge; got %d: %+v", len(edges), edges)
+	}
+	if edges[0].From != callerID {
+		t.Errorf("edge.From = %q, want %q", edges[0].From, callerID)
+	}
+
+	// Negative assertion: the original proto key "login" must NOT be used as a
+	// call-site lookup after the rename fix. The stub symbol node is keyed by
+	// the lowerCamelCase proto method name ("auth.v1.AuthService.login"), so if
+	// the old buggy key were still stored, a spurious edge would be emitted from
+	// a phantom caller named "login". Verify the incoming edge set is exactly the
+	// one we asserted above — no extra edges from phantom callers.
+	stubID := store.SymbolNodeID("auth.v1.AuthService.login")
+	stubEdges, err := s.Neighbors(stubID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc, auth.v1.AuthService.login): %v", err)
+	}
+	if len(stubEdges) != 0 {
+		t.Errorf("expected 0 call_rpc edges into stub node auth.v1.AuthService.login; got %d: %+v", len(stubEdges), stubEdges)
+	}
+}
+
+// TestCallRPC_Destructuring_MultiRenamed verifies that multiple renamed entries
+// in the same destructuring pattern (const { login: signIn, logout: doLogout } = ...)
+// each produce a call_rpc edge for their respective calls, locking the loop
+// behavior for N>1 renamed destructurings.
+func TestCallRPC_Destructuring_MultiRenamed(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+  rpc Logout (LogoutRequest) returns (LogoutReply);
+}
+message LoginRequest {}
+message LoginReply {}
+message LogoutRequest {}
+message LogoutReply {}
+`,
+		"gen/ts/auth_connect.ts": `export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: {
+    login: { name: "Login" },
+    logout: { name: "Logout" },
+  },
+} as const;
+`,
+		"src/auth_handler.ts": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../gen/ts/auth_connect";
+
+const transport = {};
+
+export function handleAuth() {
+  const { login: signIn, logout: doLogout } = createPromiseClient(AuthService, transport);
+  signIn({ user: "alice" });
+  doLogout({});
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	callerID := store.SymbolNodeID("auth_handler.handleAuth")
+	for _, tc := range []struct {
+		rpcPath string
+	}{
+		{"auth.v1.AuthService.Login"},
+		{"auth.v1.AuthService.Logout"},
+	} {
+		rpcID := store.SymbolNodeID(tc.rpcPath)
+		edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+		if err != nil {
+			t.Fatalf("Neighbors(call_rpc, %s): %v", tc.rpcPath, err)
+		}
+		// Exactly one edge per RPC: guards against a loop bug emitting duplicates.
+		if len(edges) != 1 {
+			t.Fatalf("%s: expected exactly 1 call_rpc edge; got %d: %+v", tc.rpcPath, len(edges), edges)
+		}
+		if edges[0].From != callerID {
+			t.Errorf("%s: edge.From = %q, want %q", tc.rpcPath, edges[0].From, callerID)
+		}
+	}
+}
+
 // TestCallRPC_CreateClientAPI verifies that the newer createClient API
 // produces the same edges as createPromiseClient.
 func TestCallRPC_CreateClientAPI(t *testing.T) {

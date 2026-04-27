@@ -442,7 +442,7 @@ func callSiteScanImports(root *sitter.Node, src []byte, index connectExportIndex
 // createPromiseClient / createClient call.
 //
 //   - clientVars:   varName → typeName (const client = createPromiseClient(...))
-//   - destructured: methodName → rpcPath (const { login } = createPromiseClient(...))
+//   - destructured: localName → rpcPath (const { login } = createPromiseClient(...); or { login: signIn } where localName is signIn)
 func callSiteCollectBindings(root *sitter.Node, src []byte, factories map[string]bool, bindings map[string]string) (clientVars, destructured map[string]string) {
 	clientVars = make(map[string]string)
 	destructured = make(map[string]string)
@@ -464,17 +464,23 @@ func callSiteCollectBindings(root *sitter.Node, src []byte, factories map[string
 				if prop == nil {
 					continue
 				}
-				var methodName string
+				var methodName, localName string
 				switch prop.Kind() {
 				case "shorthand_property_identifier_pattern":
 					methodName = prop.Utf8Text(src)
+					localName = methodName
 				case "pair_pattern":
 					if keyNode := prop.ChildByFieldName("key"); keyNode != nil {
 						methodName = keyNode.Utf8Text(src)
 					}
+					if valueNode := prop.ChildByFieldName("value"); valueNode != nil {
+						localName = valueNode.Utf8Text(src)
+					} else {
+						localName = methodName
+					}
 				}
-				if methodName != "" {
-					destructured[methodName] = typeName + "." + methodName
+				if methodName != "" && localName != "" {
+					destructured[localName] = typeName + "." + methodName
 				}
 			}
 		}
