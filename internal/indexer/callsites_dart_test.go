@@ -477,3 +477,122 @@ class UserHandler {
 		t.Errorf("edge.From = %q, want %q", edges[0].From, wantCaller)
 	}
 }
+
+// TestCallRPC_DartConstructorBodyBinding verifies that a binding established
+// inside a Dart constructor body (not a named method) is detected and the
+// call site inside a sibling method emits a call_rpc edge. Exercises the
+// assignment_expression path of dartExtractFieldAssignmentBinding from within
+// a constructor_signature / function_body pair.
+func TestCallRPC_DartConstructorBodyBinding(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto":            dartProtoFixtureAuth,
+		"gen/dart/auth.pbgrpc.dart": dartPbgrpcFixtureAuth,
+		// The binding is established in the constructor body (not init()).
+		// The call site is in a regular method.
+		"lib/auth_bloc.dart": `
+class AuthBloc {
+  late AuthServiceClient _client;
+
+  AuthBloc(dynamic channel) {
+    _client = AuthServiceClient(channel);
+  }
+
+  Future<void> login() async {
+    await _client.login(LoginRequest());
+  }
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected 1 call_rpc edge (constructor-body binding); got %d: %+v", len(edges), edges)
+	}
+	wantCaller := store.SymbolNodeID("auth_bloc.AuthBloc.login")
+	if edges[0].From != wantCaller {
+		t.Errorf("edge.From = %q, want %q", edges[0].From, wantCaller)
+	}
+}
+
+// TestCallRPC_DartStreamingCardinalityAllForms verifies that server-streaming,
+// client-streaming, and bidi-streaming RPCs all emit call_rpc edges — the
+// detector is cardinality-agnostic. This complements TestCallRPC_DartStreamingRPC
+// which only exercises the server-streaming form.
+func TestCallRPC_DartStreamingCardinalityAllForms(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/stream.proto": `syntax = "proto3";
+package stream.v1;
+service StreamService {
+  rpc ServerStream (Req) returns (stream Resp);
+  rpc ClientStream (stream Req) returns (Resp);
+  rpc BidiStream   (stream Req) returns (stream Resp);
+}
+message Req {}
+message Resp {}
+`,
+		// grpc-dart stub: library name matches proto package.
+		"gen/dart/stream.pbgrpc.dart": `library stream.v1;
+
+class StreamServiceClient {
+  StreamServiceClient(dynamic channel);
+  void serverStream(dynamic request) {}
+  void clientStream(dynamic request) {}
+  void bidiStream(dynamic request) {}
+}
+
+class StreamServiceBase {
+  void serverStream(dynamic request) {}
+  void clientStream(dynamic request) {}
+  void bidiStream(dynamic request) {}
+}
+`,
+		"lib/stream_service.dart": `
+class StreamPage {
+  void runAll(dynamic channel) {
+    final client = StreamServiceClient(channel);
+    client.serverStream(Req());
+    client.clientStream(Req());
+    client.bidiStream(Req());
+  }
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	callerID := store.SymbolNodeID("stream_service.StreamPage.runAll")
+	for _, rpcPath := range []string{
+		"stream.v1.StreamService.ServerStream",
+		"stream.v1.StreamService.ClientStream",
+		"stream.v1.StreamService.BidiStream",
+	} {
+		rpcID := store.SymbolNodeID(rpcPath)
+		edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+		if err != nil {
+			t.Fatalf("Neighbors(call_rpc, %s): %v", rpcPath, err)
+		}
+		found := false
+		for _, e := range edges {
+			if e.From == callerID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected call_rpc edge from %s to %s (streaming cardinality ignored); edges: %+v", callerID, rpcID, edges)
+		}
+	}
+}
