@@ -2034,14 +2034,11 @@ message LoginReply {}
 	if err != nil {
 		t.Fatalf("Neighbors: %v", err)
 	}
-	found := false
-	for _, e := range edges {
-		if e.From == want {
-			found = true
-		}
+	if len(edges) != 1 {
+		t.Fatalf("expected exactly 1 implements_rpc edge; got %d: %+v", len(edges), edges)
 	}
-	if !found {
-		t.Errorf("expected implements_rpc edge from %s to %s; got %+v", want, target, edges)
+	if edges[0].From != want {
+		t.Errorf("edge source = %s, want %s", edges[0].From, want)
 	}
 }
 
@@ -2084,14 +2081,11 @@ message LoginReply {}
 	if err != nil {
 		t.Fatalf("Neighbors: %v", err)
 	}
-	found := false
-	for _, e := range edges {
-		if e.From == want {
-			found = true
-		}
+	if len(edges) != 1 {
+		t.Fatalf("expected exactly 1 implements_rpc edge; got %d: %+v", len(edges), edges)
 	}
-	if !found {
-		t.Errorf("expected implements_rpc edge from %s to %s; got %+v", want, target, edges)
+	if edges[0].From != want {
+		t.Errorf("edge source = %s, want %s", edges[0].From, want)
 	}
 }
 
