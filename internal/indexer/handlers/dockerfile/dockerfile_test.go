@@ -1002,6 +1002,11 @@ func TestGraphPass_ScratchBase(t *testing.T) {
 	if len(extRefs) != 0 {
 		t.Errorf("expected no external import refs for scratch, got %d", len(extRefs))
 	}
+	// COPY --from=0 in a single-stage Dockerfile resolves to a self-loop — must be dropped.
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 0 {
+		t.Errorf("expected no copy-from edges for scratch-base, got %d", len(copyEdges))
+	}
 }
 
 // TestGraphPass_StageLineNumbers verifies that stage Units carry the correct

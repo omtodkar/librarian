@@ -73,7 +73,7 @@ func (*Handler) Parse(path string, content []byte) (*indexer.ParsedDoc, error) {
 	// Append graph-pass stage Units and References (v2).
 	graphUnits, graphRefs := parseStageGraph(raw)
 	doc.Units = append(doc.Units, graphUnits...)
-	doc.Refs = graphRefs
+	doc.Refs = append(doc.Refs, graphRefs...)
 
 	return doc, nil
 }
@@ -353,8 +353,10 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 				Target:   parentPath,
 				Metadata: map[string]any{"relation": "stage"},
 			})
-		} else if parentPath, ok := stageByRawName[baseNameOnly]; ok {
+		} else if parentPath, ok := stageByRawName[baseNameOnly]; ok && !strings.Contains(lowerBase, "/") {
 			// Match after stripping the tag — handles `FROM builder:latest AS x`.
+			// Gate on no "/" so qualified image paths (myuser/app:v1) don't
+			// accidentally match a stage whose name equals the image base name.
 			refs = append(refs, indexer.Reference{
 				Kind:     "inherits",
 				Source:   s.name,
@@ -382,7 +384,9 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 		} else if p, ok := stageByIdx[lowerRef]; ok {
 			targetPath = p
 		}
-		if targetPath == "" {
+		if targetPath == "" || targetPath == c.fromStage {
+			// Skip missing targets and self-loops (e.g. FROM scratch + COPY --from=0
+			// in a single-stage Dockerfile resolves to the stage copying from itself).
 			continue
 		}
 		refs = append(refs, indexer.Reference{
