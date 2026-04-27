@@ -57,19 +57,35 @@ func TestHandler_FilenameRegistration(t *testing.T) {
 	}
 }
 
-// TestHandler_FilenameRegistration_NegativeCases checks files that should NOT match.
+// TestHandler_FilenameRegistration_NegativeCases checks files that should NOT match
+// the dockerfile handler. Uses two sub-checks:
+//   - paths that have their own handler (e.g. .yml → yaml) must return a non-dockerfile handler
+//   - paths that go through the filename-glob fallback path must return nil (no handler at all)
 func TestHandler_FilenameRegistration_NegativeCases(t *testing.T) {
 	reg := indexer.DefaultRegistry()
 
-	notDockerfile := []string{
-		"docker-compose.yml", // YAML handler, not dockerfile
-		"Makefile",
-		"notadockerfile.txt",
+	// Paths that have a real handler but not the dockerfile one.
+	hasOtherHandler := []string{
+		"docker-compose.yml", // YAML handler
 	}
-	for _, path := range notDockerfile {
+	for _, path := range hasOtherHandler {
 		h := reg.HandlerFor(path)
 		if h != nil && h.Name() == "dockerfile" {
 			t.Errorf("HandlerFor(%q) unexpectedly returned dockerfile handler", path)
+		}
+	}
+
+	// Paths with no registered handler at all — must return nil, not the dockerfile handler.
+	// These exercise the filename-glob fallback path to confirm it doesn't over-match.
+	noHandler := []string{
+		"Makefile",          // no handler registered
+		"notadockerfile.txt", // .txt has no handler
+		"main.go",           // Go has a handler but the glob "Dockerfile*" must not fire
+	}
+	for _, path := range noHandler {
+		h := reg.HandlerFor(path)
+		if h != nil && h.Name() == "dockerfile" {
+			t.Errorf("HandlerFor(%q) returned dockerfile handler via filename-glob, want no match", path)
 		}
 	}
 }
@@ -507,5 +523,44 @@ CMD ["/server"]`
 	}
 	if len(chunks) != 2 {
 		t.Errorf("expected 2 chunks for 2 unnamed stages, got %d", len(chunks))
+	}
+}
+
+// TestHandler_ChunkFallback_EmptyUnits exercises the Chunk() raw-content fallback path:
+// when doc.Units is empty (no stage sections), ChunkSections falls back to emitting a
+// single chunk keyed on the whole raw content. This is intentional v1 behavior —
+// documented in splitIntoStageUnits's defensive empty-content guard.
+//
+// Note: Parse() always produces at least one unit per FROM line (since each stage slice
+// includes the FROM line itself). The only way to reach this Chunk() fallback via
+// normal Parse() is an empty file (tested by TestHandler_EmptyFile). This test
+// constructs a ParsedDoc directly with zero units to exercise the fallback path in
+// isolation and confirm it produces exactly one raw-content chunk.
+func TestHandler_ChunkFallback_EmptyUnits(t *testing.T) {
+	h := dockerfilehandler.New()
+	// Enough raw content to exceed MinTokens=50 so the fallback chunk is actually emitted.
+	rawContent := "FROM golang:1.22 AS builder\n# Build stage with no explicit body lines beyond FROM\n" +
+		"# This raw content is used to verify that Chunk() falls back to a single raw-content chunk\n" +
+		"# when no section Units are provided. Intentional v1 behavior per splitIntoStageUnits.\n"
+
+	doc := &indexer.ParsedDoc{
+		Path:       "Dockerfile",
+		Format:     "dockerfile",
+		Title:      "Dockerfile",
+		DocType:    "dockerfile",
+		RawContent: rawContent,
+		Units:      nil, // explicitly no units → triggers ChunkSections raw-content fallback
+	}
+
+	chunks, err := h.Chunk(doc, indexer.DefaultChunkConfig())
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Errorf("expected 1 raw-content fallback chunk for empty units, got %d", len(chunks))
+		return
+	}
+	if !strings.Contains(chunks[0].Content, "FROM golang") {
+		t.Error("raw-content fallback chunk should contain the original raw content")
 	}
 }

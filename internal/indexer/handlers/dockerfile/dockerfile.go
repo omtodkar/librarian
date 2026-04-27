@@ -126,6 +126,13 @@ func splitIntoStageUnits(src string) []indexer.Unit {
 
 		content := strings.TrimSpace(strings.Join(lines[startLine:endLine], "\n"))
 		if content == "" {
+			// Defensive guard: in practice this branch is unreachable in v1 because
+			// every stage slice includes at least its own FROM line (always non-empty).
+			// Kept for robustness against future refactors that might separate the FROM
+			// line from the stage body. If all units are dropped by this path, Chunk()
+			// receives a doc with no units and ChunkSections falls back to a single
+			// raw-content chunk — intentional v1 behavior, tested by
+			// TestHandler_ChunkFallback_EmptyUnits.
 			continue
 		}
 
