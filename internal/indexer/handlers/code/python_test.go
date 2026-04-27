@@ -1968,6 +1968,9 @@ func TestPEP695_ClassWithBound(t *testing.T) {
 	if sc, _ := u.Metadata["scope"].(string); sc != "class" {
 		t.Errorf("scope = %q, want class", sc)
 	}
+	if v, _ := u.Metadata["variance"].(string); v != "invariant" {
+		t.Errorf("variance = %q, want invariant", v)
+	}
 }
 
 func TestPEP695_ClassWithConstraints(t *testing.T) {
@@ -2151,6 +2154,7 @@ func TestPEP695_LEGB_NestedClassUsesOuterClassScopeTypeParam(t *testing.T) {
 	// so no inherits refs are produced from them — making a method-body test
 	// structurally impossible with the current design. The nested-class variant
 	// is the only reachable form of this scope-chain resolution.
+	// Tracked for when function-body descent is added: lib-j3g.
 	//
 	// class Outer[T]:
 	//     class Inner(Generic[T]):
@@ -2294,6 +2298,73 @@ func TestPEP695_FunctionBodyNestedClassNotDescended(t *testing.T) {
 		if strings.HasPrefix(u.Path, "mymod.factory.Inner.") {
 			t.Errorf("unexpected TypeVar unit for function-body-nested class: %+v", u)
 		}
+	}
+}
+
+func TestPEP695_ClassUsesOwnTypeVarInGenericBase(t *testing.T) {
+	// class Foo[T](Generic[T]): — Foo uses its own PEP 695 TypeVar T in its
+	// own Generic base list. This exercises the i==len(parts) case of
+	// lookupTypeVar's scope-chain walk, where source "mymod.Foo" strips to
+	// localPath "Foo" and the first scope tried is "Foo.T" (own scope hit).
+	src := []byte("class Foo[T](Generic[T]):\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	fooT := findTypeVarUnit(doc, "T")
+	if fooT == nil {
+		t.Fatalf("expected typevar unit T; units: %+v", typeVarUnits(doc))
+	}
+	if fooT.Path != "mymod.Foo.T" {
+		t.Errorf("T Path = %q, want mymod.Foo.T", fooT.Path)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected Generic inherits ref from Foo; refs: %+v", refs)
+	}
+	resolved, _ := genericRef.Metadata["type_args_resolved"].([]string)
+	if len(resolved) != 1 || resolved[0] != "sym:mymod.Foo.T" {
+		t.Errorf("type_args_resolved = %v, want [sym:mymod.Foo.T]", resolved)
+	}
+}
+
+func TestPEP695_MultiTypeVarResolution(t *testing.T) {
+	// class Foo[T, U](Generic[T, U]): — both TypeVars resolve simultaneously.
+	// Verifies that lookupTypeVar handles multiple args in a single inherits ref.
+	src := []byte("class Foo[T, U](Generic[T, U]):\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "mymod.Foo")
+	var genericRef *indexer.Reference
+	for i := range refs {
+		if strings.Contains(refs[i].Target, "Generic") {
+			genericRef = &refs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected Generic inherits ref from Foo; refs: %+v", refs)
+	}
+	resolved, _ := genericRef.Metadata["type_args_resolved"].([]string)
+	if len(resolved) != 2 {
+		t.Fatalf("expected 2 resolved args; got %v", resolved)
+	}
+	if resolved[0] != "sym:mymod.Foo.T" {
+		t.Errorf("resolved[0] = %q, want sym:mymod.Foo.T", resolved[0])
+	}
+	if resolved[1] != "sym:mymod.Foo.U" {
+		t.Errorf("resolved[1] = %q, want sym:mymod.Foo.U", resolved[1])
 	}
 }
 
