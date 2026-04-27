@@ -110,7 +110,7 @@ type dartCallSiteEdge struct {
 // Dart client symbol nodes and their implements_rpc edges exist when this
 // resolver probes them.
 func (idx *Indexer) buildDartCallRPCEdges(result *GraphResult) {
-	registry, err := idx.buildDartClientRegistry()
+	registry, err := idx.buildDartClientRegistry(result)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("callsites_dart_rpc: build registry: %s", err))
 		return
@@ -174,7 +174,11 @@ func (idx *Indexer) buildDartCallRPCEdges(result *GraphResult) {
 // buildDartClientRegistry queries the store for all proto rpc nodes, follows
 // their incoming implements_rpc edges, and returns a registry of Dart-generated
 // client classes. Only symbol nodes with a .dart source path contribute.
-func (idx *Indexer) buildDartClientRegistry() (dartClientRegistry, error) {
+//
+// Neighbors errors per rpc node are surfaced as non-fatal warnings on result
+// rather than silently swallowed, so store I/O failures during registry
+// building are visible in the CLI output alongside other graph-pass diagnostics.
+func (idx *Indexer) buildDartClientRegistry(result *GraphResult) (dartClientRegistry, error) {
 	rpcNodes, err := idx.store.ListSymbolNodesWithMetadataContaining(protoRPCMetadataMarker)
 	if err != nil {
 		return nil, fmt.Errorf("list rpc nodes: %w", err)
@@ -184,6 +188,7 @@ func (idx *Indexer) buildDartClientRegistry() (dartClientRegistry, error) {
 	for _, rpcNode := range rpcNodes {
 		impls, err := idx.store.Neighbors(rpcNode.ID, "in", store.EdgeKindImplementsRPC)
 		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("callsites_dart_rpc: neighbors(%s): %s", rpcNode.ID, err))
 			continue
 		}
 		for _, impl := range impls {
@@ -301,6 +306,10 @@ func dartCollectBindings(root *sitter.Node, src []byte, registry dartClientRegis
 		case "getter_signature":
 			// getter_signature is a child of method_signature.
 			// The adjacent sibling of method_signature in class_body is function_body.
+			// Scan forward through named siblings (skipping over any annotation nodes
+			// that tree-sitter-dart may emit between method_signature and function_body
+			// for annotated getters like `@override FooClient get _c => ...`) until
+			// function_body is found or a new method_signature is encountered.
 			getterName := dartGetterName(n, src)
 			if getterName == "" {
 				break
@@ -309,8 +318,18 @@ func dartCollectBindings(root *sitter.Node, src []byte, registry dartClientRegis
 			if ms == nil || ms.Kind() != "method_signature" {
 				break
 			}
-			fb := ms.NextNamedSibling()
-			if fb == nil || fb.Kind() != "function_body" {
+			var fb *sitter.Node
+			for sib := ms.NextNamedSibling(); sib != nil; sib = sib.NextNamedSibling() {
+				if sib.Kind() == "function_body" {
+					fb = sib
+					break
+				}
+				// A new method_signature means we've passed the body boundary.
+				if sib.Kind() == "method_signature" {
+					break
+				}
+			}
+			if fb == nil {
 				break
 			}
 			className := dartGetterConstructorClass(fb, src)
