@@ -60,13 +60,14 @@ func TestHandler_FilenameRegistration(t *testing.T) {
 // TestHandler_FilenameRegistration_NegativeCases checks files that should NOT match
 // the dockerfile handler. Uses two sub-checks:
 //   - paths that have their own handler (e.g. .yml → yaml) must return a non-dockerfile handler
-//   - paths that go through the filename-glob fallback path must return nil (no handler at all)
+//   - paths with no handler at all must return nil — the filename-glob must not over-match
 func TestHandler_FilenameRegistration_NegativeCases(t *testing.T) {
 	reg := indexer.DefaultRegistry()
 
-	// Paths that have a real handler but not the dockerfile one.
+	// Paths that have a real handler but it must not be the dockerfile handler.
 	hasOtherHandler := []string{
 		"docker-compose.yml", // YAML handler
+		"main.go",            // Go code handler
 	}
 	for _, path := range hasOtherHandler {
 		h := reg.HandlerFor(path)
@@ -75,17 +76,17 @@ func TestHandler_FilenameRegistration_NegativeCases(t *testing.T) {
 		}
 	}
 
-	// Paths with no registered handler at all — must return nil, not the dockerfile handler.
-	// These exercise the filename-glob fallback path to confirm it doesn't over-match.
+	// Paths with no registered handler at all — must return nil.
+	// These specifically exercise the filename-glob fallback path to confirm it
+	// doesn't over-match (e.g. "Makefile" must not match the "Dockerfile*" globs).
 	noHandler := []string{
-		"Makefile",          // no handler registered
+		"Makefile",           // no handler registered
 		"notadockerfile.txt", // .txt has no handler
-		"main.go",           // Go has a handler but the glob "Dockerfile*" must not fire
 	}
 	for _, path := range noHandler {
 		h := reg.HandlerFor(path)
-		if h != nil && h.Name() == "dockerfile" {
-			t.Errorf("HandlerFor(%q) returned dockerfile handler via filename-glob, want no match", path)
+		if h != nil {
+			t.Fatalf("HandlerFor(%q) = %q, expected nil handler", path, h.Name())
 		}
 	}
 }
@@ -523,6 +524,30 @@ CMD ["/server"]`
 	}
 	if len(chunks) != 2 {
 		t.Errorf("expected 2 chunks for 2 unnamed stages, got %d", len(chunks))
+	}
+}
+
+// TestHandler_FromScratch_NoBody verifies that a minimal Dockerfile with a single
+// FROM line and no body instructions (empty stage body) does not panic and produces
+// a valid ParsedDoc with at least one unit. Exercises the empty-body case directly
+// via Parse(); the stage content is just the FROM line itself.
+func TestHandler_FromScratch_NoBody(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM scratch\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: unexpected error: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("Parse returned nil doc")
+	}
+	if doc.Format != "dockerfile" {
+		t.Errorf("Format = %q, want dockerfile", doc.Format)
+	}
+	// One unit expected: the stage whose content is the FROM line.
+	if len(doc.Units) != 1 {
+		t.Errorf("expected 1 Unit for single FROM-only Dockerfile, got %d", len(doc.Units))
 	}
 }
 
