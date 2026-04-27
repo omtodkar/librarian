@@ -639,13 +639,6 @@ message Msg {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // Shared structural invariants apply to every grammar — running them on
 // the proto sample guards against Unit.Path / Kind / Title shape drift.
 func TestProtoGrammar_SatisfiesGrammarInvariants(t *testing.T) {
