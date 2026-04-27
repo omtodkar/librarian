@@ -364,6 +364,19 @@ export function handleAuth() {
 			t.Errorf("%s: edge.From = %q, want %q", tc.rpcPath, edges[0].From, callerID)
 		}
 	}
+
+	// Negative assertions: the original proto keys ("login", "logout") must NOT
+	// be stored as call-site lookup keys after the rename fix.
+	for _, stubPath := range []string{"auth.v1.AuthService.login", "auth.v1.AuthService.logout"} {
+		stubID := store.SymbolNodeID(stubPath)
+		stubEdges, err := s.Neighbors(stubID, "in", store.EdgeKindCallRPC)
+		if err != nil {
+			t.Fatalf("Neighbors(call_rpc, %s): %v", stubPath, err)
+		}
+		if len(stubEdges) != 0 {
+			t.Errorf("expected 0 call_rpc edges into stub node %s; got %d: %+v", stubPath, len(stubEdges), stubEdges)
+		}
+	}
 }
 
 // TestCallRPC_CreateClientAPI verifies that the newer createClient API
