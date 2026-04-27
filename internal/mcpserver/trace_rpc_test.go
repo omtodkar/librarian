@@ -1933,7 +1933,7 @@ service TypedSvc {
 // caller node has LineNumber > 0 (fresh index after lib-r4s.5), the
 // persisted value is used directly — scanTraceRPCMethodLine is NOT called.
 // We verify by UpsertNode-ing the caller with a sentinel LineNumber (9999)
-// that the file scan could never produce for `function Page()` on line ~8.
+// that the file scan could never produce for `function Page()` on line 6.
 // If the fast path is bypassed, the result would be a real file-scanned
 // value (≠ 9999), causing the assertion to fail.
 func TestTraceRPC_CallerLineNumber_FastPath_CallRPC(t *testing.T) {
@@ -1970,7 +1970,7 @@ export default function Page() {
 	s := openTraceRPCStore(t, dir)
 
 	// Override the caller node's LineNumber with a sentinel (9999) that the
-	// file scan would never produce — the real `function Page` is at line ~8.
+	// file scan would never produce — the real `function Page` is at line 6.
 	callerID := store.SymbolNodeID("page.Page")
 	callerNode, err := s.GetNode(callerID)
 	if err != nil || callerNode == nil {
