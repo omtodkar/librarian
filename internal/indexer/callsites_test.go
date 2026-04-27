@@ -500,6 +500,110 @@ export function Page() {
 	}
 }
 
+// TestCallRPC_CrossFileDestructuredExportExcluded pins that a destructured
+// export (export const { login } = createPromiseClient(...)) is intentionally
+// excluded from the pre-pass export map. The pre-pass only handles identifier
+// LHS bindings; object_pattern LHS is dropped. This is documented in the
+// known limitations section.
+func TestCallRPC_CrossFileDestructuredExportExcluded(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+message LoginRequest {}
+message LoginReply {}
+`,
+		"gen/ts/auth_connect.ts": `export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: { login: { name: "Login" } },
+} as const;
+`,
+		// lib/methods.ts: destructured export — excluded from pre-pass by design.
+		"lib/methods.ts": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../gen/ts/auth_connect";
+const transport = {};
+export const { login } = createPromiseClient(AuthService, transport);
+`,
+		// app/page.tsx imports the destructured method — no cross-file edge expected.
+		"app/page.tsx": `import { login } from "../lib/methods";
+
+export function Page() {
+  return login({});
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc): %v", err)
+	}
+	if len(edges) != 0 {
+		t.Errorf("destructured export: expected 0 cross-file call_rpc edges; got %d: %+v", len(edges), edges)
+	}
+}
+
+// TestCallRPC_CrossFileChainedReexportNotLinked pins the known limitation:
+// chained re-exports (lib/index.ts re-exports from lib/clients.ts) are NOT
+// followed by the pre-pass. Only the file with the direct factory call is
+// indexed into clientExports.
+func TestCallRPC_CrossFileChainedReexportNotLinked(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+message LoginRequest {}
+message LoginReply {}
+`,
+		"gen/ts/auth_connect.ts": `export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: { login: { name: "Login" } },
+} as const;
+`,
+		// lib/clients.ts: direct factory call and export.
+		"lib/clients.ts": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../gen/ts/auth_connect";
+const transport = {};
+export const authClient = createPromiseClient(AuthService, transport);
+`,
+		// lib/index.ts: re-exports authClient — chained re-export, NOT in pre-pass.
+		"lib/index.ts": `export { authClient } from "./clients";
+`,
+		// app/page.tsx imports from the chained re-export, NOT from the direct source.
+		"app/page.tsx": `import { authClient } from "../lib/index";
+
+export function Page() {
+  return authClient.login({});
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc): %v", err)
+	}
+	if len(edges) != 0 {
+		t.Errorf("chained re-export: expected 0 call_rpc edges (known limitation); got %d: %+v", len(edges), edges)
+	}
+}
+
 // TestCallRPC_AnonymousEnclosure documents the skip rule: a call site inside
 // an anonymous enclosure (e.g. inline JSX arrow prop or module-level IIFE)
 // that has no named ancestor function does NOT produce an edge.

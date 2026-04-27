@@ -125,7 +125,8 @@ func TestStatIsFile_AcceptsRegularFile(t *testing.T) {
 }
 
 func TestStatIsFile_ReturnsFalseForMissing(t *testing.T) {
-	if StatIsFile("/tmp/this_path_should_not_exist_librarian_test.ts") {
-		t.Error("StatIsFile returned true for a non-existent path")
+	absent := filepath.Join(t.TempDir(), "absent.ts")
+	if StatIsFile(absent) {
+		t.Errorf("StatIsFile returned true for non-existent path %q", absent)
 	}
 }
