@@ -352,7 +352,10 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 		}
 
 		if parentPath, ok := stageByRawName[lowerBase]; ok {
-			// Exact match on a local stage name.
+			// Exact match: lowerBase is the full image string including any tag
+			// (e.g. "builder" or "builder:latest"). A stage name never includes
+			// a tag, so this branch only fires when the FROM line references a
+			// stage by its bare name — the common case for stage-to-stage deps.
 			refs = append(refs, indexer.Reference{
 				Kind:     "inherits",
 				Source:   s.name,
@@ -360,9 +363,10 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 				Metadata: map[string]any{"relation": "stage"},
 			})
 		} else if parentPath, ok := stageByRawName[baseNameOnly]; ok && !strings.Contains(lowerBase, "/") {
-			// Match after stripping the tag — handles `FROM builder:latest AS x`.
-			// Gate on no "/" so qualified image paths (myuser/app:v1) don't
-			// accidentally match a stage whose name equals the image base name.
+			// Tag-stripped fallback: handles `FROM builder:latest AS x` where the
+			// stage was declared as `FROM … AS builder` (no tag). The no-slash gate
+			// is correct because Docker stage names cannot contain slashes — any
+			// slash means the ref is a registry path, not a stage name.
 			refs = append(refs, indexer.Reference{
 				Kind:     "inherits",
 				Source:   s.name,
