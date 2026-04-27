@@ -193,7 +193,7 @@ func registerTraceRPC(s *server.MCPServer, st *store.Store, cfg *config.Config) 
 //
 // projectRoot resolves SourcePath (workspace-relative) to absolute paths for
 // best-effort proto-file reads. Empty → filepath.Abs on SourcePath (i.e. CWD).
-func runTraceRPC(st *store.Store, projectRoot, rpcInput string) (*traceRPCResult, error) {
+func runTraceRPC(st storeReader, projectRoot, rpcInput string) (*traceRPCResult, error) {
 	rpcInput = strings.TrimSpace(rpcInput)
 	if rpcInput == "" {
 		return nil, fmt.Errorf("trace_rpc: empty rpc input")
@@ -233,12 +233,6 @@ func runTraceRPC(st *store.Store, projectRoot, rpcInput string) (*traceRPCResult
 	for _, e := range impls {
 		implNode, err := st.GetNode(e.From)
 		if err != nil {
-			// Defensive: unreachable under current sqlite semantics —
-			// store.GetNode normalises sql.ErrNoRows to (nil, nil), so the
-			// error branch fires only on driver-layer I/O failures (disk
-			// corruption, mid-query close) we can't trigger from
-			// single-process tests without a storeReader interface seam.
-			// Tracked as lib-edm.
 			result.Warnings = append(result.Warnings, fmt.Sprintf("trace_rpc: failed to load implementation node %s: %v", e.From, err))
 			continue
 		}
@@ -357,7 +351,7 @@ func runTraceRPC(st *store.Store, projectRoot, rpcInput string) (*traceRPCResult
 // single failed Neighbors or GetNode should not wipe the whole caller trace
 // when other branches are healthy. The BFS is bounded so an unexpectedly
 // dense call graph can't blow memory — seen[] dedupes revisits.
-func walkTraceRPCCallers(st *store.Store, seeds []string, maxDepth int, projectRoot string, warnings *[]string) []traceRPCCaller {
+func walkTraceRPCCallers(st storeReader, seeds []string, maxDepth int, projectRoot string, warnings *[]string) []traceRPCCaller {
 	if maxDepth <= 0 {
 		return nil
 	}
@@ -388,12 +382,6 @@ func walkTraceRPCCallers(st *store.Store, seeds []string, maxDepth int, projectR
 				seen[e.From] = true
 				callerNode, err := st.GetNode(e.From)
 				if err != nil {
-					// Defensive: unreachable under current sqlite semantics —
-					// store.GetNode normalises sql.ErrNoRows to (nil, nil),
-					// so this branch only fires on driver-layer I/O failures
-					// (disk corruption, mid-query close) that aren't
-					// triggerable from single-process tests without a
-					// storeReader interface seam. Tracked as lib-edm.
 					*warnings = append(*warnings, fmt.Sprintf("trace_rpc: failed to load caller node %s: %v", e.From, err))
 					continue
 				}
@@ -722,7 +710,7 @@ func findTraceRPCRelated(rpcPath string, candidates []store.Node) []traceRPCRela
 // or fully-qualified with a leading dot (".auth.LoginRequest"). The resolver
 // prefers an exact match on the package the rpc itself lives in; when the
 // typeRef is absolute it takes precedence.
-func resolveTraceRPCMessage(st *store.Store, rpcPackage, typeRef string) traceRPCMessage {
+func resolveTraceRPCMessage(st storeReader, rpcPackage, typeRef string) traceRPCMessage {
 	fq := resolveTraceRPCTypeFQ(rpcPackage, typeRef)
 	return resolveTraceRPCMessageFQ(st, fq, typeRef, 0)
 }
@@ -742,7 +730,7 @@ func resolveTraceRPCMessage(st *store.Store, rpcPackage, typeRef string) traceRP
 // groups are legacy and rare; downstream consumers can detect the
 // duplication by matching Field.Name against NestedMessage.TypeName. If
 // this becomes load-bearing for any caller, bead a follow-up to dedupe.
-func resolveTraceRPCMessageFQ(st *store.Store, fq, displayName string, depth int) traceRPCMessage {
+func resolveTraceRPCMessageFQ(st storeReader, fq, displayName string, depth int) traceRPCMessage {
 	msg := traceRPCMessage{
 		TypeName:       displayName,
 		FullyQualified: fq,

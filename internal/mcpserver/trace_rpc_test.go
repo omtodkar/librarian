@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,22 @@ import (
 	_ "librarian/internal/indexer/handlers/defaults" // register handlers
 	"librarian/internal/store"
 )
+
+// errGetNodeReader wraps a storeReader and returns a configured error from
+// GetNode for specific node IDs. All other methods delegate unchanged. Used
+// to exercise the GetNode I/O-error branches that are unreachable via a real
+// SQLite store (which normalises sql.ErrNoRows to (nil, nil)).
+type errGetNodeReader struct {
+	storeReader
+	errIDs map[string]error
+}
+
+func (e *errGetNodeReader) GetNode(id string) (*store.Node, error) {
+	if err, ok := e.errIDs[id]; ok {
+		return nil, err
+	}
+	return e.storeReader.GetNode(id)
+}
 
 // traceRPCEmbedder satisfies the indexer's Embedder interface for tests that
 // only exercise the graph pass — vector contents are irrelevant here.
@@ -1596,6 +1613,159 @@ func (s *AuthServiceServer) Login() error { return nil }
 	}
 	if ghostWarnings != 1 {
 		t.Errorf("expected exactly 1 warning for dangling ghost node (m7: bad nodes must not be queued); got %d in %v", ghostWarnings, warnings)
+	}
+}
+
+// TestTraceRPC_GetNodeError_ImplementationNode pins the GetNode I/O-error
+// branch in runTraceRPC's implements_rpc loop. The branch fires when GetNode
+// returns a non-nil error (driver-layer failure), not the (nil, nil) not-found
+// signal. We inject a dangling implements_rpc edge via a FK-off connection and
+// wrap the store with errGetNodeReader to make GetNode fail for that node.
+func TestTraceRPC_GetNodeError_ImplementationNode(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": crossLanguageProto,
+	})
+	s := openTraceRPCStore(t, dir)
+
+	rpcID := store.SymbolNodeID("auth.AuthService.Login")
+	fakeID := "sym:fake.FakeImpl.login"
+
+	dbPath := filepath.Join(dir, ".librarian", "trace-rpc-test.db")
+	rawDB, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=0")
+	if err != nil {
+		t.Fatalf("open fk-off conn: %v", err)
+	}
+	defer rawDB.Close()
+	if _, err := rawDB.Exec(
+		`INSERT INTO graph_edges (from_node, to_node, kind, weight, metadata) VALUES (?, ?, ?, 1, '{}')`,
+		fakeID, rpcID, store.EdgeKindImplementsRPC,
+	); err != nil {
+		t.Fatalf("insert fake implements_rpc edge: %v", err)
+	}
+
+	mock := &errGetNodeReader{
+		storeReader: s,
+		errIDs:      map[string]error{fakeID: errors.New("simulated I/O error")},
+	}
+
+	result, err := runTraceRPC(mock, dir, "auth.AuthService.Login")
+	if err != nil {
+		t.Fatalf("runTraceRPC: %v", err)
+	}
+
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, fakeID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning for GetNode I/O error on %q; got %v", fakeID, result.Warnings)
+	}
+}
+
+// TestTraceRPC_GetNodeError_CallerNode pins the GetNode I/O-error branch
+// inside walkTraceRPCCallers. A dangling `call` edge is injected via FK-off
+// and the store is wrapped so GetNode fails for that caller node ID.
+func TestTraceRPC_GetNodeError_CallerNode(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": crossLanguageProto,
+		"gen/go/auth/service.go": `package auth
+type AuthServiceServer struct{}
+func (s *AuthServiceServer) Login() error { return nil }
+`,
+	})
+	s := openTraceRPCStore(t, dir)
+
+	implID := store.SymbolNodeID("auth.AuthServiceServer.Login")
+	fakeCallerID := "sym:fake.Caller.method"
+
+	dbPath := filepath.Join(dir, ".librarian", "trace-rpc-test.db")
+	rawDB, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=0")
+	if err != nil {
+		t.Fatalf("open fk-off conn: %v", err)
+	}
+	defer rawDB.Close()
+	if _, err := rawDB.Exec(
+		`INSERT INTO graph_edges (from_node, to_node, kind, weight, metadata) VALUES (?, ?, 'call', 1, '{}')`,
+		fakeCallerID, implID,
+	); err != nil {
+		t.Fatalf("insert fake call edge: %v", err)
+	}
+
+	mock := &errGetNodeReader{
+		storeReader: s,
+		errIDs:      map[string]error{fakeCallerID: errors.New("simulated I/O error")},
+	}
+
+	var warnings []string
+	callers := walkTraceRPCCallers(mock, []string{implID}, traceRPCMaxCallerBFSDepth, dir, &warnings)
+
+	for _, c := range callers {
+		if strings.Contains(c.SymbolPath, "fake.Caller") {
+			t.Errorf("errored caller should not appear in Callers: %+v", c)
+		}
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, fakeCallerID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning for GetNode I/O error on %q; got %v", fakeCallerID, warnings)
+	}
+}
+
+// TestTraceRPC_GetNodeError_CallRPCCaller pins the GetNode I/O-error branch
+// in runTraceRPC's call_rpc callers loop. A dangling `call_rpc` edge is
+// injected via FK-off and the store is wrapped so GetNode fails for that node.
+func TestTraceRPC_GetNodeError_CallRPCCaller(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": crossLanguageProto,
+	})
+	s := openTraceRPCStore(t, dir)
+
+	rpcID := store.SymbolNodeID("auth.AuthService.Login")
+	fakeCallerID := "sym:fake.Caller.callRPC"
+
+	dbPath := filepath.Join(dir, ".librarian", "trace-rpc-test.db")
+	rawDB, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=0")
+	if err != nil {
+		t.Fatalf("open fk-off conn: %v", err)
+	}
+	defer rawDB.Close()
+	if _, err := rawDB.Exec(
+		`INSERT INTO graph_edges (from_node, to_node, kind, weight, metadata) VALUES (?, ?, ?, 1, '{}')`,
+		fakeCallerID, rpcID, store.EdgeKindCallRPC,
+	); err != nil {
+		t.Fatalf("insert fake call_rpc edge: %v", err)
+	}
+
+	mock := &errGetNodeReader{
+		storeReader: s,
+		errIDs:      map[string]error{fakeCallerID: errors.New("simulated I/O error")},
+	}
+
+	result, err := runTraceRPC(mock, dir, "auth.AuthService.Login")
+	if err != nil {
+		t.Fatalf("runTraceRPC: %v", err)
+	}
+
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, fakeCallerID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning for GetNode I/O error on %q; got %v", fakeCallerID, result.Warnings)
 	}
 }
 
