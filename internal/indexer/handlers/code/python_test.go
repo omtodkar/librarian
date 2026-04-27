@@ -1455,11 +1455,13 @@ class Foo(Generic[T]):
 	}
 }
 
-// TestPythonGrammar_TypeVarCrossModule_TypingExtensionsNotPending verifies that
-// an import from typing_extensions is still recorded as a pending candidate
-// (the grammar can't distinguish external packages from project-internal
-// modules — that check happens in the post-graph-pass resolver).
-func TestPythonGrammar_TypeVarCrossModule_TypingExtensionsNotPending(t *testing.T) {
+// TestPythonGrammar_TypeVarCrossModule_ExternalImportRecordedAsPending verifies
+// that an import from an external package (e.g. typing_extensions) IS recorded
+// as a pending candidate at grammar level. The grammar cannot distinguish
+// external packages from project-internal modules — that check happens in the
+// post-graph-pass resolver, which will find no sym:typing_extensions.T TypeVar
+// node and leave type_args_resolved absent.
+func TestPythonGrammar_TypeVarCrossModule_ExternalImportRecordedAsPending(t *testing.T) {
 	src := []byte(`from typing_extensions import T
 
 class Foo(Generic[T]):

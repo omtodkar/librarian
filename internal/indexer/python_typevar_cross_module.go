@@ -84,8 +84,8 @@ func (idx *Indexer) buildPythonTypeVarCrossModuleEdges(result *GraphResult) {
 // changed=true whenever the pending key was present and the edge was mutated
 // (regardless of resolution outcome — the key is always removed). anyNew is
 // true only when at least one TypeVar was actually resolved and added to
-// type_args_resolved. Returns (original, false, false) when metadata cannot be
-// parsed or the pending map is absent or empty.
+// type_args_resolved. Returns (original, false, false) only when metadata
+// cannot be parsed or the pending key is absent.
 func resolvePendingTypeVarEdge(e store.Edge, typeVarSet map[string]bool) (store.Edge, bool, bool) {
 	var meta map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(e.Metadata), &meta); err != nil {
@@ -96,9 +96,16 @@ func resolvePendingTypeVarEdge(e store.Edge, typeVarSet map[string]bool) (store.
 		return e, false, false
 	}
 
+	// Remove the pending key unconditionally — even malformed or empty pending
+	// values must be cleaned up so subsequent IndexProjectGraph runs don't keep
+	// re-scanning this edge via ListEdgesWithMetadataContaining.
+	delete(meta, "type_args_pending_cross_module")
+
 	var pending map[string]string // localAlias → canonicalDottedPath
 	if err := json.Unmarshal(pendingRaw, &pending); err != nil || len(pending) == 0 {
-		return e, false, false
+		// Nothing to resolve, but still persist the key removal.
+		e.Metadata = marshalSortedRawMetadata(meta)
+		return e, true, false
 	}
 
 	// Collect already-resolved IDs so we don't duplicate.
@@ -129,12 +136,6 @@ func resolvePendingTypeVarEdge(e store.Edge, typeVarSet map[string]bool) (store.
 			anyNew = true
 		}
 	}
-
-	// Always remove the pending key — it has been consumed regardless of
-	// resolution outcome. This prevents repeated no-op scans on subsequent
-	// IndexProjectGraph runs when all pending candidates are unresolvable
-	// (e.g., imports from external packages not indexed in the project).
-	delete(meta, "type_args_pending_cross_module")
 
 	if anyNew {
 		resolvedBytes, err := json.Marshal(resolvedList)

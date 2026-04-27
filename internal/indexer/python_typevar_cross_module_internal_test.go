@@ -108,6 +108,38 @@ func TestResolvePendingTypeVarEdge_AbsentPending(t *testing.T) {
 	}
 }
 
+// TestResolvePendingTypeVarEdge_MalformedPending covers the malformed-value
+// branch: if type_args_pending_cross_module exists in the JSON object but its
+// value is not a valid map[string]string (e.g. null, a number, or an array),
+// the key must still be removed so subsequent IndexProjectGraph runs don't keep
+// re-scanning this edge via ListEdgesWithMetadataContaining.
+//
+// Note: a fully invalid outer JSON causes the top-level json.Unmarshal to fail,
+// which returns (e, false, false) — there is no pending key to clean up in that
+// case since the metadata is unreadable.
+func TestResolvePendingTypeVarEdge_MalformedPending(t *testing.T) {
+	// Outer JSON is valid; the pending value is null (not a map[string]string).
+	raw := `{"relation":"extends","type_args":["T"],"type_args_pending_cross_module":null}`
+	e := store.Edge{From: "sym:repo.Foo", To: "sym:Generic", Kind: "inherits", Metadata: raw}
+
+	updated, changed, anyNew := resolvePendingTypeVarEdge(e, map[string]bool{})
+
+	if !changed {
+		t.Fatalf("expected changed=true (pending key must be cleaned up even for null/empty value)")
+	}
+	if anyNew {
+		t.Errorf("expected anyNew=false for null pending; got true")
+	}
+
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(updated.Metadata), &meta); err != nil {
+		t.Fatalf("updated metadata is not valid JSON: %v; metadata: %s", err, updated.Metadata)
+	}
+	if _, ok := meta["type_args_pending_cross_module"]; ok {
+		t.Errorf("expected type_args_pending_cross_module removed for null value; metadata: %s", updated.Metadata)
+	}
+}
+
 // TestResolvePendingTypeVarEdge_Resolved covers the happy path: pending
 // TypeVar is in the TypeVar set, so type_args_resolved is populated and
 // the pending key is removed.
