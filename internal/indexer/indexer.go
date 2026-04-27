@@ -1264,6 +1264,12 @@ func graphTargetID(ref Reference) string {
 		}
 		return store.SymbolNodeID(ref.Target)
 	case "call", "inherits", "requires", "implements_rpc", "extends", "implements":
+		// An inherits target with an "ext:" prefix is an external-package node
+		// (e.g. "ext:typing.NamedTuple" from lib-0pa.3). Route to
+		// ExternalPackageNodeID so the graph node lands in the right namespace.
+		if ref.Kind == "inherits" && strings.HasPrefix(ref.Target, "ext:") {
+			return store.ExternalPackageNodeID(strings.TrimPrefix(ref.Target, "ext:"))
+		}
 		return store.SymbolNodeID(ref.Target)
 	case "part":
 		return store.CodeFileNodeID(ref.Target)
@@ -1285,6 +1291,9 @@ func graphNodeKindFromRef(ref Reference) string {
 		}
 		return store.NodeKindSymbol
 	case "call", "inherits", "requires", "implements_rpc", "extends", "implements":
+		if ref.Kind == "inherits" && strings.HasPrefix(ref.Target, "ext:") {
+			return store.NodeKindExternal
+		}
 		return store.NodeKindSymbol
 	case "part":
 		return store.NodeKindCodeFile

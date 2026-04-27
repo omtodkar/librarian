@@ -148,6 +148,32 @@ func TestGraphTargetID_InheritsRoutesToSymbol(t *testing.T) {
 	}
 }
 
+// TestGraphTargetID_BaseFactoryReturnsEmpty verifies that the "base_factory" kind
+// (lib-0pa.3 Part B: factory-call class bases) produces no graph edge.
+// handler.go documents: "graphTargetID returns "" for this kind so no graph edge
+// is created."
+func TestGraphTargetID_BaseFactoryReturnsEmpty(t *testing.T) {
+	ref := Reference{Kind: "base_factory", Target: "namedtuple", Source: "m.Foo"}
+	if got := graphTargetID(ref); got != "" {
+		t.Errorf("base_factory should produce no graph edge; graphTargetID = %q, want \"\"", got)
+	}
+}
+
+// TestGraphTargetID_InheritsExtPrefixRoutesToExternal verifies that an "inherits"
+// ref whose Target begins with "ext:" (e.g. "ext:typing.NamedTuple" from lib-0pa.3)
+// routes to an ExternalPackageNodeID node rather than a sym: node.
+func TestGraphTargetID_InheritsExtPrefixRoutesToExternal(t *testing.T) {
+	ref := Reference{Kind: "inherits", Target: "ext:typing.NamedTuple"}
+	got := graphTargetID(ref)
+	want := store.ExternalPackageNodeID("typing.NamedTuple")
+	if got != want {
+		t.Errorf("inherits(ext:) targetID = %q, want %q", got, want)
+	}
+	if graphNodeKindFromRef(ref) != store.NodeKindExternal {
+		t.Errorf("inherits(ext:) nodeKind = %q, want %q", graphNodeKindFromRef(ref), store.NodeKindExternal)
+	}
+}
+
 func TestGraphTargetID_LegacyExtendsImplementsStillResolve(t *testing.T) {
 	// Legacy kinds are preserved as aliases so hand-authored fixtures and
 	// any pre-lib-wji.1 on-disk data keep resolving to sym: nodes. Regression

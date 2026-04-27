@@ -279,6 +279,11 @@ type Signal struct {
 //	                derivation, not subtype parenthood.
 //	"config-key"  — document or config referencing another config key
 //	"doc-link"    — markdown linking to another document
+//	"base_factory" — Python factory-call class base (e.g. `class Foo(namedtuple(...)):`).
+//	                Emitted by Python's ResolveParents for allow-list factory callees;
+//	                consumed by PostProcess to copy base_factory metadata onto the
+//	                class Unit. graphTargetID returns "" for this kind so no graph
+//	                edge is created. Not a permanent graph edge kind.
 //
 // "extends" and "implements" are retained as legacy aliases in graph-pass switches
 // (see graphTargetID / graphNodeKindFromRef in internal/indexer/indexer.go) but are

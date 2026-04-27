@@ -1338,6 +1338,410 @@ class Foo(Generic[T, U]):
 	}
 }
 
+// --- lib-0pa.3: NamedTuple / TypedDict / namedtuple factory distinction ---
+
+// TestPythonGrammar_TypingNamedTuple_AttributeForm covers `class Foo(typing.NamedTuple):`.
+// The attribute-chain base resolves to "ext:typing.NamedTuple" — a genuine class
+// parent emitting an inherits edge to the external-package node.
+func TestPythonGrammar_TypingNamedTuple_AttributeForm(t *testing.T) {
+	src := []byte(`class Foo(typing.NamedTuple):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing.NamedTuple" {
+		t.Errorf("Target = %q, want ext:typing.NamedTuple", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("ext:typing.NamedTuple should not be unresolved: %+v", refs[0].Metadata)
+	}
+	if v, _ := refs[0].Metadata["unresolved_expression"].(bool); v {
+		t.Errorf("ext:typing.NamedTuple should not be unresolved_expression: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingNamedTuple_BareImport covers the bare-identifier form
+// `class Foo(NamedTuple):` when `from typing import NamedTuple` is present.
+func TestPythonGrammar_TypingNamedTuple_BareImport(t *testing.T) {
+	src := []byte(`from typing import NamedTuple
+
+class Foo(NamedTuple):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing.NamedTuple" {
+		t.Errorf("Target = %q, want ext:typing.NamedTuple", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingTypedDict_BareImport covers `class Foo(TypedDict):` with
+// `from typing import TypedDict`.
+func TestPythonGrammar_TypingTypedDict_BareImport(t *testing.T) {
+	src := []byte(`from typing import TypedDict
+
+class Foo(TypedDict):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing.TypedDict" {
+		t.Errorf("Target = %q, want ext:typing.TypedDict", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingNamedTuple_AliasedImport covers the aliased form:
+// `from typing import NamedTuple as NT` followed by `class Foo(NT):`.
+func TestPythonGrammar_TypingNamedTuple_AliasedImport(t *testing.T) {
+	src := []byte(`from typing import NamedTuple as NT
+
+class Foo(NT):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing.NamedTuple" {
+		t.Errorf("Target = %q, want ext:typing.NamedTuple (alias NT resolved)", refs[0].Target)
+	}
+}
+
+// TestPythonGrammar_FactoryCallBase_NamedtupleWithImport covers
+// `class Foo(namedtuple("Foo", ["x"])):` with `from collections import namedtuple`.
+// No inherits edge is emitted; Metadata.base_factory="namedtuple" is set on Foo.
+func TestPythonGrammar_FactoryCallBase_NamedtupleWithImport(t *testing.T) {
+	src := []byte(`from collections import namedtuple
+
+class Foo(namedtuple("Foo", ["x"])):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// No inherits edge for Foo.
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 0 {
+		t.Errorf("expected no inherits refs for factory-call base; got %+v", refs)
+	}
+	// base_factory set on the Unit.
+	u := findUnit(doc, "Foo")
+	if u == nil {
+		t.Fatal("Foo Unit missing")
+	}
+	if bf, _ := u.Metadata["base_factory"].(string); bf != "namedtuple" {
+		t.Errorf("base_factory = %q, want namedtuple; metadata=%+v", bf, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_FactoryCallBase_CollectionsAttribute covers
+// `class Foo(collections.namedtuple("Foo", ["x"])):` (attribute-form callee,
+// no local import needed).
+func TestPythonGrammar_FactoryCallBase_CollectionsAttribute(t *testing.T) {
+	src := []byte(`import collections
+
+class Foo(collections.namedtuple("Foo", ["x"])):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 0 {
+		t.Errorf("expected no inherits refs; got %+v", refs)
+	}
+	u := findUnit(doc, "Foo")
+	if u == nil {
+		t.Fatal("Foo Unit missing")
+	}
+	if bf, _ := u.Metadata["base_factory"].(string); bf != "namedtuple" {
+		t.Errorf("base_factory = %q, want namedtuple; metadata=%+v", bf, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingNamedTuple_FunctionalCallBase guards the Part A /
+// Part B interaction: `class Foo(typing.NamedTuple("Foo", [...])):` has Target
+// "typing.NamedTuple" with unresolved_expression=true. Part A must NOT claim
+// this ref (it would produce a spurious inherits edge to ext:typing.NamedTuple);
+// Part B must claim it and emit base_factory="namedtuple" instead.
+func TestPythonGrammar_TypingNamedTuple_FunctionalCallBase(t *testing.T) {
+	src := []byte(`import typing
+
+class Foo(typing.NamedTuple("Foo", [("x", int)])):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// Must NOT emit an inherits edge — that would be spurious for a call form.
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 0 {
+		t.Errorf("functional typing.NamedTuple call base must not produce inherits refs; got %+v", refs)
+	}
+	// Must set base_factory on the class Unit.
+	u := findUnit(doc, "Foo")
+	if u == nil {
+		t.Fatal("Foo Unit missing")
+	}
+	if bf, _ := u.Metadata["base_factory"].(string); bf != "namedtuple" {
+		t.Errorf("base_factory = %q, want namedtuple; metadata=%+v", bf, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_FactoryCallBase_NotInAllowList verifies that a call base
+// NOT in the allow-list still falls through to lib-0pa.1's unresolved_expression
+// path unchanged.
+func TestPythonGrammar_FactoryCallBase_NotInAllowList(t *testing.T) {
+	src := []byte(`class Foo(custom_factory()):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref (fallback), got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "custom_factory" {
+		t.Errorf("Target = %q, want custom_factory", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved_expression"].(bool); !v {
+		t.Errorf("expected unresolved_expression=true; got %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_FactoryAssign_Namedtuple covers the assignment form
+// `Foo = namedtuple("Foo", ["x"])` at module scope. Emits Kind="class" Unit
+// with Metadata["factory"]="namedtuple".
+func TestPythonGrammar_FactoryAssign_Namedtuple(t *testing.T) {
+	src := []byte(`from collections import namedtuple
+
+Foo = namedtuple("Foo", ["x", "y"])
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Foo")
+	if u == nil {
+		t.Fatalf("expected Foo Unit from factory assignment; units: %+v", doc.Units)
+	}
+	if u.Kind != "class" {
+		t.Errorf("Kind = %q, want class", u.Kind)
+	}
+	if u.Path != "m.Foo" {
+		t.Errorf("Path = %q, want m.Foo", u.Path)
+	}
+	if f, _ := u.Metadata["factory"].(string); f != "namedtuple" {
+		t.Errorf("factory = %q, want namedtuple; metadata=%+v", f, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_FactoryAssign_TypedDict covers `Foo = TypedDict("Foo", {...})`
+// at module scope. Emits Kind="class" Unit with Metadata["factory"]="typeddict".
+func TestPythonGrammar_FactoryAssign_TypedDict(t *testing.T) {
+	src := []byte(`from typing import TypedDict
+
+Foo = TypedDict("Foo", {"x": int, "y": str})
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Foo")
+	if u == nil {
+		t.Fatalf("expected Foo Unit from TypedDict factory assignment; units: %+v", doc.Units)
+	}
+	if u.Kind != "class" {
+		t.Errorf("Kind = %q, want class", u.Kind)
+	}
+	if f, _ := u.Metadata["factory"].(string); f != "typeddict" {
+		t.Errorf("factory = %q, want typeddict; metadata=%+v", f, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingExtensions_TypedDict covers `from typing_extensions import TypedDict`
+// followed by `class Foo(TypedDict):`. Should resolve to ext:typing_extensions.TypedDict.
+func TestPythonGrammar_TypingExtensions_TypedDict(t *testing.T) {
+	src := []byte(`from typing_extensions import TypedDict
+
+class Foo(TypedDict):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing_extensions.TypedDict" {
+		t.Errorf("Target = %q, want ext:typing_extensions.TypedDict", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingExtensions_NamedTuple covers `from typing_extensions import NamedTuple`
+// followed by `class Foo(NamedTuple):`. Should resolve to ext:typing_extensions.NamedTuple.
+func TestPythonGrammar_TypingExtensions_NamedTuple(t *testing.T) {
+	src := []byte(`from typing_extensions import NamedTuple
+
+class Foo(NamedTuple):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing_extensions.NamedTuple" {
+		t.Errorf("Target = %q, want ext:typing_extensions.NamedTuple", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_EnumFunctionalForm_ClassBase covers the functional Enum base:
+// `class Color(enum.Enum("Color", "RED GREEN")):` — factory call in allow-list.
+func TestPythonGrammar_EnumFunctionalForm_ClassBase(t *testing.T) {
+	src := []byte(`import enum
+
+class Color(enum.Enum("Color", "RED GREEN")):
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Color")
+	if len(refs) != 0 {
+		t.Errorf("expected no inherits refs for enum.Enum factory base; got %+v", refs)
+	}
+	u := findUnit(doc, "Color")
+	if u == nil {
+		t.Fatal("Color Unit missing")
+	}
+	if bf, _ := u.Metadata["base_factory"].(string); bf != "Enum" {
+		t.Errorf("base_factory = %q, want Enum; metadata=%+v", bf, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_EnumFunctionalForm_Assignment covers `Color = Enum("Color", ...)`.
+func TestPythonGrammar_EnumFunctionalForm_Assignment(t *testing.T) {
+	src := []byte(`from enum import Enum
+
+Color = Enum("Color", "RED GREEN BLUE")
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Color")
+	if u == nil {
+		t.Fatalf("expected Color Unit from Enum factory assignment; units: %+v", doc.Units)
+	}
+	if u.Kind != "class" {
+		t.Errorf("Kind = %q, want class", u.Kind)
+	}
+	if f, _ := u.Metadata["factory"].(string); f != "Enum" {
+		t.Errorf("factory = %q, want Enum; metadata=%+v", f, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_FactoryAssign_AttributeCallee covers `Foo = collections.namedtuple(...)`
+// (attribute-form callee, no local import needed).
+func TestPythonGrammar_FactoryAssign_AttributeCallee(t *testing.T) {
+	src := []byte(`import collections
+
+Foo = collections.namedtuple("Foo", ["x", "y"])
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Foo")
+	if u == nil {
+		t.Fatalf("expected Foo Unit from collections.namedtuple assignment; units: %+v", doc.Units)
+	}
+	if u.Kind != "class" {
+		t.Errorf("Kind = %q, want class", u.Kind)
+	}
+	if f, _ := u.Metadata["factory"].(string); f != "namedtuple" {
+		t.Errorf("factory = %q, want namedtuple; metadata=%+v", f, u.Metadata)
+	}
+}
+
+// TestPythonGrammar_FactoryAssign_NoImport verifies that a bare factory call
+// assignment without an import does NOT emit a Unit (allow-list driven).
+func TestPythonGrammar_FactoryAssign_NoImport(t *testing.T) {
+	src := []byte(`Foo = namedtuple("Foo", ["x"])
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// No import → "namedtuple" is not in allow-list → no Unit for Foo.
+	u := findUnit(doc, "Foo")
+	if u != nil {
+		t.Errorf("should not emit Unit for unimported bare namedtuple; got %+v", u)
+	}
+}
+
 // TestPythonGrammar_CallEdges_ExternalUnresolved verifies that a call to a
 // name not in the same file gets confidence="unresolved".
 func TestPythonGrammar_CallEdges_ExternalUnresolved(t *testing.T) {

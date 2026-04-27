@@ -543,6 +543,99 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 	return nil
 }
 
+// pyTypingInheritanceTargets maps resolved typing/typing_extensions class names
+// to their canonical ext: graph node IDs. These are genuine class parents —
+// inherits edges to them route to ExternalPackageNodeID nodes, not sym: nodes.
+var pyTypingInheritanceTargets = map[string]string{
+	"typing.NamedTuple":            "ext:typing.NamedTuple",
+	"typing.TypedDict":             "ext:typing.TypedDict",
+	"typing_extensions.NamedTuple": "ext:typing_extensions.NamedTuple",
+	"typing_extensions.TypedDict":  "ext:typing_extensions.TypedDict",
+}
+
+// pyFactoryCallAllowList maps fully-qualified factory function names to their
+// canonical factory name used in metadata. Closed allow-list — no heuristics.
+var pyFactoryCallAllowList = map[string]string{
+	"collections.namedtuple": "namedtuple",
+	"typing.NamedTuple":      "namedtuple",
+	"typing.TypedDict":       "typeddict",
+	"enum.Enum":              "Enum",
+}
+
+// buildFactoryLocalNames builds a map of local identifiers → factory name by
+// combining the direct pyFactoryCallAllowList entries (for attribute-form calls
+// like `collections.namedtuple(...)`) with any local import aliases that
+// resolve to an allow-list factory (e.g. `from collections import namedtuple`
+// adds "namedtuple" → "namedtuple"). Parallels buildTypeVarLocalNames.
+func buildFactoryLocalNames(refs []indexer.Reference) map[string]string {
+	out := make(map[string]string, len(pyFactoryCallAllowList))
+	for fqn, name := range pyFactoryCallAllowList {
+		out[fqn] = name
+	}
+	for _, r := range refs {
+		if r.Kind != "import" || r.Target == "" {
+			continue
+		}
+		factoryName, ok := pyFactoryCallAllowList[r.Target]
+		if !ok {
+			continue
+		}
+		local := ""
+		if r.Metadata != nil {
+			if a, ok := r.Metadata["alias"].(string); ok {
+				local = a
+			}
+		}
+		if local == "" {
+			if dot := strings.LastIndex(r.Target, "."); dot >= 0 {
+				local = r.Target[dot+1:]
+			} else {
+				local = r.Target
+			}
+		}
+		if local != "" && out[local] == "" {
+			out[local] = factoryName
+		}
+	}
+	return out
+}
+
+// detectFactoryAssign checks whether n (an expression_statement node) is a
+// module-scope factory assignment of the form VARNAME = <factory>(...).
+// Returns the variable name and canonical factory name when matched, or
+// ("", "") otherwise. factoryLocalNames comes from buildFactoryLocalNames.
+func detectFactoryAssign(n *sitter.Node, source []byte, factoryLocalNames map[string]string) (string, string) {
+	if n.NamedChildCount() == 0 {
+		return "", ""
+	}
+	assign := n.NamedChild(0)
+	if assign == nil || assign.Kind() != "assignment" {
+		return "", ""
+	}
+	// Annotated assignments (PEP 613 TypeAlias) have a "type" field — skip.
+	if assign.ChildByFieldName("type") != nil {
+		return "", ""
+	}
+	left := assign.ChildByFieldName("left")
+	if left == nil || left.Kind() != "identifier" {
+		return "", ""
+	}
+	right := assign.ChildByFieldName("right")
+	if right == nil || right.Kind() != "call" {
+		return "", ""
+	}
+	fn := right.ChildByFieldName("function")
+	if fn == nil {
+		return "", ""
+	}
+	calleeText := strings.TrimSpace(fn.Utf8Text(source))
+	factoryName := factoryLocalNames[calleeText]
+	if factoryName == "" {
+		return "", ""
+	}
+	return strings.TrimSpace(left.Utf8Text(source)), factoryName
+}
+
 // ResolveParents implements inheritanceResolver for Python. Runs AFTER
 // ResolveImports (per the ParseCtx ordering) so the imports list in refs is
 // already in canonicalised absolute form — same-file bare-name parents can
@@ -554,10 +647,18 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 //     it as already-dotted.
 //  2. Target already dotted (FQN in source) → leave alone.
 //  3. Metadata.unresolved_expression=true (call-expression base) → leave
-//     alone; lib-0pa.3 will tackle these.
+//     alone (handled below as Part B factory-call detection).
 //  4. Bare name matches a local binding from the file's imports → rewrite
 //     Target to the full path.
 //  5. Otherwise → mark Metadata.unresolved=true.
+//
+// Part A (post-resolve): typing.NamedTuple / TypedDict targets are rewritten
+// to their ext: graph-node form (e.g. "ext:typing.NamedTuple"). These are
+// genuine class parents whose canonical graph nodes are external-package nodes.
+//
+// Part B (post-resolve): "inherits" refs with unresolved_expression=true whose
+// callee resolves to a known factory (pyFactoryCallAllowList) are reclassified:
+// Kind becomes "base_factory" (no graph edge), base_factory metadata is set.
 //
 // Import forms that contribute a local binding:
 //   - `import pkg`          → local "pkg"    → target "pkg"
@@ -590,7 +691,50 @@ func (*PythonGrammar) ResolveParents(refs []indexer.Reference, path string, ctx 
 			}
 		}
 	}
-	return resolveInheritsRefs(refs, localTypeBindings(refs, false /* skipStatic */))
+
+	refs = resolveInheritsRefs(refs, localTypeBindings(refs, false /* skipStatic */))
+
+	// Part A: rewrite typing.NamedTuple/TypedDict (and typing_extensions counterparts)
+	// to their ext: form. These are genuine class parents resolved as external nodes.
+	// Guard: skip refs with unresolved_expression=true — those are factory-call bases
+	// (e.g. `class Foo(typing.NamedTuple("Foo", [...])):`) handled by Part B below.
+	for i, r := range refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if ue, _ := r.Metadata["unresolved_expression"].(bool); ue {
+			continue
+		}
+		if extTarget, ok := pyTypingInheritanceTargets[r.Target]; ok {
+			refs[i].Target = extTarget
+			delete(refs[i].Metadata, "unresolved")
+		}
+	}
+
+	// Part B: detect factory-call class bases. Refs with unresolved_expression=true
+	// whose callee resolves to the allow-list become "base_factory" refs (no
+	// graph edge; metadata is propagated to the Unit by PostProcess).
+	// buildFactoryLocalNames seeds FQN entries AND local import aliases, so
+	// both `collections.namedtuple(...)` and bare `namedtuple(...)` (after
+	// `from collections import namedtuple`) are resolved in one lookup.
+	factoryNames := buildFactoryLocalNames(refs)
+	for i, r := range refs {
+		if r.Kind != "inherits" {
+			continue
+		}
+		if ue, _ := r.Metadata["unresolved_expression"].(bool); !ue {
+			continue
+		}
+		factoryName, ok := factoryNames[r.Target]
+		if !ok {
+			continue
+		}
+		refs[i].Metadata["base_factory"] = factoryName
+		refs[i].Metadata["unresolved_expression"] = false
+		refs[i].Kind = "base_factory"
+	}
+
+	return refs
 }
 
 // buildFromPath composes the Path for a `from ... import NAME` entry across
@@ -672,22 +816,31 @@ func pyCalleeIdent(funcNode *sitter.Node, source []byte) string {
 }
 
 // PostProcess implements parsedDocPostProcessor for Python. Runs after all
-// Units have been extracted and imports have been resolved. Two passes:
+// Units have been extracted and imports have been resolved. Four passes:
 //
 //  1. TypeVar detection: walks module-level expression_statement nodes for
 //     VARNAME = TypeVar(...) calls, emitting a Unit{Kind="typevar"} for each.
 //     Import alias resolution (e.g. from typing import TypeVar as TV) is done
 //     by cross-referencing the already-resolved doc.Refs.
 //
-//  2. Generic[T] resolution: for each inherits ref whose Metadata["type_args"]
+//  2. Factory assignment detection (lib-0pa.3 Part C): same walk, sibling
+//     branch — detects VARNAME = <factory>(...) at module scope and emits a
+//     Unit{Kind="class", Metadata["factory"]=<name>} for each.
+//
+//  3. Factory base propagation (lib-0pa.3 Part B): scans doc.Refs for
+//     "base_factory" refs emitted by ResolveParents and copies the base_factory
+//     metadata onto the corresponding class Unit.
+//
+//  4. Generic[T] resolution: for each inherits ref whose Metadata["type_args"]
 //     contains bare names, looks up each name in the TypeVar map built in
 //     pass 1. Matches are appended to Metadata["type_args_resolved"] as
 //     "sym:<module>.<Name>" ids. Unmatched names remain as bare strings in
 //     type_args (unchanged from lib-0pa.1 behaviour).
 func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, source []byte) {
 	typeVarNames := buildTypeVarLocalNames(doc.Refs)
+	factoryLocalNames := buildFactoryLocalNames(doc.Refs)
 
-	// Pass 1: collect module-scope TypeVar assignments.
+	// Pass 1 + 2: module-scope expression_statement walk.
 	typeVarSymPaths := map[string]string{} // bare name → "sym:<module>.<Name>"
 	moduleName := doc.Title
 	for i := uint(0); i < root.NamedChildCount(); i++ {
@@ -695,28 +848,66 @@ func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, sou
 		if child == nil || child.Kind() != "expression_statement" {
 			continue
 		}
+		// Pass 1: TypeVar assignment.
 		varName, callNode := detectTypeVarAssign(child, source, typeVarNames)
-		if varName == "" {
+		if varName != "" {
+			meta := extractTypeVarMeta(callNode, varName, source)
+			unitPath := joinPath(moduleName, varName)
+			doc.Units = append(doc.Units, indexer.Unit{
+				Kind:    "typevar",
+				Title:   varName,
+				Path:    unitPath,
+				Content: strings.TrimSpace(child.Utf8Text(source)),
+				Loc: indexer.Location{
+					Line:       int(child.StartPosition().Row) + 1,
+					Column:     int(child.StartPosition().Column) + 1,
+					ByteOffset: int(child.StartByte()),
+				},
+				Metadata: meta,
+			})
+			typeVarSymPaths[varName] = "sym:" + unitPath
 			continue
 		}
-		meta := extractTypeVarMeta(callNode, varName, source)
-		unitPath := joinPath(moduleName, varName)
-		doc.Units = append(doc.Units, indexer.Unit{
-			Kind:    "typevar",
-			Title:   varName,
-			Path:    unitPath,
-			Content: strings.TrimSpace(child.Utf8Text(source)),
-			Loc: indexer.Location{
-				Line:       int(child.StartPosition().Row) + 1,
-				Column:     int(child.StartPosition().Column) + 1,
-				ByteOffset: int(child.StartByte()),
-			},
-			Metadata: meta,
-		})
-		typeVarSymPaths[varName] = "sym:" + unitPath
+		// Pass 2: factory assignment (namedtuple, TypedDict, enum.Enum functional form).
+		varName, factoryName := detectFactoryAssign(child, source, factoryLocalNames)
+		if varName != "" {
+			unitPath := joinPath(moduleName, varName)
+			doc.Units = append(doc.Units, indexer.Unit{
+				Kind:    "class",
+				Title:   varName,
+				Path:    unitPath,
+				Content: strings.TrimSpace(child.Utf8Text(source)),
+				Loc: indexer.Location{
+					Line:       int(child.StartPosition().Row) + 1,
+					Column:     int(child.StartPosition().Column) + 1,
+					ByteOffset: int(child.StartByte()),
+				},
+				Metadata: map[string]any{"factory": factoryName},
+			})
+		}
 	}
 
-	// Pass 2: annotate type_args_resolved on Generic[T] inherits refs.
+	// Pass 3: propagate base_factory from "base_factory" refs to class Units.
+	for _, ref := range doc.Refs {
+		if ref.Kind != "base_factory" {
+			continue
+		}
+		factoryName, _ := ref.Metadata["base_factory"].(string)
+		if factoryName == "" {
+			continue
+		}
+		for j := range doc.Units {
+			if doc.Units[j].Path == ref.Source {
+				if doc.Units[j].Metadata == nil {
+					doc.Units[j].Metadata = map[string]any{}
+				}
+				doc.Units[j].Metadata["base_factory"] = factoryName
+				break
+			}
+		}
+	}
+
+	// Pass 4: annotate type_args_resolved on Generic[T] inherits refs.
 	for i, ref := range doc.Refs {
 		if ref.Kind != "inherits" {
 			continue
