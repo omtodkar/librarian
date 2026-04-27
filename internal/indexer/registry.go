@@ -7,6 +7,14 @@ import (
 	"sync"
 )
 
+// filenamePattern pairs a filepath.Match glob (tested against the file's basename)
+// with its handler. Used for files that have no predictable extension, such as
+// "Dockerfile" (exact) or "Dockerfile.*" (any suffix).
+type filenamePattern struct {
+	pattern string
+	handler FileHandler
+}
+
 // Registry maps file extensions to FileHandler implementations. Implementations register
 // themselves (typically via package init) so the core pipeline stays handler-agnostic.
 //
@@ -16,12 +24,17 @@ import (
 // pass uses HandlersFor so multiple handlers can contribute symbols for the same file
 // (e.g. the TypeScript grammar handler and the connect-es stub handler for *_connect.ts).
 //
+// Handlers for extension-less files (Dockerfile, Makefile, …) or filename families
+// (Dockerfile.*) register via RegisterByFilenameGlob. HandlerFor tests these patterns
+// against the file's basename when extension-keyed lookup returns nothing.
+//
 // Registry is safe for concurrent use.
 type Registry struct {
-	mu          sync.RWMutex
-	handlers    []FileHandler
-	byExt       map[string]FileHandler   // extension → primary handler
-	byExtExtra  map[string][]FileHandler // extension → additional handlers
+	mu               sync.RWMutex
+	handlers         []FileHandler
+	byExt            map[string]FileHandler   // extension → primary handler
+	byExtExtra       map[string][]FileHandler // extension → additional handlers
+	byFilenameGlob   []filenamePattern        // basename glob patterns → handler
 }
 
 // NewRegistry returns an empty Registry. Most callers should use the package-level Default
@@ -70,13 +83,41 @@ func (r *Registry) RegisterAdditional(h FileHandler) {
 	}
 }
 
+// RegisterByFilenameGlob registers h as the handler for files whose basename matches
+// any of the given filepath.Match patterns (e.g. "Dockerfile", "Dockerfile.*").
+// This is the right choice for extension-less files or filename families that cannot
+// be keyed by extension alone.
+//
+// Pattern collisions follow last-registered-wins semantics matching Register.
+// h is appended to the handlers slice so it appears in Handlers() introspection.
+// Unlike Register, this does not populate byExt — pattern-registered handlers are
+// invisible to callers that enumerate extensions (e.g. legacy callers of Extensions()).
+func (r *Registry) RegisterByFilenameGlob(h FileHandler, patterns ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.handlers = append(r.handlers, h)
+	for _, p := range patterns {
+		r.byFilenameGlob = append(r.byFilenameGlob, filenamePattern{pattern: p, handler: h})
+	}
+}
+
 // HandlerFor returns the primary handler registered for the file's extension, or nil if
-// none. Extension matching is case-insensitive.
+// none. Extension matching is case-insensitive. When no extension-keyed handler is found,
+// HandlerFor falls back to basename glob patterns registered via RegisterByFilenameGlob.
 func (r *Registry) HandlerFor(path string) FileHandler {
 	ext := strings.ToLower(filepath.Ext(path))
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.byExt[ext]
+	if h := r.byExt[ext]; h != nil {
+		return h
+	}
+	base := filepath.Base(path)
+	for _, fp := range r.byFilenameGlob {
+		if ok, _ := filepath.Match(fp.pattern, base); ok {
+			return fp.handler
+		}
+	}
+	return nil
 }
 
 // HandlersFor returns all handlers (primary first, then additional in registration order)
@@ -84,6 +125,9 @@ func (r *Registry) HandlerFor(path string) FileHandler {
 // Use this instead of HandlerFor when all handlers for a file should run — the graph pass
 // calls this so additional handlers (e.g. connect-es) can contribute symbols alongside
 // the primary grammar handler.
+//
+// When extension-keyed lookup yields nothing, HandlersFor falls back to basename glob
+// patterns registered via RegisterByFilenameGlob (same fallback as HandlerFor).
 func (r *Registry) HandlersFor(path string) []FileHandler {
 	ext := strings.ToLower(filepath.Ext(path))
 	r.mu.RLock()
@@ -91,6 +135,12 @@ func (r *Registry) HandlersFor(path string) []FileHandler {
 	primary := r.byExt[ext]
 	extra := r.byExtExtra[ext]
 	if primary == nil && len(extra) == 0 {
+		base := filepath.Base(path)
+		for _, fp := range r.byFilenameGlob {
+			if ok, _ := filepath.Match(fp.pattern, base); ok {
+				return []FileHandler{fp.handler}
+			}
+		}
 		return nil
 	}
 	out := make([]FileHandler, 0, 1+len(extra))
@@ -142,4 +192,9 @@ func RegisterDefault(h FileHandler) {
 // RegisterDefaultAdditional is shorthand for DefaultRegistry().RegisterAdditional(h).
 func RegisterDefaultAdditional(h FileHandler) {
 	defaultRegistry.RegisterAdditional(h)
+}
+
+// RegisterDefaultByFilenameGlob is shorthand for DefaultRegistry().RegisterByFilenameGlob(h, patterns...).
+func RegisterDefaultByFilenameGlob(h FileHandler, patterns ...string) {
+	defaultRegistry.RegisterByFilenameGlob(h, patterns...)
 }

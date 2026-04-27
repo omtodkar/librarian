@@ -10,6 +10,7 @@ import (
 	_ "librarian/internal/indexer/handlers/code"            // register code grammars (Go, ...)
 	_ "librarian/internal/indexer/handlers/code/connectes"  // register connect-es stub handler (additional, .ts/.js)
 	_ "librarian/internal/indexer/handlers/config"          // register config handlers (YAML/JSON/...)
+	_ "librarian/internal/indexer/handlers/dockerfile"      // register Dockerfile handler (.dockerfile, Dockerfile, Dockerfile.*)
 	_ "librarian/internal/indexer/handlers/markdown"        // register markdown handler
 	_ "librarian/internal/indexer/handlers/office"          // register DOCX/XLSX/PPTX handlers
 	_ "librarian/internal/indexer/handlers/pdf"             // register PDF handler
