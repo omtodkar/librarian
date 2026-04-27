@@ -283,11 +283,10 @@ export function LoginPage() {
 	}
 }
 
-// TestCallRPC_OutOfScope_CrossFile documents the v1 limitation: when a client
-// is constructed in one file and called from another, NO edge is emitted.
-// This is the dominant Next.js pattern (shared client module), and the correct
-// behaviour to file a follow-up for (lib-44f).
-func TestCallRPC_OutOfScope_CrossFile(t *testing.T) {
+// TestCallRPC_CrossFileExportedClient verifies the v2 cross-file case: a client
+// constructed and exported in lib/clients.ts and invoked in app/page.tsx produces
+// a call_rpc edge from page.Page to the proto rpc node.
+func TestCallRPC_CrossFileExportedClient(t *testing.T) {
 	dir := t.TempDir()
 	writeImplementsRPCFixture(t, dir, map[string]string{
 		"api/auth.proto": `syntax = "proto3";
@@ -312,7 +311,6 @@ const transport = {};
 export const authClient = createPromiseClient(AuthService, transport);
 `,
 		// app/page.tsx imports the pre-built client and calls it.
-		// v1 does NOT detect this pattern (cross-file).
 		"app/page.tsx": `import { authClient } from "../lib/clients";
 
 export function Page() {
@@ -326,17 +324,29 @@ export function Page() {
 		t.Fatalf("IndexProjectGraph: %v", err)
 	}
 
-	// Check both the proto rpc (PascalCase, canonical target) and the stub
-	// (lowerCamelCase) — neither should have a call_rpc edge.
-	for _, rpcPath := range []string{"auth.v1.AuthService.Login", "auth.v1.AuthService.login"} {
-		rpcID := store.SymbolNodeID(rpcPath)
-		edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
-		if err != nil {
-			t.Fatalf("Neighbors(call_rpc, %s): %v", rpcPath, err)
-		}
-		if len(edges) != 0 {
-			t.Errorf("v1 cross-file: expected 0 call_rpc edges on %s; got %d: %+v", rpcPath, len(edges), edges)
-		}
+	// The proto rpc (PascalCase) should have one call_rpc edge from page.Page.
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected 1 call_rpc edge into auth.v1.AuthService.Login; got %d: %+v", len(edges), edges)
+	}
+	wantCaller := store.SymbolNodeID("page.Page")
+	if edges[0].From != wantCaller {
+		t.Errorf("edge.From = %q, want %q", edges[0].From, wantCaller)
+	}
+
+	// The connect-es stub (lowerCamelCase) should never receive a call_rpc edge;
+	// buildCallRPCEdges always follows implements_rpc to the proto rpc.
+	stubID := store.SymbolNodeID("auth.v1.AuthService.login")
+	stubEdges, err := s.Neighbors(stubID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc, stub): %v", err)
+	}
+	if len(stubEdges) != 0 {
+		t.Errorf("expected 0 call_rpc edges on stub node; got %d: %+v", len(stubEdges), stubEdges)
 	}
 }
 
@@ -386,6 +396,107 @@ export function doSomething() {
 		if len(edges) != 0 {
 			t.Errorf("expected 0 call_rpc edges for non-connect usage on %s; got %d: %+v", rpcPath, len(edges), edges)
 		}
+	}
+}
+
+// TestCallRPC_CrossFileUnexportedClient verifies that a non-exported
+// createPromiseClient call does NOT appear in the pre-pass export map and
+// therefore does NOT generate a call_rpc edge when imported from another file.
+func TestCallRPC_CrossFileUnexportedClient(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+message LoginRequest {}
+message LoginReply {}
+`,
+		"gen/ts/auth_connect.ts": `export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: { login: { name: "Login" } },
+} as const;
+`,
+		// lib/internal.ts: client is NOT exported — should be excluded from pre-pass.
+		"lib/internal.ts": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../gen/ts/auth_connect";
+const transport = {};
+const authClient = createPromiseClient(AuthService, transport);
+`,
+		// app/page.tsx imports from the file but there is no exported client — no edge.
+		"app/page.tsx": `import { authClient } from "../lib/internal";
+
+export function Page() {
+  return authClient.login({});
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc): %v", err)
+	}
+	if len(edges) != 0 {
+		t.Errorf("unexported client: expected 0 call_rpc edges; got %d: %+v", len(edges), edges)
+	}
+}
+
+// TestCallRPC_CrossFileAliasedImport verifies that aliased cross-file imports
+// (import { authClient as client } from ...) produce a call_rpc edge using the
+// local alias name.
+func TestCallRPC_CrossFileAliasedImport(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+message LoginRequest {}
+message LoginReply {}
+`,
+		"gen/ts/auth_connect.ts": `export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: { login: { name: "Login" } },
+} as const;
+`,
+		"lib/clients.ts": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../gen/ts/auth_connect";
+const transport = {};
+export const authClient = createPromiseClient(AuthService, transport);
+`,
+		// Aliased import: authClient as client — the local alias drives edge detection.
+		"app/page.tsx": `import { authClient as client } from "../lib/clients";
+
+export function Page() {
+  return client.login({});
+}
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	rpcID := store.SymbolNodeID("auth.v1.AuthService.Login")
+	edges, err := s.Neighbors(rpcID, "in", store.EdgeKindCallRPC)
+	if err != nil {
+		t.Fatalf("Neighbors(call_rpc): %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("aliased import: expected 1 call_rpc edge; got %d: %+v", len(edges), edges)
+	}
+	wantCaller := store.SymbolNodeID("page.Page")
+	if edges[0].From != wantCaller {
+		t.Errorf("edge.From = %q, want %q", edges[0].From, wantCaller)
 	}
 }
 

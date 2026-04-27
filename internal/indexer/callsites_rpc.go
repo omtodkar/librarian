@@ -14,13 +14,14 @@ package indexer
 //     to avoid an import cycle (that package imports indexer for the handler
 //     interface; this file needs to import nothing from that package in return).
 //
-// # v1 limitations (file-scoped only)
+// # Known limitations
 //
-//   - Re-exported clients (authClient from lib/clients.ts called in app/page.tsx)
-//     — NOT linked. Cross-file v2 tracked in lib-44f.
 //   - Dynamic method selection (client[methodName](req)) — NOT linked.
-//   - Custom hook wrappers (useClient()) unless in the same file — NOT linked.
+//   - Custom hook wrappers (useClient()) — NOT linked.
 //   - Interceptor-wrapped clients that alias method names — NOT linked.
+//   - Re-export chains (lib/index.ts re-exports from lib/clients.ts) — NOT linked.
+//   - Re-exported clients via import { authClient } from "lib/clients" are linked
+//     as of v2 (lib-r4s.3); chained re-exports remain out of scope.
 //
 // # Enclosing-function skip rule
 //
@@ -38,6 +39,7 @@ import (
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
+	"librarian/internal/indexer/jsresolve"
 	tree_sitter_typescript "librarian/internal/indexer/handlers/code/tree_sitter_typescript/typescript"
 	"librarian/internal/store"
 )
@@ -84,6 +86,13 @@ type callSiteEdge struct {
 // Example: "auth_connect" → {"AuthService": "auth.v1.AuthService"}
 type connectExportIndex map[string]map[string]string
 
+// clientExports maps an absolute source file path to a map of exported
+// const name → proto typeName for every exported Connect-ES factory call
+// found in that file.
+//
+// Example: "/proj/lib/clients.ts" → {"authClient": "auth.v1.AuthService"}
+type clientExports map[string]map[string]string
+
 // buildCallRPCEdges is the post-graph-pass resolver that emits call_rpc edges
 // from TS/JS call sites to their proto rpc declarations.
 //
@@ -107,6 +116,10 @@ func (idx *Indexer) buildCallRPCEdges(result *GraphResult) {
 
 	root := idx.cfg.ProjectRoot
 
+	// Pre-pass: build a cross-file client export map so the per-file scan can
+	// resolve imported pre-built clients (e.g. authClient from lib/clients.ts).
+	exports := buildClientExportIndex(codeFileNodes, index, root)
+
 	for _, node := range codeFileNodes {
 		path := node.SourcePath
 		if path == "" {
@@ -126,7 +139,7 @@ func (idx *Indexer) buildCallRPCEdges(result *GraphResult) {
 			continue
 		}
 
-		edges := parseCallSites(path, content, index)
+		edges := parseCallSites(path, content, index, exports, root)
 		for _, e := range edges {
 			callerID := store.SymbolNodeID(e.callerPath)
 			stubID := store.SymbolNodeID(e.rpcPath) // lowerCamelCase stub symbol
@@ -218,12 +231,133 @@ func (idx *Indexer) buildConnectExportIndex() (connectExportIndex, error) {
 	return index, nil
 }
 
+// buildClientExportIndex runs a pre-pass over all TS/JS non-stub source files
+// and returns a clientExports map: absolute file path → (exported const name →
+// proto typeName) for every exported Connect-ES factory call found.
+func buildClientExportIndex(codeFileNodes []store.Node, index connectExportIndex, root string) clientExports {
+	exports := make(clientExports)
+	if len(index) == 0 {
+		return exports
+	}
+	parser := sitter.NewParser()
+	defer parser.Close()
+	if err := parser.SetLanguage(tsCallSiteLang); err != nil {
+		return exports
+	}
+	for _, node := range codeFileNodes {
+		path := node.SourcePath
+		if path == "" {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if !tsCallableExtensions[ext] {
+			continue
+		}
+		if isConnectStubPath(path) {
+			continue
+		}
+		content, err := readCallSiteFile(root, path)
+		if err != nil || len(content) == 0 {
+			continue
+		}
+		fileExports := extractExportedClients(content, parser, index)
+		if len(fileExports) == 0 {
+			continue
+		}
+		absPath := path
+		if !filepath.IsAbs(path) && root != "" {
+			absPath = filepath.Join(root, path)
+		}
+		exports[absPath] = fileExports
+	}
+	return exports
+}
+
+// extractExportedClients parses a single TS/JS file and returns a map of
+// exported Connect-ES client names → proto typeNames. Returns nil if none found.
+func extractExportedClients(content []byte, parser *sitter.Parser, index connectExportIndex) map[string]string {
+	tree := parser.ParseCtx(context.Background(), content, nil)
+	if tree == nil {
+		return nil
+	}
+	defer tree.Close()
+
+	treeRoot := tree.RootNode()
+	factories, bindings := callSiteScanImports(treeRoot, content, index)
+	if len(factories) == 0 {
+		return nil
+	}
+
+	exported := make(map[string]string)
+	callSiteWalkNodes(treeRoot, func(n *sitter.Node) bool {
+		if n.Kind() != "variable_declarator" {
+			return true
+		}
+		nameNode, typeName, ok := callSiteDetectClientVar(n, content, factories, bindings)
+		if !ok || nameNode.Kind() != "identifier" {
+			return false
+		}
+		if !callSiteIsExported(n) {
+			return false
+		}
+		exported[nameNode.Utf8Text(content)] = typeName
+		return false
+	})
+	if len(exported) == 0 {
+		return nil
+	}
+	return exported
+}
+
+// callSiteScanCrossFileClients looks up imported pre-built Connect-ES client
+// variables by resolving relative import specifiers against clientExports.
+// Returns a map of local name → typeName for pre-populated clientVars.
+func callSiteScanCrossFileClients(root *sitter.Node, src []byte, exports clientExports, fileAbs string) map[string]string {
+	prebuilt := make(map[string]string)
+	if len(exports) == 0 || fileAbs == "" {
+		return prebuilt
+	}
+	callSiteWalkNodes(root, func(n *sitter.Node) bool {
+		if n.Kind() != "import_statement" {
+			return true
+		}
+		module := callSiteImportModuleString(n, src)
+		if module == "" {
+			return false
+		}
+		if !strings.HasPrefix(module, "./") && !strings.HasPrefix(module, "../") {
+			return false
+		}
+		resolved, ok := jsresolve.Resolve(module, fileAbs, jsresolve.StatIsFile)
+		if !ok {
+			return false
+		}
+		fileExports, ok := exports[resolved]
+		if !ok {
+			return false
+		}
+		callSiteForEachNamedImport(n, src, func(exported, local string) {
+			if typeName, found := fileExports[exported]; found {
+				prebuilt[local] = typeName
+			}
+		})
+		return false
+	})
+	return prebuilt
+}
+
 // ── tree-sitter call-site parser ───────────────────────────────────────────
 
 // parseCallSites finds Connect-ES client call sites in a TS/JS source file.
 // Returns (callerSymbolPath, rpcPath) pairs for each detected call site.
-func parseCallSites(filePath string, content []byte, index connectExportIndex) []callSiteEdge {
-	if len(index) == 0 || len(content) == 0 {
+//
+// exports carries the cross-file pre-pass map: absolute file path → (exported
+// name → typeName). root is the project root used to resolve relative paths.
+func parseCallSites(filePath string, content []byte, index connectExportIndex, exports clientExports, root string) []callSiteEdge {
+	if len(content) == 0 {
+		return nil
+	}
+	if len(index) == 0 {
 		return nil
 	}
 	parser := sitter.NewParser()
@@ -238,19 +372,29 @@ func parseCallSites(filePath string, content []byte, index connectExportIndex) [
 	defer tree.Close()
 
 	stem := callSiteFilenameStem(filePath)
-	root := tree.RootNode()
+	treeRoot := tree.RootNode()
 
-	factories, bindings := callSiteScanImports(root, content, index)
-	if len(factories) == 0 && len(bindings) == 0 {
+	fileAbs := filePath
+	if !filepath.IsAbs(filePath) && root != "" {
+		fileAbs = filepath.Join(root, filePath)
+	}
+
+	factories, bindings := callSiteScanImports(treeRoot, content, index)
+	prebuiltClients := callSiteScanCrossFileClients(treeRoot, content, exports, fileAbs)
+
+	if len(factories) == 0 && len(bindings) == 0 && len(prebuiltClients) == 0 {
 		return nil
 	}
 
-	clientVars, destructured := callSiteCollectBindings(root, content, factories, bindings)
+	clientVars, destructured := callSiteCollectBindings(treeRoot, content, factories, bindings)
+	for k, v := range prebuiltClients {
+		clientVars[k] = v
+	}
 	if len(clientVars) == 0 && len(destructured) == 0 {
 		return nil
 	}
 
-	return callSiteCollectEdges(root, content, stem, clientVars, destructured)
+	return callSiteCollectEdges(treeRoot, content, stem, clientVars, destructured)
 }
 
 // callSiteScanImports walks import_statement nodes and returns:
@@ -307,44 +451,8 @@ func callSiteCollectBindings(root *sitter.Node, src []byte, factories map[string
 		if n.Kind() != "variable_declarator" {
 			return true
 		}
-		value := n.ChildByFieldName("value")
-		if value == nil {
-			return false
-		}
-		actual := value
-		// Unwrap await_expression defensively.
-		if actual.Kind() == "await_expression" {
-			if inner := actual.NamedChild(0); inner != nil {
-				actual = inner
-			}
-		}
-		if actual.Kind() != "call_expression" {
-			return false
-		}
-		fn := actual.ChildByFieldName("function")
-		if fn == nil || !factories[fn.Utf8Text(src)] {
-			return false
-		}
-		args := actual.ChildByFieldName("arguments")
-		if args == nil {
-			return false
-		}
-		var firstArg *sitter.Node
-		for i := uint(0); i < args.NamedChildCount(); i++ {
-			if c := args.NamedChild(i); c != nil {
-				firstArg = c
-				break
-			}
-		}
-		if firstArg == nil || firstArg.Kind() != "identifier" {
-			return false
-		}
-		typeName, ok := bindings[firstArg.Utf8Text(src)]
+		nameNode, typeName, ok := callSiteDetectClientVar(n, src, factories, bindings)
 		if !ok {
-			return false
-		}
-		nameNode := n.ChildByFieldName("name")
-		if nameNode == nil {
 			return false
 		}
 		switch nameNode.Kind() {
@@ -373,6 +481,67 @@ func callSiteCollectBindings(root *sitter.Node, src []byte, factories map[string
 		return false
 	})
 	return clientVars, destructured
+}
+
+// callSiteDetectClientVar checks if a variable_declarator node is a Connect-ES
+// factory call (createPromiseClient / createClient). Returns the name node,
+// the resolved proto typeName, and ok=true when matched.
+func callSiteDetectClientVar(n *sitter.Node, src []byte, factories map[string]bool, bindings map[string]string) (nameNode *sitter.Node, typeName string, ok bool) {
+	value := n.ChildByFieldName("value")
+	if value == nil {
+		return nil, "", false
+	}
+	actual := value
+	// Unwrap await_expression defensively.
+	if actual.Kind() == "await_expression" {
+		if inner := actual.NamedChild(0); inner != nil {
+			actual = inner
+		}
+	}
+	if actual.Kind() != "call_expression" {
+		return nil, "", false
+	}
+	fn := actual.ChildByFieldName("function")
+	if fn == nil || !factories[fn.Utf8Text(src)] {
+		return nil, "", false
+	}
+	args := actual.ChildByFieldName("arguments")
+	if args == nil {
+		return nil, "", false
+	}
+	var firstArg *sitter.Node
+	for i := uint(0); i < args.NamedChildCount(); i++ {
+		if c := args.NamedChild(i); c != nil {
+			firstArg = c
+			break
+		}
+	}
+	if firstArg == nil || firstArg.Kind() != "identifier" {
+		return nil, "", false
+	}
+	tn, found := bindings[firstArg.Utf8Text(src)]
+	if !found {
+		return nil, "", false
+	}
+	nn := n.ChildByFieldName("name")
+	if nn == nil {
+		return nil, "", false
+	}
+	return nn, tn, true
+}
+
+// callSiteIsExported reports whether the variable_declarator node is a direct
+// child of a lexical/variable declaration inside an export_statement.
+func callSiteIsExported(n *sitter.Node) bool {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "export_statement":
+			return true
+		case "program", "statement_block", "function_body":
+			return false
+		}
+	}
+	return false
 }
 
 // callSiteCollectEdges walks call_expression nodes and emits edges for:

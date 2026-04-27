@@ -112,15 +112,6 @@ func TestResolveJSImport_DirectoryCandidateRejectedByStatFn(t *testing.T) {
 	}
 }
 
-// TestStatIsFile_RejectsDirectories pins the production statFn semantics:
-// !info.IsDir() must hold for the probe to succeed. Guards against a
-// future refactor that forgets the directory check.
-func TestStatIsFile_RejectsDirectories(t *testing.T) {
-	dir := t.TempDir()
-	if statIsFile(dir) {
-		t.Errorf("statIsFile returned true for a directory %q", dir)
-	}
-}
 
 func TestResolveJSImport_TSExplicitFallsBackToTSXSibling(t *testing.T) {
 	got, ok := resolveJSImport("./Button.ts", "/proj/src/a.ts",
