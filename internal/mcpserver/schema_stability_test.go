@@ -25,6 +25,7 @@ func TestMCPStableSchema(t *testing.T) {
 	registerGetContext(srv, nil, nil, false)
 	registerListDocuments(srv, nil)
 	registerUpdateDocs(srv, nil, nil, nil)
+	registerCaptureSession(srv, nil, nil, nil)
 	registerTraceRPC(srv, nil, nil)
 
 	tools := srv.ListTools()
@@ -59,6 +60,11 @@ func TestMCPStableSchema(t *testing.T) {
 			{"file_path", "string"},
 			{"content", "string"},
 			{"reindex", "string"},
+		},
+		"capture_session": {
+			{"title", "string"},
+			{"body", "string"},
+			{"category", "string"},
 		},
 		"trace_rpc": {
 			{"rpc", "string"},

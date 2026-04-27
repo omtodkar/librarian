@@ -18,7 +18,7 @@ func Serve(s *store.Store, cfg *config.Config, embedder embedding.Embedder) erro
 		"0.2.0",
 		server.WithToolCapabilities(false),
 		server.WithRecovery(),
-		server.WithInstructions("librarian 0.2.0. Provides semantic search across project documentation. Tools: search_docs (quick search), get_context (deep briefing + graph traversal), get_document (full file content), list_documents (enumerate index), update_docs (write + re-index), trace_rpc (gRPC end-to-end trace). Stable API: parameter names locked until v2 — see docs/mcp-tools.md for stability classifications."),
+		server.WithInstructions("librarian 0.2.0. Provides semantic search across project documentation. Tools: search_docs (quick search), get_context (deep briefing + graph traversal), get_document (full file content), list_documents (enumerate index), update_docs (write + re-index), capture_session (write AI session notes + reindex + return chunk IDs), trace_rpc (gRPC end-to-end trace). Stable API: parameter names locked until v2 — see docs/mcp-tools.md for stability classifications."),
 	)
 
 	registerSearchDocs(srv, s, embedder, cfg.Search.HybridSearch)
@@ -27,6 +27,7 @@ func Serve(s *store.Store, cfg *config.Config, embedder embedding.Embedder) erro
 	registerGetContext(srv, s, embedder, cfg.Search.HybridSearch)
 	registerListDocuments(srv, s)
 	registerUpdateDocs(srv, s, cfg, embedder)
+	registerCaptureSession(srv, s, cfg, embedder)
 	registerTraceRPC(srv, s, cfg)
 
 	if err := server.ServeStdio(srv,
