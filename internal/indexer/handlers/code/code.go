@@ -336,7 +336,8 @@ type CallRef struct {
 // CallExpressions is called once per file after all Units have been built.
 // Each returned CallRef becomes a ParsedDoc.Reference with Kind="call",
 // Source resolved against doc.Units, Target resolved or bare, and
-// Metadata["confidence"] of "resolved" (same-file callee) or "unresolved".
+// Metadata["confidence"] of "resolved" (unique same-file callee), "ambiguous"
+// (multiple same-file callees share the bare name), or "unresolved" (no match).
 //
 // Grammars that don't implement this are unaffected; ParseCtx type-asserts
 // and only calls it when present.
@@ -454,15 +455,21 @@ func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseCon
 // CallRefs whose CallerPath matches no Unit are silently dropped — a call
 // outside any known symbol boundary has no graph node to anchor the edge.
 //
-// Callee resolution: the callee name is looked up by Unit.Title. A match sets
-// confidence="resolved" and uses the full Unit.Path as the target; no match
-// keeps the bare CalleeName and sets confidence="unresolved" so downstream
-// queries can tell precise edges from speculative ones.
+// Callee resolution: the callee name is looked up by Unit.Title. A unique match
+// sets confidence="resolved" and uses the full Unit.Path as the target. When
+// multiple same-file symbols share a title (e.g. two methods both named Login
+// on different receivers), confidence="ambiguous" is emitted and the target
+// stays as the bare CalleeName to avoid false precision. No match keeps the
+// bare CalleeName and sets confidence="unresolved" so downstream queries can
+// tell precise edges from speculative ones.
 func (h *CodeHandler) extractCallRefs(ce callExtractor, root *sitter.Node, source []byte, doc *indexer.ParsedDoc) {
 	// callerMap: full-path and path-without-first-segment → canonical Unit.Path.
 	callerMap := make(map[string]string, len(doc.Units)*2)
-	// calleeMap: bare Title → Unit.Path for same-file callee resolution.
-	calleeMap := make(map[string]string, len(doc.Units))
+	// calleeMap: bare Title → []Unit.Path for same-file callee resolution.
+	// Collecting all paths per title lets us detect same-title collisions
+	// (e.g. two methods both named Login on different receivers) and emit
+	// confidence="ambiguous" instead of silently picking the first-seen path.
+	calleeMap := make(map[string][]string, len(doc.Units))
 	for _, u := range doc.Units {
 		callerMap[u.Path] = u.Path
 		if dot := strings.Index(u.Path, "."); dot >= 0 {
@@ -471,9 +478,7 @@ func (h *CodeHandler) extractCallRefs(ce callExtractor, root *sitter.Node, sourc
 				callerMap[local] = u.Path
 			}
 		}
-		if _, exists := calleeMap[u.Title]; !exists {
-			calleeMap[u.Title] = u.Path
-		}
+		calleeMap[u.Title] = append(calleeMap[u.Title], u.Path)
 	}
 
 	for _, cr := range ce.CallExpressions(root, source) {
@@ -486,9 +491,16 @@ func (h *CodeHandler) extractCallRefs(ce callExtractor, root *sitter.Node, sourc
 		}
 		target := cr.CalleeName
 		confidence := "unresolved"
-		if path, ok := calleeMap[cr.CalleeName]; ok {
-			target = path
-			confidence = "resolved"
+		if paths, ok := calleeMap[cr.CalleeName]; ok {
+			if len(paths) == 1 {
+				target = paths[0]
+				confidence = "resolved"
+			} else {
+				// Keep target as the bare CalleeName — picking paths[0] would
+				// anchor the edge to an arbitrarily ordered receiver path,
+				// misleading consumers who might follow it.
+				confidence = "ambiguous"
+			}
 		}
 		doc.Refs = append(doc.Refs, indexer.Reference{
 			Kind:   store.EdgeKindCall,

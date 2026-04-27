@@ -23,7 +23,7 @@ const (
 	EdgeKindRequires      = "requires"        // symbol → symbol (Dart `mixin M on Base` — use-site constraint, not an inheritance parent; kept distinct so "all parents of X" queries stay clean)
 	EdgeKindPart          = "part"            // code_file → code_file (Dart `part 'foo.dart'` / `part of 'bar.dart'` file-join; a single Dart library lives across multiple files)
 	EdgeKindImplementsRPC = "implements_rpc"  // symbol → symbol (generated-code method → proto rpc declaration; codegen derivation, not inheritance — kept distinct so "all parents of X" queries stay clean)
-	EdgeKindCall          = "call"      // symbol → symbol (function/method call; Metadata["confidence"]="resolved"|"unresolved")
+	EdgeKindCall          = "call"      // symbol → symbol (function/method call; Metadata["confidence"]="resolved"|"unresolved"|"ambiguous")
 	EdgeKindCallRPC       = "call_rpc"  // symbol → symbol (call site in hand-written code → proto rpc declaration; runtime invocation, not codegen derivation — kept distinct from implements_rpc so derivation and invocation queries stay clean)
 	EdgeKindTests         = "tests"     // code_file → code_file (test file → subject file; path-convention heuristic, additive signal)
 )

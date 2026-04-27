@@ -1038,3 +1038,51 @@ var x = helper()
 		t.Errorf("package-level call produced %d call ref(s); want 0: %+v", len(callRefs), callRefs)
 	}
 }
+
+// TestGoGrammar_CallEdges_AmbiguousOnSameTitleCollision verifies that when two
+// methods in the same file share a bare name (e.g. Login on AuthServiceServer
+// and UnimplementedAuthServiceServer), a call to that name gets
+// confidence="ambiguous" rather than "resolved" pointing at the wrong receiver.
+func TestGoGrammar_CallEdges_AmbiguousOnSameTitleCollision(t *testing.T) {
+	src := []byte(`package svc
+
+type AuthServiceServer struct{}
+
+func (s *AuthServiceServer) Login() {}
+
+type UnimplementedAuthServiceServer struct{}
+
+func (s *UnimplementedAuthServiceServer) Login() {}
+
+type Client struct{}
+
+func (c *Client) DoLogin() {
+	c.Login()
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("svc/auth.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "svc.Client.DoLogin")
+	if len(refs) == 0 {
+		t.Fatalf("expected call refs from svc.Client.DoLogin, got none")
+	}
+
+	// When ambiguous, target is the bare callee name — not a receiver-qualified path.
+	var loginRef *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "Login" {
+			loginRef = &refs[i]
+			break
+		}
+	}
+	if loginRef == nil {
+		t.Fatalf("expected a call ref with Target=\"Login\"; refs from DoLogin: %+v", refs)
+	}
+	if loginRef.Metadata == nil || loginRef.Metadata["confidence"] != "ambiguous" {
+		t.Errorf("expected confidence=ambiguous for ambiguous Login call; got %v", loginRef.Metadata)
+	}
+}
