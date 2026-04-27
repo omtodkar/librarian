@@ -1,8 +1,10 @@
 package sql_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"librarian/internal/indexer"
 	_ "librarian/internal/indexer/handlers/defaults" // wire all handlers including sql
@@ -72,7 +74,7 @@ func TestHandler_StatementBoundaryChunking(t *testing.T) {
 	var sb strings.Builder
 	for i := 0; i < 20; i++ {
 		sb.WriteString("CREATE TABLE tbl_")
-		writeIntStr(&sb, i)
+		sb.WriteString(strconv.Itoa(i))
 		sb.WriteString(" (id SERIAL PRIMARY KEY, payload TEXT);\n\n")
 	}
 	content := []byte(sb.String())
@@ -115,10 +117,10 @@ func TestHandler_LongSingleStatementFallsBackToChunker(t *testing.T) {
 	sb.WriteString("CREATE OR REPLACE FUNCTION big_func() RETURNS void AS $$\n")
 	for i := 0; i < 200; i++ {
 		sb.WriteString("  -- line ")
-		writeIntStr(&sb, i)
+		sb.WriteString(strconv.Itoa(i))
 		sb.WriteString(" of function body with some SQL\n")
 		sb.WriteString("  INSERT INTO log_table VALUES (")
-		writeIntStr(&sb, i)
+		sb.WriteString(strconv.Itoa(i))
 		sb.WriteString(", 'entry');\n")
 	}
 	sb.WriteString("$$ LANGUAGE plpgsql")
@@ -280,20 +282,59 @@ func TestHandler_ChunkEmbeddingTextContainsTitle(t *testing.T) {
 	}
 }
 
-// writeIntStr writes a non-negative integer to a strings.Builder without importing strconv.
-func writeIntStr(sb *strings.Builder, n int) {
-	if n == 0 {
-		sb.WriteByte('0')
-		return
+func TestHandler_StatementTitle_UnicodeNoCorruption(t *testing.T) {
+	// Statement whose first line contains multi-byte Unicode characters. The title
+	// must not split a rune at a byte boundary — the resulting string must be valid UTF-8.
+	// We build a first line of exactly 65 runes using the 3-byte character '日' so that
+	// naive byte-slice truncation at byte 60 would land mid-rune.
+	var sb strings.Builder
+	sb.WriteString("-- 日本語テーブル: ユーザー情報を保持するテーブルです。これは長いコメント行\n")
+	sb.WriteString("CREATE TABLE ユーザー (id SERIAL PRIMARY KEY);")
+	content := []byte(sb.String())
+
+	h := sqlhandler.New()
+	doc, err := h.Parse("unicode_schema.sql", content)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
 	}
-	var digits [20]byte
-	pos := len(digits)
-	for n > 0 {
-		pos--
-		digits[pos] = byte('0' + n%10)
-		n /= 10
+	if len(doc.Units) == 0 {
+		t.Fatal("expected at least one Unit")
 	}
-	sb.Write(digits[pos:])
+
+	title := doc.Units[0].Title
+	if !utf8.ValidString(title) {
+		t.Errorf("Unit.Title is not valid UTF-8: %q", title)
+	}
+
+	// Title must be non-empty and contain recognisable content (the leading comment
+	// text or the CREATE TABLE keyword).
+	if title == "" {
+		t.Error("Unit.Title must not be empty")
+	}
+
+	// The rune count of the title must not exceed 61 (60 runes + possible "…").
+	runeCount := len([]rune(title))
+	if runeCount > 61 {
+		t.Errorf("title rune count %d exceeds cap of 61: %q", runeCount, title)
+	}
+}
+
+func TestHandler_StatementTitle_UnicodeExactlyAtBoundary(t *testing.T) {
+	// Build a first line of exactly 60 ASCII chars — should NOT be truncated.
+	line := strings.Repeat("x", 60)
+	content := []byte("-- " + line + "\nSELECT 1;")
+	h := sqlhandler.New()
+	doc, err := h.Parse("boundary.sql", content)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Units) == 0 {
+		t.Fatal("expected at least one Unit")
+	}
+	title := doc.Units[0].Title
+	if !utf8.ValidString(title) {
+		t.Errorf("title not valid UTF-8: %q", title)
+	}
 }
 
 func unitTitles(units []indexer.Unit) []string {

@@ -9,6 +9,7 @@ package sql
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"librarian/internal/indexer"
@@ -124,8 +125,7 @@ func splitStatements(src string) []string {
 		state     = stateNormal
 		stmts     []string
 		pending   strings.Builder // current accumulated text including pending comments
-		prevState parseState
-		dollarTag string // captures the opening $tag$ of a dollar-quoted string
+		dollarTag string          // captures the opening $tag$ of a dollar-quoted string
 	)
 
 	runes := []rune(src)
@@ -185,14 +185,12 @@ func splitStatements(src string) []string {
 		case stateNormal:
 			switch {
 			case ch == '-' && i+1 < n && runes[i+1] == '-':
-				prevState = state
 				state = stateLineComment
 				pending.WriteRune(ch)
 				pending.WriteRune(runes[i+1])
 				i++
 
 			case ch == '/' && i+1 < n && runes[i+1] == '*':
-				prevState = state
 				state = stateBlockComment
 				pending.WriteRune(ch)
 				pending.WriteRune(runes[i+1])
@@ -230,7 +228,6 @@ func splitStatements(src string) []string {
 				pending.WriteRune(ch)
 			}
 		}
-		_ = prevState
 	}
 
 	// Anything remaining after the last semicolon (or with no semicolons at all).
@@ -267,43 +264,21 @@ func statementTitle(stmt string, n int) string {
 	// Strip leading comments.
 	text := strings.TrimSpace(stripLeadingComments(stmt))
 	if text == "" {
-		return formatStatementN(n)
+		return "statement " + strconv.Itoa(n)
 	}
 
 	// Take first line, normalise whitespace, cap length.
 	line := strings.TrimSpace(strings.SplitN(text, "\n", 2)[0])
 	// Strip trailing semicolon from the title.
 	line = strings.TrimRight(line, "; \t")
-	if len(line) > 60 {
-		line = line[:60] + "…"
+	runes := []rune(line)
+	if len(runes) > 60 {
+		line = string(runes[:60]) + "…"
 	}
 	if line == "" {
-		return formatStatementN(n)
+		return "statement " + strconv.Itoa(n)
 	}
 	return line
-}
-
-func formatStatementN(n int) string {
-	var b strings.Builder
-	b.WriteString("statement ")
-	writeInt(&b, n)
-	return b.String()
-}
-
-// writeInt writes a non-negative integer to b without importing strconv.
-func writeInt(b *strings.Builder, n int) {
-	if n == 0 {
-		b.WriteByte('0')
-		return
-	}
-	var digits [20]byte
-	pos := len(digits)
-	for n > 0 {
-		pos--
-		digits[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	b.Write(digits[pos:])
 }
 
 // stripLeadingComments removes leading -- line comments and /* block comments */
