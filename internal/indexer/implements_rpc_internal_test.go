@@ -1,10 +1,35 @@
 package indexer
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"librarian/internal/config"
 	"librarian/internal/store"
 )
+
+// newImplementsRPCInternalIndexer opens a minimal Indexer+Store for internal
+// implements_rpc tests. Lives in package indexer so unexported methods are
+// reachable. Mirrors the external openImplementsRPCStore helper shape.
+func newImplementsRPCInternalIndexer(t *testing.T) (*Indexer, *store.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, ".librarian", "test.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(dbPath, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{
+		ProjectRoot: dir,
+		Graph:       config.GraphConfig{MaxWorkers: 1},
+	}
+	return New(s, cfg, nil), s
+}
 
 // TestLowerFirst pins the PascalCase → lowerCamelCase helper that the
 // implements_rpc resolver leans on for the Dart / TS derivations. Covers:
@@ -67,5 +92,53 @@ func TestGraphTargetID_ImplementsRPCRoutesToSymbol(t *testing.T) {
 	}
 	if got, want := graphNodeKindFromRef(ref), store.NodeKindSymbol; got != want {
 		t.Errorf("graphNodeKindFromRef(implements_rpc).kind = %q, want %q", got, want)
+	}
+}
+
+// TestBuildImplementsRPCEdges_StoreErrorPopulatesErrors pins the error-return
+// branch: when ListSymbolNodesWithMetadataContaining fails (e.g. closed DB),
+// buildImplementsRPCEdges must append to result.Errors rather than swallowing
+// the failure silently.
+func TestBuildImplementsRPCEdges_StoreErrorPopulatesErrors(t *testing.T) {
+	idx, s := newImplementsRPCInternalIndexer(t)
+	// Close the store so every DB call returns "sql: database is closed".
+	s.Close()
+
+	result := &GraphResult{}
+	idx.buildImplementsRPCEdges(result) // must not panic
+	if len(result.Errors) == 0 {
+		t.Error("expected result.Errors populated on store failure, got none")
+	}
+}
+
+// TestBuildImplementsRPCEdges_DotLeadingSymSkippedGracefully pins the pkg==""
+// defensive guard in linkRPCImplementations: a sym: node whose path starts
+// with a dot (e.g. sym:.Svc.Method) produces an empty pkg segment after the
+// dot-split, so the resolver skips it without emitting an edge or an error.
+// The proto grammar maintains the non-empty-pkg invariant upstream; this test
+// guards the graceful-skip path for any malformed row that bypasses it.
+func TestBuildImplementsRPCEdges_DotLeadingSymSkippedGracefully(t *testing.T) {
+	idx, s := newImplementsRPCInternalIndexer(t)
+
+	// Seed a sym: node with a dot-leading path. The protoRPCMetadataMarker
+	// substring in its Metadata causes ListSymbolNodesWithMetadataContaining
+	// to return it, exercising the linkRPCImplementations code path.
+	malformedID := store.SymbolNodeID(".Svc.Method") // "sym:.Svc.Method"
+	if err := s.UpsertNode(store.Node{
+		ID:       malformedID,
+		Kind:     store.NodeKindSymbol,
+		Label:    ".Svc.Method",
+		Metadata: `{"input_type": "some.Request"}`,
+	}); err != nil {
+		t.Fatalf("seed malformed node: %v", err)
+	}
+
+	result := &GraphResult{}
+	idx.buildImplementsRPCEdges(result) // must not panic, must skip the node
+	if len(result.Errors) != 0 {
+		t.Errorf("expected no errors for dot-leading sym: node; got %v", result.Errors)
+	}
+	if result.EdgesAdded != 0 {
+		t.Errorf("EdgesAdded = %d, want 0 (malformed node skipped by pkg==\"\" guard)", result.EdgesAdded)
 	}
 }
