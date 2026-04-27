@@ -1417,6 +1417,95 @@ class Foo(TypedDict):
 	}
 }
 
+// TestPythonGrammar_TypingTypedDict_AttributeForm covers `class Foo(typing.TypedDict):`.
+// Attribute-chain base — same code path as TypingNamedTuple_AttributeForm but for TypedDict.
+func TestPythonGrammar_TypingTypedDict_AttributeForm(t *testing.T) {
+	src := []byte(`class Foo(typing.TypedDict):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing.TypedDict" {
+		t.Errorf("Target = %q, want ext:typing.TypedDict", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_TypingExtensions_AttributeForm covers `class Foo(typing_extensions.TypedDict):`.
+// Attribute-chain form with typing_extensions — exercises the ext:typing_extensions.TypedDict path.
+func TestPythonGrammar_TypingExtensions_AttributeForm(t *testing.T) {
+	src := []byte(`class Foo(typing_extensions.TypedDict):
+    x: int
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("m.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "ext:typing_extensions.TypedDict" {
+		t.Errorf("Target = %q, want ext:typing_extensions.TypedDict", refs[0].Target)
+	}
+	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
+		t.Errorf("should not be unresolved: %+v", refs[0].Metadata)
+	}
+}
+
+// TestPythonGrammar_BareTypingBase_NoImport verifies that bare `NamedTuple` or
+// `TypedDict` without any import binding stays unresolved — the ext: rewrite only
+// fires after import resolution maps the bare name to its qualified form.
+func TestPythonGrammar_BareTypingBase_NoImport(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		name string
+	}{
+		{
+			src:  "class Foo(NamedTuple):\n    pass\n",
+			name: "NamedTuple",
+		},
+		{
+			src:  "class Foo(TypedDict):\n    pass\n",
+			name: "TypedDict",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := code.New(code.NewPythonGrammar())
+			doc, err := h.Parse("m.py", []byte(tc.src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			refs := inheritsRefsBySource(doc, "m.Foo")
+			if len(refs) != 1 {
+				t.Fatalf("expected 1 inherits ref, got %d (%+v)", len(refs), refs)
+			}
+			// Without an import, the bare name cannot be resolved to typing.X
+			// so no ext: rewrite should happen.
+			if strings.HasPrefix(refs[0].Target, "ext:") {
+				t.Errorf("bare %s without import should not produce ext: target; got %q", tc.name, refs[0].Target)
+			}
+			// Must remain as bare name and be marked unresolved.
+			if refs[0].Target != tc.name {
+				t.Errorf("Target = %q, want %q (unresolved bare name)", refs[0].Target, tc.name)
+			}
+			if v, _ := refs[0].Metadata["unresolved"].(bool); !v {
+				t.Errorf("bare %s without import should be unresolved; metadata=%+v", tc.name, refs[0].Metadata)
+			}
+		})
+	}
+}
+
 // TestPythonGrammar_TypingNamedTuple_AliasedImport covers the aliased form:
 // `from typing import NamedTuple as NT` followed by `class Foo(NT):`.
 func TestPythonGrammar_TypingNamedTuple_AliasedImport(t *testing.T) {
