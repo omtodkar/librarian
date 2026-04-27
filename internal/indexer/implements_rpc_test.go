@@ -2131,20 +2131,24 @@ message LoginReply {}
 			t.Fatalf("IndexProjectGraph: %v", err)
 		}
 		target := store.SymbolNodeID("auth.AuthService.Login")
+		want := store.SymbolNodeID("auth_grpc_web_pb.AuthServiceClient.login")
 		edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
 		if err != nil {
 			t.Fatalf("Neighbors: %v", err)
 		}
-		if len(edges) == 0 {
-			t.Errorf("expected implements_rpc edge for in-tree auth_grpc_web_pb.ts; got none")
+		if len(edges) != 1 {
+			t.Fatalf("expected exactly 1 implements_rpc edge; got %d: %+v", len(edges), edges)
+		}
+		if edges[0].From != want {
+			t.Errorf("From: got %s, want %s", edges[0].From, want)
 		}
 	})
 
 	t.Run("OutOfTreeDropped", func(t *testing.T) {
 		dir := t.TempDir()
 		writeImplementsRPCFixture(t, dir, map[string]string{
-			"buf.gen.yaml":                        manifest,
-			"api/auth.proto":                       proto,
+			"buf.gen.yaml":                    manifest,
+			"api/auth.proto":                  proto,
 			"handwritten/auth_grpc_web_pb.ts": stub,
 		})
 		idx, s := openImplementsRPCStore(t, dir)
@@ -2190,7 +2194,7 @@ message LoginReply {}
 		dir := t.TempDir()
 		writeImplementsRPCFixture(t, dir, map[string]string{
 			"buf.gen.yaml":                  manifest,
-			"api/auth.proto":                 proto,
+			"api/auth.proto":                proto,
 			"gen/ts/api/auth_pb_service.ts": stub,
 		})
 		idx, s := openImplementsRPCStore(t, dir)
@@ -2198,12 +2202,16 @@ message LoginReply {}
 			t.Fatalf("IndexProjectGraph: %v", err)
 		}
 		target := store.SymbolNodeID("auth.AuthService.Login")
+		want := store.SymbolNodeID("auth_pb_service.AuthServiceClient.login")
 		edges, err := s.Neighbors(target, "in", store.EdgeKindImplementsRPC)
 		if err != nil {
 			t.Fatalf("Neighbors: %v", err)
 		}
-		if len(edges) == 0 {
-			t.Errorf("expected implements_rpc edge for in-tree auth_pb_service.ts; got none")
+		if len(edges) != 1 {
+			t.Fatalf("expected exactly 1 implements_rpc edge; got %d: %+v", len(edges), edges)
+		}
+		if edges[0].From != want {
+			t.Errorf("From: got %s, want %s", edges[0].From, want)
 		}
 	})
 

@@ -23,8 +23,8 @@ between the two — this is *file-stem drift*.
 | `@bufbuild/protoc-gen-es` | `buf.build/bufbuild/es` | `*_pb.ts` (messages only) | — | n/a | No service symbols in `*_pb.ts` |
 | `@connectrpc/protoc-gen-connect-es` | `buf.build/connectrpc/es` | `*_connect.ts` | `create*Client()` object literal | ✅ | Handled by `connectes` handler via `typeName`; stem-based matching not used |
 | `ts-proto` | `ts-proto` / `protoc-gen-ts-proto` | `{file_stem}.ts` | `SvcClient` interface + `SvcClientImpl` class | ✅ (simple) / ⚠️ (multi-segment pkg) | File stem mirrors proto file name; single-segment packages (e.g., `auth.proto` → `package auth`) match. Multi-segment packages drift but this is the generic stem-fallback limitation, not a suffix issue |
-| `protoc-gen-grpc-web` (Google) | `grpc-web` / `protoc-gen-grpc-web` | `{file_stem}_grpc_web_pb.js` + `.d.ts` | `SvcClient` class, method `lcMethod` | ✅ (fixed in lib-r4s.10) | Stem `auth_grpc_web_pb` ≠ proto pkg `auth`; resolver now probes `pkg_grpc_web_pb.*` candidates |
-| `@improbable-eng/grpc-web` (`ts-protoc-gen`) | local plugin | `{file_stem}_pb_service.ts` | `SvcClient` class, method `lcMethod` | ✅ (fixed in lib-r4s.10) | Stem `auth_pb_service` ≠ proto pkg `auth`; resolver now probes `pkg_pb_service.*` candidates |
+| `protoc-gen-grpc-web` (Google) | `grpc-web` / `protoc-gen-grpc-web` | `{file_stem}_grpc_web_pb.js` + `.d.ts` | `SvcClient` class, method `lcMethod` | ✅ (single-segment pkg) / ⚠️ (multi-segment pkg) | Stem `auth_grpc_web_pb` ≠ proto pkg `auth`; resolver now probes `pkg_grpc_web_pb.*` candidates. Multi-segment packages (e.g., `com.example.auth`) still drift — same limitation as ts-proto |
+| `@improbable-eng/grpc-web` (`ts-protoc-gen`) | local plugin | `{file_stem}_pb_service.ts` | `SvcClient` class, method `lcMethod` | ✅ (single-segment pkg) / ⚠️ (multi-segment pkg) | Stem `auth_pb_service` ≠ proto pkg `auth`; resolver now probes `pkg_pb_service.*` candidates. Multi-segment packages still drift |
 
 ## Fix (lib-r4s.10): Option B — resolver-layer alternate candidates
 
@@ -47,6 +47,13 @@ This approach:
   file stem is `auth`, the stem drift is a consequence of the generic JS/TS stem-fallback, not
   a generator-specific suffix. Fixing it would require either package-aware stem normalisation
   or a query-time package→file lookup. Out of scope for lib-r4s.10.
+- **Multi-segment proto packages with grpc-web generators** — same class as ts-proto: the
+  lib-r4s.10 fix constructs candidates as `{pkg}_grpc_web_pb.*` and `{pkg}_pb_service.*` where
+  `pkg` is the full proto package name joined by dots. For a single-segment package (`auth`)
+  this produces `auth_grpc_web_pb.*` which matches the generated filename. For a multi-segment
+  package (`com.example.auth`) the candidate would be `com.example.auth_grpc_web_pb.*`, but the
+  file stem is only `auth_grpc_web_pb` — the same stem-fallback limitation applies. Out of scope
+  for lib-r4s.10.
 - **Hand-written TS implementations** — only link by coincidence if the file stem happens to
   equal the proto package name. Intentional: a generic "ignore filename decorations" rule
   would emit false edges.
