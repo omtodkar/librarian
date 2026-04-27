@@ -267,7 +267,7 @@ Compute community structure + centrality over the entire graph and write three f
 | `--dry-run` | `false` | Analyse + render in memory; don't write the files to disk |
 | `--json` | `false` | Print a JSON summary instead of the default text summary |
 
-## MCP server
+## Knowledge commands
 
 ### `librarian faq --regenerate`
 
@@ -288,6 +288,8 @@ librarian faq --regenerate --json
 
 The last-run timestamp is stored via `bd remember --key faq-last-run` when bd is available.
 Generated files live at `docs/faqs/<slug>.md` and are re-indexed on each run.
+
+## MCP server
 
 ### `librarian mcp serve`
 
