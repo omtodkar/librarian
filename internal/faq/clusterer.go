@@ -7,9 +7,9 @@ import (
 	"librarian/internal/embedding"
 )
 
-// CosineSimilarity returns the cosine similarity between two equal-length
+// cosineSimilarity returns the cosine similarity between two equal-length
 // vectors. Returns 0 if either vector has zero magnitude or lengths differ.
-func CosineSimilarity(a, b []float64) float64 {
+func cosineSimilarity(a, b []float64) float64 {
 	if len(a) == 0 || len(a) != len(b) {
 		return 0
 	}
@@ -65,7 +65,7 @@ func Cluster(sources []Source, embedder embedding.Embedder, threshold float64) (
 			if assigned[j] {
 				continue
 			}
-			if CosineSimilarity(vecs[i], vecs[j]) >= threshold {
+			if cosineSimilarity(vecs[i], vecs[j]) >= threshold {
 				cluster = append(cluster, sources[j])
 				assigned[j] = true
 			}

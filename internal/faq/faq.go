@@ -22,10 +22,15 @@ type RunConfig struct {
 	// Threshold is the cosine similarity threshold for clustering. Default 0.85.
 	Threshold float64
 	// FAQDir is the output directory for generated FAQ files, relative to CWD.
-	// Defaults to docs/faqs.
+	// Defaults to <DocsDir>/faqs.
 	FAQDir string
 	// Cfg is the librarian workspace config (embedding provider, DB path, etc.).
 	Cfg *config.Config
+
+	// ScanGit overrides the git scanner for testing. Nil uses ScanGitLog.
+	ScanGit func(n int) ([]Source, error)
+	// ScanIssues overrides the bd scanner for testing. Nil uses ScanBDIssues.
+	ScanIssues func() ([]Source, error)
 }
 
 // Result summarises a completed FAQ extraction run.
@@ -41,7 +46,7 @@ type Result struct {
 //  1. Scan git log (last GitCommits commits) for question-shaped subjects.
 //  2. Scan bd closed issues for question-shaped titles.
 //  3. Cluster near-duplicates using embedding cosine similarity.
-//  4. Write each cluster as docs/faqs/<slug>.md.
+//  4. Write each cluster (that has a real answer) as docs/faqs/<slug>.md.
 //  5. Re-index each written file into the librarian store.
 func Run(rc RunConfig) (*Result, error) {
 	if rc.GitCommits <= 0 {
@@ -53,14 +58,20 @@ func Run(rc RunConfig) (*Result, error) {
 	if rc.FAQDir == "" {
 		rc.FAQDir = filepath.Join(rc.Cfg.DocsDir, "faqs")
 	}
+	if rc.ScanGit == nil {
+		rc.ScanGit = ScanGitLog
+	}
+	if rc.ScanIssues == nil {
+		rc.ScanIssues = ScanBDIssues
+	}
 
 	// 1. Scan sources.
-	gitSrcs, err := ScanGitLog(rc.GitCommits)
+	gitSrcs, err := rc.ScanGit(rc.GitCommits)
 	if err != nil {
 		return nil, fmt.Errorf("scanning git log: %w", err)
 	}
 
-	issueSrcs, err := ScanBDIssues()
+	issueSrcs, err := rc.ScanIssues()
 	if err != nil {
 		// bd may not be installed in all environments; treat as non-fatal.
 		issueSrcs = nil
@@ -68,7 +79,7 @@ func Run(rc RunConfig) (*Result, error) {
 
 	all := append(gitSrcs, issueSrcs...)
 	if len(all) == 0 {
-		return &Result{}, nil
+		return &Result{GitSources: len(gitSrcs), IssueSources: len(issueSrcs)}, nil
 	}
 
 	// 2. Cluster near-duplicates.
@@ -82,10 +93,14 @@ func Run(rc RunConfig) (*Result, error) {
 		return nil, fmt.Errorf("clustering: %w", err)
 	}
 
-	// 3. Build FAQ entries (one per cluster).
+	// 3. Build FAQ entries (one per cluster). Drop entries without a real
+	// answer to avoid fabricating FAQs without a clear source.
 	entries := make([]FAQEntry, 0, len(clusters))
 	for _, cluster := range clusters {
-		entries = append(entries, EntryFromCluster(cluster))
+		e := EntryFromCluster(cluster)
+		if e.Answer != "" {
+			entries = append(entries, e)
+		}
 	}
 
 	// 4. Write FAQ files.
@@ -125,7 +140,9 @@ func Run(rc RunConfig) (*Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolving path %s: %w", path, err)
 		}
-		r, err := idx.IndexSingleFile(path, absPath, true)
+		// Pass absPath for both args: the first arg is the DB canonical key;
+		// using absolute path avoids environment-dependent relative path lookups.
+		r, err := idx.IndexSingleFile(absPath, absPath, true)
 		if err != nil {
 			return nil, fmt.Errorf("indexing %s: %w", path, err)
 		}

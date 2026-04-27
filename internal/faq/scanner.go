@@ -16,7 +16,7 @@ type bdIssue struct {
 }
 
 // parseGitLog parses the output of `git log --format=%H\x1f%s\x1f%b\x1e`
-// into question-shaped Sources. Exported for unit-testing without forking git.
+// into question-shaped Sources.
 func parseGitLog(data []byte) ([]Source, error) {
 	var sources []Source
 	for _, record := range strings.Split(string(data), "\x1e") {
@@ -57,7 +57,7 @@ func parseGitLog(data []byte) ([]Source, error) {
 		for _, line := range strings.Split(body, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "#") && strings.Contains(line, "?") {
-				question := strings.TrimLeft(line, "# ")
+				question := strings.TrimSpace(strings.TrimLeft(line, "#"))
 				question = strings.TrimSpace(question)
 				if question != "" {
 					sources = append(sources, Source{
@@ -75,7 +75,6 @@ func parseGitLog(data []byte) ([]Source, error) {
 }
 
 // parseBDIssues parses `bd list --json` output into question-shaped Sources.
-// Exported for unit-testing without forking bd.
 func parseBDIssues(data []byte) ([]Source, error) {
 	var issues []bdIssue
 	if err := json.Unmarshal(data, &issues); err != nil {
