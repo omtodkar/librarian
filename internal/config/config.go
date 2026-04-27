@@ -65,6 +65,16 @@ type GraphConfig struct {
 	// convenience for users who always want CI runs to stay quiet without
 	// relying on TTY auto-detection.
 	ProgressMode string `mapstructure:"progress_mode"`
+
+	// TestEdges controls heuristic test-to-subject-under-test edge emission.
+	TestEdges TestEdgesConfig `mapstructure:"test_edges"`
+}
+
+// TestEdgesConfig controls the path-convention pass that emits file→file edges
+// with Kind='tests' from test files to their likely subject files.
+type TestEdgesConfig struct {
+	// Enabled enables the heuristic. Default true.
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // SummarizationConfig controls optional per-chunk summary generation at index
@@ -180,6 +190,7 @@ func Load() *Config {
 		Graph: GraphConfig{
 			HonorGitignore:  true,
 			DetectGenerated: true,
+			TestEdges:       TestEdgesConfig{Enabled: true},
 		},
 		Search: SearchConfig{
 			HybridSearch: true,
@@ -203,6 +214,9 @@ func Load() *Config {
 	}
 	if !viper.IsSet("search.hybrid_search") {
 		cfg.Search.HybridSearch = true
+	}
+	if !viper.IsSet("graph.test_edges.enabled") {
+		cfg.Graph.TestEdges.Enabled = true
 	}
 
 	if dbPath := viper.GetString("db_path"); dbPath != "" {

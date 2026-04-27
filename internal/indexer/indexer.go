@@ -342,6 +342,13 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 	// with the bead dependency order lib-4g2.3 → lib-4g2.4).
 	idx.buildDartCallRPCEdges(result)
 
+	// Test-subject linker: emit tests edges from test files to their likely
+	// subject files via path-naming conventions (lib-8bg). Runs after all
+	// per-file projection so every code_file node exists in the store.
+	if idx.cfg.Graph.TestEdges.Enabled {
+		idx.buildTestEdges(result)
+	}
+
 	return result, nil
 }
 
