@@ -215,8 +215,17 @@ func TestHandler_CommentsOnlyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	// Should parse without panic; may produce 0 or 1 unit.
-	_ = doc
+	if doc == nil {
+		t.Fatal("Parse returned nil doc")
+	}
+	// A comment-only file with no semicolons is treated as one statement (the whole
+	// content), so exactly one Unit should be produced.
+	if len(doc.Units) != 1 {
+		t.Errorf("expected 1 Unit for comment-only input, got %d", len(doc.Units))
+	}
+	if !strings.Contains(doc.Units[0].Content, "just a comment") {
+		t.Errorf("Unit content missing comment text: %q", doc.Units[0].Content)
+	}
 }
 
 func TestHandler_StringLiteralWithSemicolon(t *testing.T) {

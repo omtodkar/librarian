@@ -110,6 +110,11 @@ func splitIntoStatementUnits(src string) []indexer.Unit {
 // contains the statement text plus any leading comments that belong to it.
 // The split boundary is a semicolon that is not inside a string literal or
 // block comment, followed by optional whitespace and a newline (or end of input).
+//
+// v1 known limitation: unclosed string literals, block comments (/* without */),
+// and dollar-quoted strings ($$ without a matching closing $$) are absorbed to
+// EOF without error. The remaining text is still returned as a statement so
+// partial content is indexed rather than silently dropped.
 func splitStatements(src string) []string {
 	type parseState int
 	const (
@@ -246,6 +251,12 @@ func scanDollarTag(runes []rune, i int) string {
 		return ""
 	}
 	j := i + 1
+	// PostgreSQL requires the tag to start with [a-zA-Z_], not a digit.
+	// $$ (empty tag) is valid and handled here: j == i+1, loop body not entered.
+	if j < len(runes) && runes[j] != '$' &&
+		runes[j] != '_' && !(runes[j] >= 'a' && runes[j] <= 'z') && !(runes[j] >= 'A' && runes[j] <= 'Z') {
+		return ""
+	}
 	for j < len(runes) && (runes[j] == '_' || (runes[j] >= 'a' && runes[j] <= 'z') ||
 		(runes[j] >= 'A' && runes[j] <= 'Z') || (runes[j] >= '0' && runes[j] <= '9')) {
 		j++
