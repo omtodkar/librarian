@@ -496,8 +496,59 @@ message Res {}
 	}
 	want := "line1\nline2"
 	if !strings.HasPrefix(u.Content, want+"\n\n") {
-		t.Errorf("Method.Content starts with %q; want prefix %q followed by \\n\\nrpc…",
-			u.Content[:min(len(u.Content), 60)], want)
+		t.Errorf("Method.Content = %q; want prefix %q followed by \\n\\nrpc…", u.Content, want)
+	}
+}
+
+// DocstringFromNode: three consecutive comment lines on an rpc are all
+// collected and joined. This exercises extra loop iterations in the backward
+// sibling walk beyond the 2-line case covered by TestProtoGrammar_DocstringFromNodeRPC.
+func TestProtoGrammar_DocstringFromNodeRPC_ThreeLines(t *testing.T) {
+	src := []byte(`syntax = "proto3";
+package ds;
+service Svc {
+  // first
+  // second
+  // third
+  rpc Method (Req) returns (Res);
+}
+message Req {}
+message Res {}
+`)
+	h := code.New(code.NewProtoGrammar())
+	doc, err := h.Parse("ds.proto", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Method")
+	if u == nil {
+		t.Fatalf("rpc Method Unit missing")
+	}
+	want := "first\nsecond\nthird"
+	if !strings.HasPrefix(u.Content, want+"\n\n") {
+		t.Errorf("Method.Content starts with %q; want prefix %q", u.Content, want)
+	}
+}
+
+// DocstringFromNode: a leading comment on a service declaration surfaces as
+// the Unit's docstring. protoSample already has "// Greeter provides RPCs."
+// before service Greeter; this test pins that service-level comments work.
+func TestProtoGrammar_DocstringFromNodeService(t *testing.T) {
+	h := code.New(code.NewProtoGrammar())
+	doc, err := h.Parse("api/greeter.proto", []byte(protoSample))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findUnit(doc, "Greeter")
+	if u == nil {
+		t.Fatalf("service Greeter Unit missing")
+	}
+	if u.Kind != "service" {
+		t.Fatalf("Greeter Kind = %q, want service", u.Kind)
+	}
+	wantDoc := "Greeter provides RPCs."
+	if !strings.HasPrefix(u.Content, wantDoc+"\n\n") {
+		t.Errorf("Greeter.Content = %q; want prefix %q", u.Content, wantDoc)
 	}
 }
 
@@ -525,13 +576,13 @@ message Res {}
 		t.Fatalf("rpc Method Unit missing")
 	}
 	// Only "doc for Method" should appear; "unrelated comment" is separated
-	// by a blank line so it belongs to neither this rpc nor to stream.
+	// by a blank line so it does not attach to this rpc.
 	wantDocstring := "doc for Method"
 	if !strings.HasPrefix(u.Content, wantDocstring+"\n\n") {
-		t.Errorf("Method.Content = %q; want prefix %q", u.Content[:min(len(u.Content), 80)], wantDocstring)
+		t.Errorf("Method.Content = %q; want prefix %q", u.Content, wantDocstring)
 	}
-	if strings.Contains(u.Content[:min(len(u.Content), 80)], "unrelated") {
-		t.Errorf("Method.Content should not include the unrelated comment block")
+	if strings.Contains(u.Content, "unrelated") {
+		t.Errorf("Method.Content should not include the unrelated comment block; got %q", u.Content)
 	}
 }
 
