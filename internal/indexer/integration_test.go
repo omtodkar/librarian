@@ -45,6 +45,15 @@ func (f fakeEmbedder) Model() string {
 	return f.model
 }
 
+// nilEmbedder returns all-nil vectors to simulate per-item fallback failure.
+type nilEmbedder struct{}
+
+func (nilEmbedder) Embed(text string) ([]float64, error) { return nil, nil }
+func (nilEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
+	return make([][]float64, len(texts)), nil // all slots nil
+}
+func (nilEmbedder) Model() string { return "nil-embedder" }
+
 // TestIntegration_IndexGoFile exercises the full walker → code handler →
 // chunker → store path for a .go file. Covers the code-handler-via-defaults-
 // registration path that's otherwise only smoke-tested by unit tests.
@@ -116,5 +125,57 @@ func (a *Auth) Validate(user, pass string) bool {
 	}
 	if stored.ChunkCount == 0 {
 		t.Errorf("ChunkCount = 0, want > 0")
+	}
+}
+
+// TestIntegration_AllEmbeddingsFailNoDocInserted verifies that when all chunk
+// embeddings return nil (per-item fallback all failed), the document row is
+// NOT inserted and ChunkCount stays at zero.
+func TestIntegration_AllEmbeddingsFailNoDocInserted(t *testing.T) {
+	tmp := t.TempDir()
+	docsDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mdFile := filepath.Join(docsDir, "guide.md")
+	if err := os.WriteFile(mdFile, []byte("# Guide\n\nSome content here.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	cfg := &config.Config{
+		DocsDir: docsDir,
+		DBPath:  filepath.Join(tmp, "test.db"),
+		Chunking: config.ChunkingConfig{
+			MaxTokens:    512,
+			OverlapLines: 0,
+			MinTokens:    1,
+		},
+	}
+
+	idx := indexer.New(s, cfg, nilEmbedder{})
+	result, err := idx.IndexDirectory(docsDir, true)
+	if err != nil {
+		t.Fatalf("IndexDirectory: %v", err)
+	}
+	// No document should be stored when all embeddings failed.
+	docs, err := s.ListDocuments()
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("expected 0 stored documents (all embeddings nil), got %d", len(docs))
+	}
+	// The failure should be reported as an error, not a successful index.
+	if result.DocumentsIndexed != 0 {
+		t.Errorf("DocumentsIndexed = %d, want 0 (all embeddings failed)", result.DocumentsIndexed)
+	}
+	if len(result.Errors) == 0 {
+		t.Error("expected at least one error in result when all embeddings fail")
 	}
 }

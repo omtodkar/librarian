@@ -187,6 +187,81 @@ func TestGeminiEmbedder_PartialSuccess200Fallback(t *testing.T) {
 	}
 }
 
+// TestGeminiEmbedder_TruncatedCount200FallbackEnabled verifies that a 200
+// response returning fewer embeddings than requested triggers per-item fallback
+// when batchFallback is enabled, rather than returning an error.
+func TestGeminiEmbedder_TruncatedCount200FallbackEnabled(t *testing.T) {
+	var batchCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "batchEmbedContents") {
+			batchCalled = true
+			// Return fewer embeddings than requested (truncated response).
+			resp := geminiBatchResponse{Embeddings: []geminiEmbedding{
+				{Values: []float64{1.0, 0}},
+			}}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		// Single :embedContent — succeeds for any text.
+		json.NewEncoder(w).Encode(geminiResponse{
+			Embedding: geminiEmbedding{Values: []float64{9.0, 0}},
+		})
+	}))
+	defer srv.Close()
+
+	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 0, 1)
+	if err != nil {
+		t.Fatalf("NewGeminiEmbedder: %v", err)
+	}
+	e.batchFallback = true
+	e.client = &http.Client{Transport: rewriteTransport{to: srv.URL}}
+
+	texts := []string{"text-1", "text-2", "text-3"}
+	out, err := e.EmbedBatch(texts)
+	if err != nil {
+		t.Fatalf("EmbedBatch returned error: %v; want nil (fallback)", err)
+	}
+	if !batchCalled {
+		t.Error("batch endpoint should have been called")
+	}
+	if len(out) != 3 {
+		t.Fatalf("output length: got %d want 3", len(out))
+	}
+	for i, v := range out {
+		if v == nil {
+			t.Errorf("out[%d] should be non-nil (per-item fallback succeeded)", i)
+		}
+	}
+}
+
+// TestGeminiEmbedder_TruncatedCount200FallbackDisabled verifies that a 200
+// response returning fewer embeddings than requested returns an error when
+// batchFallback is disabled.
+func TestGeminiEmbedder_TruncatedCount200FallbackDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return fewer embeddings than requested.
+		resp := geminiBatchResponse{Embeddings: []geminiEmbedding{
+			{Values: []float64{1.0, 0}},
+		}}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 0, 1)
+	if err != nil {
+		t.Fatalf("NewGeminiEmbedder: %v", err)
+	}
+	e.client = &http.Client{Transport: rewriteTransport{to: srv.URL}}
+
+	_, err = e.EmbedBatch([]string{"text-1", "text-2", "text-3"})
+	if err == nil {
+		t.Fatal("expected error for truncated count without fallback; got nil")
+	}
+	if !strings.Contains(err.Error(), "1 embeddings for 3 inputs") {
+		t.Errorf("error should mention count mismatch; got: %v", err)
+	}
+}
+
 // --- OpenAI fallback tests ---
 
 // TestOpenAIEmbedder_BatchFallbackOn4xx mirrors the Gemini test: 400 batch

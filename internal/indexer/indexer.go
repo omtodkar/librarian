@@ -916,20 +916,6 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		return fmt.Errorf("chunking: %w", err)
 	}
 
-	doc, err := idx.store.AddDocument(store.AddDocumentInput{
-		FilePath:    file.FilePath,
-		Title:       parsed.Title,
-		DocType:     parsed.DocType,
-		Summary:     parsed.Summary,
-		Headings:    HeadingsToJSON(parsed.Headings),
-		Frontmatter: FrontmatterToJSON(parsed.Frontmatter),
-		ContentHash: contentHash,
-		ChunkCount:  uint32(len(chunks)),
-	})
-	if err != nil {
-		return fmt.Errorf("creating document: %w", err)
-	}
-
 	// Batch-embed every chunk's text in one shot (provider slices into waves
 	// of batch_size internally). Previously this was one HTTP call per chunk
 	// which dominated indexing wall-clock and tripped rate limits quickly.
@@ -941,6 +927,34 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("batch embed (%d chunks): %s", len(chunks), err))
 		return nil
+	}
+
+	// Count how many embeddings succeeded so ChunkCount is accurate and we
+	// skip the document insert entirely when none land (e.g. all per-item
+	// fallbacks failed).
+	successCount := 0
+	for _, v := range vectors {
+		if v != nil {
+			successCount++
+		}
+	}
+	if successCount == 0 {
+		result.Errors = append(result.Errors, fmt.Sprintf("batch embed (%d chunks): all embeddings failed", len(chunks)))
+		return nil
+	}
+
+	doc, err := idx.store.AddDocument(store.AddDocumentInput{
+		FilePath:    file.FilePath,
+		Title:       parsed.Title,
+		DocType:     parsed.DocType,
+		Summary:     parsed.Summary,
+		Headings:    HeadingsToJSON(parsed.Headings),
+		Frontmatter: FrontmatterToJSON(parsed.Frontmatter),
+		ContentHash: contentHash,
+		ChunkCount:  uint32(successCount),
+	})
+	if err != nil {
+		return fmt.Errorf("creating document: %w", err)
 	}
 
 	// Resolve per-chunk summaries via summary_cache (keyed on SHA-256 of

@@ -242,6 +242,10 @@ func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 			return fmt.Errorf("Gemini batch API error: %s", batchResp.Error.Message)
 		}
 		if len(batchResp.Embeddings) != len(wave) {
+			if e.batchFallback {
+				fallbackItems(e.Embed, wave, start, out)
+				return nil
+			}
 			return fmt.Errorf("Gemini batch API returned %d embeddings for %d inputs", len(batchResp.Embeddings), len(wave))
 		}
 		// Populate successful items; detect partial-success 200 when fallback enabled.
