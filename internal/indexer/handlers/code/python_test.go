@@ -1919,3 +1919,319 @@ def run():
 	}
 }
 
+// --- lib-0pa.4: PEP 695 scoped TypeVars ---
+
+func TestPEP695_ClassSimple(t *testing.T) {
+	// class Foo[T]: → sym:mymod.Foo.T with scope=class, variance=invariant
+	src := []byte("class Foo[T]:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T; units: %+v", typeVarUnits(doc))
+	}
+	if u.Path != "mymod.Foo.T" {
+		t.Errorf("Path = %q, want mymod.Foo.T", u.Path)
+	}
+	if sc, _ := u.Metadata["scope"].(string); sc != "class" {
+		t.Errorf("scope = %q, want class", sc)
+	}
+	if v, _ := u.Metadata["variance"].(string); v != "invariant" {
+		t.Errorf("variance = %q, want invariant", v)
+	}
+	if kh, _ := u.Metadata["kind_hint"].(string); kh != "typevar" {
+		t.Errorf("kind_hint = %q, want typevar", kh)
+	}
+}
+
+func TestPEP695_ClassWithBound(t *testing.T) {
+	// class Foo[T: Hashable]: → bound="Hashable"
+	src := []byte("class Foo[T: Hashable]:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T; units: %+v", typeVarUnits(doc))
+	}
+	if u.Path != "mymod.Foo.T" {
+		t.Errorf("Path = %q, want mymod.Foo.T", u.Path)
+	}
+	if bound, _ := u.Metadata["bound"].(string); bound != "Hashable" {
+		t.Errorf("bound = %q, want Hashable", bound)
+	}
+	if sc, _ := u.Metadata["scope"].(string); sc != "class" {
+		t.Errorf("scope = %q, want class", sc)
+	}
+}
+
+func TestPEP695_ClassWithConstraints(t *testing.T) {
+	// class Foo[T: (int, str)]: → constraints=["int","str"]
+	src := []byte("class Foo[T: (int, str)]:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T; units: %+v", typeVarUnits(doc))
+	}
+	constraints, _ := u.Metadata["constraints"].([]string)
+	if len(constraints) != 2 || constraints[0] != "int" || constraints[1] != "str" {
+		t.Errorf("constraints = %v, want [int str]", constraints)
+	}
+}
+
+func TestPEP695_FunctionSimple(t *testing.T) {
+	// def identity[T](x: T) -> T: ... → sym:mymod.identity.T with scope=function
+	src := []byte("def identity[T](x: T) -> T:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T; units: %+v", typeVarUnits(doc))
+	}
+	if u.Path != "mymod.identity.T" {
+		t.Errorf("Path = %q, want mymod.identity.T", u.Path)
+	}
+	if sc, _ := u.Metadata["scope"].(string); sc != "function" {
+		t.Errorf("scope = %q, want function", sc)
+	}
+	if v, _ := u.Metadata["variance"].(string); v != "invariant" {
+		t.Errorf("variance = %q, want invariant", v)
+	}
+}
+
+func TestPEP695_TypeAlias(t *testing.T) {
+	// type Pair[K, V] = tuple[K, V] → two scoped TypeVar Units
+	src := []byte("type Pair[K, V] = tuple[K, V]\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tvs := typeVarUnits(doc)
+	if len(tvs) != 2 {
+		t.Fatalf("expected 2 typevar units; got %d (%+v)", len(tvs), tvs)
+	}
+	kUnit := findTypeVarUnit(doc, "K")
+	vUnit := findTypeVarUnit(doc, "V")
+	if kUnit == nil {
+		t.Fatalf("expected typevar unit K; units: %+v", tvs)
+	}
+	if vUnit == nil {
+		t.Fatalf("expected typevar unit V; units: %+v", tvs)
+	}
+	if kUnit.Path != "mymod.Pair.K" {
+		t.Errorf("K Path = %q, want mymod.Pair.K", kUnit.Path)
+	}
+	if vUnit.Path != "mymod.Pair.V" {
+		t.Errorf("V Path = %q, want mymod.Pair.V", vUnit.Path)
+	}
+	if sc, _ := kUnit.Metadata["scope"].(string); sc != "type_alias" {
+		t.Errorf("K scope = %q, want type_alias", sc)
+	}
+	if sc, _ := vUnit.Metadata["scope"].(string); sc != "type_alias" {
+		t.Errorf("V scope = %q, want type_alias", sc)
+	}
+}
+
+func TestPEP695_AsyncFunctionSimple(t *testing.T) {
+	// async def identity[T](x: T) -> T: — tree-sitter uses function_definition
+	// for both sync and async; the TypeVar unit must still be emitted.
+	src := []byte("async def identity[T](x: T) -> T:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T for async def; units: %+v", typeVarUnits(doc))
+	}
+	if u.Path != "mymod.identity.T" {
+		t.Errorf("Path = %q, want mymod.identity.T", u.Path)
+	}
+	if sc, _ := u.Metadata["scope"].(string); sc != "function" {
+		t.Errorf("scope = %q, want function", sc)
+	}
+}
+
+func TestPEP695_DecoratedClassSimple(t *testing.T) {
+	// @dataclass\nclass Foo[T]: — extractPEP695TypeVars must unwrap decorated_definition.
+	src := []byte("@dataclass\nclass Foo[T]:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	u := findTypeVarUnit(doc, "T")
+	if u == nil {
+		t.Fatalf("expected typevar unit T for decorated class; units: %+v", typeVarUnits(doc))
+	}
+	if u.Path != "mymod.Foo.T" {
+		t.Errorf("Path = %q, want mymod.Foo.T", u.Path)
+	}
+	if sc, _ := u.Metadata["scope"].(string); sc != "class" {
+		t.Errorf("scope = %q, want class", sc)
+	}
+}
+
+func TestPEP695_NestedClassResolvesToOuterClassScope(t *testing.T) {
+	// A nested class's Generic[T] reference where T is the outer class's PEP 695
+	// TypeVar — not a nonexistent inner-class-level one.
+	//
+	// class Outer[T]:
+	//     class Inner(Generic[T]):
+	//         pass
+	//
+	// Inner's inherits ref should resolve T to sym:mymod.Outer.T (class scope),
+	// not sym:mymod.Outer.Inner.T (which does not exist).
+	src := []byte(`class Outer[T]:
+    class Inner(Generic[T]):
+        pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// Outer's TypeVar T must exist.
+	outerT := findTypeVarUnit(doc, "T")
+	if outerT == nil {
+		t.Fatalf("expected typevar unit T from Outer; units: %+v", typeVarUnits(doc))
+	}
+	if outerT.Path != "mymod.Outer.T" {
+		t.Errorf("Outer.T Path = %q, want mymod.Outer.T", outerT.Path)
+	}
+	// Inner has no PEP 695 TypeVar of its own.
+	for _, u := range typeVarUnits(doc) {
+		if u.Path == "mymod.Outer.Inner.T" {
+			t.Errorf("unexpected function-level TypeVar unit at %q; T should come from Outer", u.Path)
+		}
+	}
+	// Inner's inherits ref for Generic[T] must resolve T to Outer's T.
+	innerRefs := inheritsRefsBySource(doc, "mymod.Outer.Inner")
+	var genericRef *indexer.Reference
+	for i := range innerRefs {
+		if strings.Contains(innerRefs[i].Target, "Generic") {
+			genericRef = &innerRefs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected inherits ref for Generic from Inner; refs: %+v", innerRefs)
+	}
+	resolved, _ := genericRef.Metadata["type_args_resolved"].([]string)
+	if len(resolved) != 1 || resolved[0] != "sym:mymod.Outer.T" {
+		t.Errorf("type_args_resolved = %v, want [sym:mymod.Outer.T]", resolved)
+	}
+}
+
+func TestPEP695_ClassMultipleTypeVars(t *testing.T) {
+	// class Foo[T, U]: → two scoped TypeVar Units
+	src := []byte("class Foo[T, U]:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tvs := typeVarUnits(doc)
+	if len(tvs) != 2 {
+		t.Fatalf("expected 2 typevar units; got %d (%+v)", len(tvs), tvs)
+	}
+	tUnit := findTypeVarUnit(doc, "T")
+	uUnit := findTypeVarUnit(doc, "U")
+	if tUnit == nil || uUnit == nil {
+		t.Fatalf("expected units for T and U; got %+v", tvs)
+	}
+	if tUnit.Path != "mymod.Foo.T" {
+		t.Errorf("T Path = %q, want mymod.Foo.T", tUnit.Path)
+	}
+	if uUnit.Path != "mymod.Foo.U" {
+		t.Errorf("U Path = %q, want mymod.Foo.U", uUnit.Path)
+	}
+}
+
+func TestPEP695_TwoLevelClassNestingResolvesCorrectly(t *testing.T) {
+	// Two levels of nesting: Outer[T] → Middle[U] → Inner(Generic[T, U])
+	// T resolves to Outer's scope (2 hops up), U to Middle's scope (1 hop up).
+	src := []byte(`class Outer[T]:
+    class Middle[U]:
+        class Inner(Generic[T, U]):
+            pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if findTypeVarUnit(doc, "T") == nil {
+		t.Fatalf("expected typevar unit T (from Outer); units: %+v", typeVarUnits(doc))
+	}
+	if findTypeVarUnit(doc, "U") == nil {
+		t.Fatalf("expected typevar unit U (from Middle); units: %+v", typeVarUnits(doc))
+	}
+	innerRefs := inheritsRefsBySource(doc, "mymod.Outer.Middle.Inner")
+	var genericRef *indexer.Reference
+	for i := range innerRefs {
+		if strings.Contains(innerRefs[i].Target, "Generic") {
+			genericRef = &innerRefs[i]
+			break
+		}
+	}
+	if genericRef == nil {
+		t.Fatalf("expected Generic inherits ref from Inner; refs: %+v", innerRefs)
+	}
+	resolved, _ := genericRef.Metadata["type_args_resolved"].([]string)
+	if len(resolved) != 2 {
+		t.Fatalf("expected 2 resolved args; got %v", resolved)
+	}
+	// Order matches type_args order: T first, U second.
+	if resolved[0] != "sym:mymod.Outer.T" {
+		t.Errorf("resolved[0] = %q, want sym:mymod.Outer.T", resolved[0])
+	}
+	if resolved[1] != "sym:mymod.Outer.Middle.U" {
+		t.Errorf("resolved[1] = %q, want sym:mymod.Outer.Middle.U", resolved[1])
+	}
+}
+
+func TestPEP695_FunctionBodyNestedClassNotDescended(t *testing.T) {
+	// By design, extractPEP695TypeVars does not descend into function bodies.
+	// A class defined inside a function is intentionally not processed — its
+	// TypeVars are omitted because the lookup path would require tracking
+	// function-scope inheritance chains that PostProcess does not support.
+	src := []byte(`def factory[T]():
+    class Inner(Generic[T]):
+        pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// factory's T must be emitted (function-level).
+	factoryT := findTypeVarUnit(doc, "T")
+	if factoryT == nil {
+		t.Fatalf("expected typevar unit T for factory; units: %+v", typeVarUnits(doc))
+	}
+	if factoryT.Path != "mymod.factory.T" {
+		t.Errorf("factory T Path = %q, want mymod.factory.T", factoryT.Path)
+	}
+	// Inner (nested inside the function) must NOT produce a typevar unit.
+	for _, u := range typeVarUnits(doc) {
+		if strings.HasPrefix(u.Path, "mymod.factory.Inner.") {
+			t.Errorf("unexpected TypeVar unit for function-body-nested class: %+v", u)
+		}
+	}
+}
+

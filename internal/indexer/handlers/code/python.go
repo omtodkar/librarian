@@ -816,7 +816,7 @@ func pyCalleeIdent(funcNode *sitter.Node, source []byte) string {
 }
 
 // PostProcess implements parsedDocPostProcessor for Python. Runs after all
-// Units have been extracted and imports have been resolved. Four passes:
+// Units have been extracted and imports have been resolved. Five passes:
 //
 //  1. TypeVar detection: walks module-level expression_statement nodes for
 //     VARNAME = TypeVar(...) calls, emitting a Unit{Kind="typevar"} for each.
@@ -831,9 +831,16 @@ func pyCalleeIdent(funcNode *sitter.Node, source []byte) string {
 //     "base_factory" refs emitted by ResolveParents and copies the base_factory
 //     metadata onto the corresponding class Unit.
 //
-//  4. Generic[T] resolution: for each inherits ref whose Metadata["type_args"]
-//     contains bare names, looks up each name in the TypeVar map built in
-//     pass 1. Matches are appended to Metadata["type_args_resolved"] as
+//  4. PEP 695 scoped TypeVar extraction (lib-0pa.4): walks the full AST for
+//     class_definition / function_definition / type_alias_statement nodes that
+//     carry a type_parameter child. Each type parameter is emitted as a
+//     Unit{Kind="typevar"} with Path "module.ContainerPath.T" and
+//     Metadata["scope"]="class"|"function"|"type_alias".
+//
+//  5. Generic[T] resolution: for each inherits ref whose Metadata["type_args"]
+//     contains bare names, looks up each name using LEGB-style scope resolution:
+//     the ref's own scope first, then enclosing class scopes, then module scope.
+//     Matches are appended to Metadata["type_args_resolved"] as
 //     "sym:<module>.<Name>" ids. Unmatched names remain as bare strings in
 //     type_args (unchanged from lib-0pa.1 behaviour).
 func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, source []byte) {
@@ -907,7 +914,11 @@ func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, sou
 		}
 	}
 
-	// Pass 4: annotate type_args_resolved on Generic[T] inherits refs.
+	// Pass 4: PEP 695 scoped TypeVar extraction.
+	pep695SymPaths := extractPEP695TypeVars(root, source, moduleName, doc)
+
+	// Pass 5: annotate type_args_resolved on Generic[T] inherits refs using
+	// LEGB-style scope resolution (scoped TypeVars before module-level).
 	for i, ref := range doc.Refs {
 		if ref.Kind != "inherits" {
 			continue
@@ -918,8 +929,8 @@ func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, sou
 		}
 		var resolved []string
 		for _, arg := range typeArgs {
-			if symPath, ok := typeVarSymPaths[arg]; ok {
-				resolved = append(resolved, symPath)
+			if sym := lookupTypeVar(arg, ref.Source, moduleName, typeVarSymPaths, pep695SymPaths); sym != "" {
+				resolved = append(resolved, sym)
 			}
 		}
 		if len(resolved) > 0 {
@@ -1061,6 +1072,205 @@ func extractTypeVarMeta(callNode *sitter.Node, varName string, source []byte) ma
 		}
 	}
 	return meta
+}
+
+// extractPEP695TypeVars walks the full AST for PEP 695 inline type-parameter
+// syntax. It handles three node kinds:
+//   - class_definition with a "type_parameters" field
+//   - function_definition with a "type_parameters" field
+//   - type_alias_statement whose LHS is a generic_type (e.g. type Pair[K,V])
+//     — here the type_parameter is nested inside the LHS generic_type, not a
+//     direct field of the statement node.
+//
+// For each type parameter it emits a Unit{Kind="typevar"} onto doc and records
+// a scoped lookup entry in the returned map, keyed by
+// "containingLocalPath.TypeVarName" (e.g. "Foo.T") with value
+// "sym:<module>.containingLocalPath.TypeVarName" (e.g. "sym:mod.Foo.T").
+// This map is consumed by lookupTypeVar in Pass 5 for scope-chain resolution.
+//
+// Recursion: class bodies are fully descended; function bodies are not.
+// Decorated definitions are unwrapped transparently.
+func extractPEP695TypeVars(root *sitter.Node, source []byte, moduleName string, doc *indexer.ParsedDoc) map[string]string {
+	pep695Paths := map[string]string{}
+	var descend func(n *sitter.Node, localPath string)
+	descend = func(n *sitter.Node, localPath string) {
+		if n == nil {
+			return
+		}
+		switch n.Kind() {
+		case "decorated_definition":
+			for i := uint(0); i < n.NamedChildCount(); i++ {
+				descend(n.NamedChild(i), localPath)
+			}
+		case "class_definition":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				return
+			}
+			myPath := joinPath(localPath, nameNode.Utf8Text(source))
+			if tp := n.ChildByFieldName("type_parameters"); tp != nil {
+				extractTypeParamUnits(tp, source, moduleName, myPath, "class", doc, pep695Paths)
+			}
+			if body := n.ChildByFieldName("body"); body != nil {
+				for i := uint(0); i < body.NamedChildCount(); i++ {
+					descend(body.NamedChild(i), myPath)
+				}
+			}
+		case "function_definition":
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				return
+			}
+			myPath := joinPath(localPath, nameNode.Utf8Text(source))
+			if tp := n.ChildByFieldName("type_parameters"); tp != nil {
+				extractTypeParamUnits(tp, source, moduleName, myPath, "function", doc, pep695Paths)
+			}
+		case "type_alias_statement":
+			lhs := n.ChildByFieldName("left")
+			if lhs == nil {
+				return
+			}
+			inner := lhs.NamedChild(0)
+			if inner == nil || inner.Kind() != "generic_type" {
+				return
+			}
+			// generic_type: first named child is identifier, rest may include type_parameter.
+			idNode := inner.NamedChild(0)
+			if idNode == nil || idNode.Kind() != "identifier" {
+				return
+			}
+			myPath := joinPath(localPath, idNode.Utf8Text(source))
+			for i := uint(1); i < inner.NamedChildCount(); i++ {
+				c := inner.NamedChild(i)
+				if c != nil && c.Kind() == "type_parameter" {
+					extractTypeParamUnits(c, source, moduleName, myPath, "type_alias", doc, pep695Paths)
+					break
+				}
+			}
+		}
+	}
+	for i := uint(0); i < root.NamedChildCount(); i++ {
+		descend(root.NamedChild(i), "")
+	}
+	return pep695Paths
+}
+
+// extractTypeParamUnits emits a Unit{Kind="typevar"} for each type parameter
+// in typeParamNode and records the scoped lookup entry in pep695Paths.
+// localContainerPath is the local (module-stripped) path of the containing
+// class/function/alias (e.g. "Foo" or "Foo.method").
+func extractTypeParamUnits(typeParamNode *sitter.Node, source []byte, moduleName, localContainerPath, scope string, doc *indexer.ParsedDoc, pep695Paths map[string]string) {
+	for i := uint(0); i < typeParamNode.NamedChildCount(); i++ {
+		typeNode := typeParamNode.NamedChild(i)
+		if typeNode == nil || typeNode.Kind() != "type" {
+			continue
+		}
+		name, meta := parsePEP695Param(typeNode, source)
+		if name == "" {
+			continue
+		}
+		meta["scope"] = scope
+		localPath := joinPath(localContainerPath, name)
+		unitPath := joinPath(moduleName, localPath)
+		doc.Units = append(doc.Units, indexer.Unit{
+			Kind:    "typevar",
+			Title:   name,
+			Path:    unitPath,
+			Content: strings.TrimSpace(typeNode.Utf8Text(source)),
+			Loc: indexer.Location{
+				Line:       int(typeNode.StartPosition().Row) + 1,
+				Column:     int(typeNode.StartPosition().Column) + 1,
+				ByteOffset: int(typeNode.StartByte()),
+			},
+			Metadata: meta,
+		})
+		pep695Paths[localPath] = "sym:" + unitPath
+	}
+}
+
+// parsePEP695Param extracts the TypeVar name and base metadata from a single
+// `type` node within a type_parameter list.
+//
+// Handled shapes:
+//   - type → identifier              : plain TypeVar, invariant
+//   - type → constrained_type        : TypeVar with bound (T: Bound) or
+//     constraints (T: (int, str))
+//
+// Returns ("", nil) for any unrecognised, malformed, or out-of-scope form
+// (TypeVarTuple *Ts, ParamSpec **P, or missing expected child nodes).
+// Callers must guard on name == "" before using the returned metadata.
+// When name is non-empty, the returned map always contains kind_hint="typevar"
+// and variance="invariant".
+func parsePEP695Param(typeNode *sitter.Node, source []byte) (string, map[string]any) {
+	meta := map[string]any{
+		"kind_hint": "typevar",
+		"variance":  "invariant",
+	}
+	inner := typeNode.NamedChild(0)
+	if inner == nil {
+		return "", nil
+	}
+	switch inner.Kind() {
+	case "identifier":
+		return inner.Utf8Text(source), meta
+	case "constrained_type":
+		// NamedChild(0) → type → identifier (the TypeVar name)
+		// NamedChild(1) → type (the bound or tuple of constraints)
+		nameTypeNode := inner.NamedChild(0)
+		if nameTypeNode == nil || nameTypeNode.Kind() != "type" {
+			return "", nil
+		}
+		nameIdent := nameTypeNode.NamedChild(0)
+		if nameIdent == nil || nameIdent.Kind() != "identifier" {
+			return "", nil
+		}
+		name := nameIdent.Utf8Text(source)
+		boundTypeNode := inner.NamedChild(1)
+		if boundTypeNode != nil && boundTypeNode.Kind() == "type" {
+			boundInner := boundTypeNode.NamedChild(0)
+			if boundInner != nil && boundInner.Kind() == "tuple" {
+				var constraints []string
+				for j := uint(0); j < boundInner.NamedChildCount(); j++ {
+					c := boundInner.NamedChild(j)
+					if c != nil {
+						constraints = append(constraints, strings.TrimSpace(c.Utf8Text(source)))
+					}
+				}
+				if len(constraints) > 0 {
+					meta["constraints"] = constraints
+				}
+			} else {
+				meta["bound"] = strings.TrimSpace(boundTypeNode.Utf8Text(source))
+			}
+		}
+		return name, meta
+	// splat_type covers *Ts (TypeVarTuple) and **P (ParamSpec) — out of scope.
+	default:
+		return "", nil
+	}
+}
+
+// lookupTypeVar resolves a bare TypeVar name to its "sym:..." path using
+// LEGB-style scope chain resolution:
+//  1. Scoped TypeVars at the source path itself (function/class own scope).
+//  2. Scoped TypeVars of each enclosing class scope (walking up the chain).
+//  3. Module-level TypeVars (from Pass 1 module-scope TypeVar(...) detection).
+//
+// sourcePath is the full symbol path of the ref's source (e.g. "mod.Foo.Inner").
+// moduleName is the module prefix to strip when building the local scope chain.
+func lookupTypeVar(name, sourcePath, moduleName string, moduleLevelPaths, pep695Paths map[string]string) string {
+	localPath := strings.TrimPrefix(sourcePath, moduleName+".")
+	if localPath != sourcePath {
+		// Walk the scope chain from innermost to outermost.
+		parts := strings.Split(localPath, ".")
+		for i := len(parts); i > 0; i-- {
+			scope := strings.Join(parts[:i], ".")
+			if sym, ok := pep695Paths[scope+"."+name]; ok {
+				return sym
+			}
+		}
+	}
+	return moduleLevelPaths[name]
 }
 
 // pyCallerLocalPath builds the local caller path (without the module prefix)
