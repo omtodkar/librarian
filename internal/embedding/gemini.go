@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 )
 
 // Embedder generates vector embeddings from text. Model() returns the
@@ -41,18 +42,20 @@ const geminiBatchMax = 100
 
 // GeminiEmbedder calls the Gemini :embedContent / :batchEmbedContents APIs.
 type GeminiEmbedder struct {
-	apiKey     string
-	model      string
-	batchSize  int
-	maxRetries int
-	client     *http.Client
+	apiKey             string
+	model              string
+	batchSize          int
+	maxRetries         int
+	maxParallelBatches int
+	client             *http.Client
 }
 
 // NewGeminiEmbedder creates a GeminiEmbedder. Model defaults to
 // defaultGeminiModel when empty. apiKey falls back to GEMINI_API_KEY.
 // batchSize <= 0 resolves to defaultBatchSize; values above geminiBatchMax
 // clamp down. maxRetries controls 429 retry behavior (0 = disabled).
-func NewGeminiEmbedder(apiKey, model string, batchSize, maxRetries int) (*GeminiEmbedder, error) {
+// maxParallelBatches controls wave concurrency (<=1 = serial).
+func NewGeminiEmbedder(apiKey, model string, batchSize, maxRetries, maxParallelBatches int) (*GeminiEmbedder, error) {
 	if apiKey == "" {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
@@ -63,11 +66,12 @@ func NewGeminiEmbedder(apiKey, model string, batchSize, maxRetries int) (*Gemini
 		model = defaultGeminiModel
 	}
 	return &GeminiEmbedder{
-		apiKey:     apiKey,
-		model:      model,
-		batchSize:  resolveBatchSize(batchSize, geminiBatchMax),
-		maxRetries: maxRetries,
-		client:     &http.Client{},
+		apiKey:             apiKey,
+		model:              model,
+		batchSize:          resolveBatchSize(batchSize, geminiBatchMax),
+		maxRetries:         maxRetries,
+		maxParallelBatches: maxParallelBatches,
+		client:             &http.Client{},
 	}, nil
 }
 
@@ -131,6 +135,8 @@ type geminiBatchResponse struct {
 // fallback applied in the constructor).
 func (e *GeminiEmbedder) Model() string { return e.model }
 
+// Embed embeds a single text. Single-query path is interactive; 429 surfaces
+// immediately to the caller rather than retrying with backoff.
 func (e *GeminiEmbedder) Embed(text string) ([]float64, error) {
 	url := "https://generativelanguage.googleapis.com/v1beta/models/" + e.model + ":embedContent?key=" + e.apiKey
 
@@ -176,11 +182,11 @@ func (e *GeminiEmbedder) Embed(text string) ([]float64, error) {
 	return geminiResp.Embedding.Values, nil
 }
 
-// EmbedBatch sends up to batchSize texts per HTTP call to
-// :batchEmbedContents. Input order is preserved in the returned slice; the
-// Gemini response is positional so no re-sort is needed. On any HTTP or
-// payload error the whole batch fails — the indexer surfaces that and
-// skips the affected doc. Empty input short-circuits without an HTTP call.
+// EmbedBatch sends up to batchSize texts per HTTP call to :batchEmbedContents.
+// Input order is preserved in the returned slice. When maxParallelBatches > 1,
+// waves execute concurrently (bounded by that limit); per-wave error isolation
+// means a failed wave does not cancel already-running siblings — all started
+// waves complete before the first error is returned.
 func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 	if len(texts) == 0 {
 		return [][]float64{}, nil
@@ -188,14 +194,20 @@ func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 	url := "https://generativelanguage.googleapis.com/v1beta/models/" + e.model + ":batchEmbedContents?key=" + e.apiKey
 	modelRef := "models/" + e.model
 
-	out := make([][]float64, 0, len(texts))
-	for start := 0; start < len(texts); start += e.batchSize {
-		end := start + e.batchSize
-		if end > len(texts) {
-			end = len(texts)
-		}
-		wave := texts[start:end]
+	out := make([][]float64, len(texts))
 
+	type span struct{ start, end int }
+	var spans []span
+	for s := 0; s < len(texts); s += e.batchSize {
+		en := s + e.batchSize
+		if en > len(texts) {
+			en = len(texts)
+		}
+		spans = append(spans, span{s, en})
+	}
+
+	doWave := func(start, end int) error {
+		wave := texts[start:end]
 		reqBody := geminiBatchRequest{Requests: make([]geminiBatchItem, len(wave))}
 		for i, t := range wave {
 			reqBody.Requests[i] = geminiBatchItem{
@@ -205,35 +217,70 @@ func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 		}
 		bodyBytes, err := json.Marshal(reqBody)
 		if err != nil {
-			return nil, fmt.Errorf("marshaling batch request: %w", err)
+			return fmt.Errorf("marshaling batch request: %w", err)
 		}
-
 		resp, respBytes, err := retryOn429(e.maxRetries, func() (*http.Response, error) {
 			return e.client.Post(url, "application/json", bytes.NewReader(bodyBytes))
 		})
 		if err != nil {
-			return nil, fmt.Errorf("calling Gemini batch API: %w", err)
+			return fmt.Errorf("calling Gemini batch API: %w", err)
 		}
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("Gemini batch API error (status %d): %s", resp.StatusCode, string(respBytes))
+			return fmt.Errorf("Gemini batch API error (status %d): %s", resp.StatusCode, string(respBytes))
 		}
-
 		var batchResp geminiBatchResponse
 		if err := json.Unmarshal(respBytes, &batchResp); err != nil {
-			return nil, fmt.Errorf("parsing batch response: %w", err)
+			return fmt.Errorf("parsing batch response: %w", err)
 		}
 		if batchResp.Error != nil {
-			return nil, fmt.Errorf("Gemini batch API error: %s", batchResp.Error.Message)
+			return fmt.Errorf("Gemini batch API error: %s", batchResp.Error.Message)
 		}
 		if len(batchResp.Embeddings) != len(wave) {
-			return nil, fmt.Errorf("Gemini batch API returned %d embeddings for %d inputs", len(batchResp.Embeddings), len(wave))
+			return fmt.Errorf("Gemini batch API returned %d embeddings for %d inputs", len(batchResp.Embeddings), len(wave))
 		}
 		for i, emb := range batchResp.Embeddings {
 			if len(emb.Values) == 0 {
-				return nil, fmt.Errorf("Gemini batch API returned empty embedding at index %d", start+i)
+				return fmt.Errorf("Gemini batch API returned empty embedding at index %d", start+i)
 			}
-			out = append(out, emb.Values)
+			out[start+i] = emb.Values
 		}
+		return nil
+	}
+
+	if e.maxParallelBatches <= 1 {
+		for _, sp := range spans {
+			if err := doWave(sp.start, sp.end); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	sem := make(chan struct{}, e.maxParallelBatches)
+	for _, sp := range spans {
+		sp := sp
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := doWave(sp.start, sp.end); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
 }

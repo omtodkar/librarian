@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -77,7 +78,7 @@ func (m *geminiBatchMock) handler(t *testing.T) http.HandlerFunc {
 // to redirect all requests to the mock. Simpler than parameterising the URL.
 func newGeminiTestEmbedder(t *testing.T, batchSize int, mockURL string) *GeminiEmbedder {
 	t.Helper()
-	e, err := NewGeminiEmbedder("test-key", "test-model", batchSize, 0)
+	e, err := NewGeminiEmbedder("test-key", "test-model", batchSize, 0, 1)
 	if err != nil {
 		t.Fatalf("NewGeminiEmbedder: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestOpenAIEmbedder_EmbedBatchPreservesOrder(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0, 1)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestOpenAIEmbedder_EmbedBatchEmptyInput(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0, 1)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -264,5 +265,227 @@ func TestOpenAIEmbedder_EmbedBatchEmptyInput(t *testing.T) {
 	}
 	if called {
 		t.Error("empty input should not trigger an HTTP call")
+	}
+}
+
+// TestGeminiEmbedder_ParallelBatchPreservesOrder verifies that concurrent wave
+// execution still returns embeddings in the original input order.
+func TestGeminiEmbedder_ParallelBatchPreservesOrder(t *testing.T) {
+	// Each wave returns embeddings whose first value is the item's global index,
+	// so we can assert positional correctness after parallel execution.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req geminiBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		resp := geminiBatchResponse{Embeddings: make([]geminiEmbedding, len(req.Requests))}
+		for i := range req.Requests {
+			// Encode per-wave position as Values[0] so callers can assert ordering.
+			resp.Embeddings[i] = geminiEmbedding{Values: []float64{float64(i), 0}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	e, err := NewGeminiEmbedder("test-key", "test-model", 10, 0, 4)
+	if err != nil {
+		t.Fatalf("NewGeminiEmbedder: %v", err)
+	}
+	e.client = &http.Client{Transport: rewriteTransport{to: srv.URL}}
+
+	texts := make([]string, 40) // 4 waves of 10
+	for i := range texts {
+		texts[i] = fmt.Sprintf("chunk-%d", i)
+	}
+	out, err := e.EmbedBatch(texts)
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(out) != 40 {
+		t.Fatalf("output length: got %d want 40", len(out))
+	}
+	// Each wave returns per-wave indices 0..9 as Values[0]. After correct
+	// parallel execution, out[i][0] must equal i%batchSize. This catches
+	// wave-slot scrambling that a nil check alone would miss.
+	const batchSize = 10
+	for i, vec := range out {
+		if len(vec) == 0 {
+			t.Fatalf("output[%d] is empty (nil slot)", i)
+		}
+		if want := float64(i % batchSize); vec[0] != want {
+			t.Errorf("output[%d][0]: got %v want %v (wave-slot mismatch)", i, vec[0], want)
+		}
+	}
+}
+
+// TestGeminiEmbedder_ParallelBatchAllWavesRunOnError verifies per-wave error
+// isolation: if one wave fails, already-started siblings still complete. We
+// confirm this by counting total server calls — all 3 waves must reach the
+// server even though the first one returns a 500.
+func TestGeminiEmbedder_ParallelBatchAllWavesRunOnError(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			// First wave to arrive gets an error response.
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("internal error"))
+			return
+		}
+		var req geminiBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode: %v", err)
+			return
+		}
+		resp := geminiBatchResponse{Embeddings: make([]geminiEmbedding, len(req.Requests))}
+		for i := range req.Requests {
+			resp.Embeddings[i] = geminiEmbedding{Values: []float64{0, 0}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	e, err := NewGeminiEmbedder("test-key", "test-model", 10, 0, 3)
+	if err != nil {
+		t.Fatalf("NewGeminiEmbedder: %v", err)
+	}
+	e.client = &http.Client{Transport: rewriteTransport{to: srv.URL}}
+
+	texts := make([]string, 30) // 3 waves of 10
+	_, err = e.EmbedBatch(texts)
+	if err == nil {
+		t.Fatal("expected error from failing wave, got nil")
+	}
+	// All 3 waves must have reached the server (no early cancellation).
+	if got := int(calls.Load()); got != 3 {
+		t.Errorf("server calls: got %d want 3 (all waves must run)", got)
+	}
+}
+
+// TestOpenAIEmbedder_ParallelBatchPreservesOrder verifies ordering under
+// concurrent wave execution with out-of-order OpenAI index fields.
+func TestOpenAIEmbedder_ParallelBatchPreservesOrder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openAIBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// Return reversed order to exercise the per-wave sort.
+		resp := openAIEmbeddingResponse{Data: make([]openAIEmbeddingData, len(req.Input))}
+		for i := range req.Input {
+			rev := len(req.Input) - 1 - i
+			resp.Data[i] = openAIEmbeddingData{
+				Embedding: []float64{float64(rev), 0},
+				Index:     rev,
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 10, 0, 4)
+	if err != nil {
+		t.Fatalf("NewOpenAIEmbedder: %v", err)
+	}
+	texts := make([]string, 40) // 4 waves of 10
+	out, err := e.EmbedBatch(texts)
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(out) != 40 {
+		t.Fatalf("output length: got %d want 40", len(out))
+	}
+	// The mock returns each wave reversed: datum with Index=j carries
+	// Embedding[0]=j. After direct-by-d.Index write, out[i][0] must equal
+	// i%batchSize. This catches global slot scrambling.
+	const batchSize = 10
+	for i, vec := range out {
+		if len(vec) == 0 {
+			t.Fatalf("output[%d] is empty (nil slot)", i)
+		}
+		if want := float64(i % batchSize); vec[0] != want {
+			t.Errorf("output[%d][0]: got %v want %v (wave-slot mismatch)", i, vec[0], want)
+		}
+	}
+}
+
+// TestOpenAIEmbedder_ParallelBatchAllWavesRunOnError mirrors the Gemini
+// variant: all started waves must reach the server even when one fails.
+func TestOpenAIEmbedder_ParallelBatchAllWavesRunOnError(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("internal error"))
+			return
+		}
+		var req openAIBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode: %v", err)
+			return
+		}
+		resp := openAIEmbeddingResponse{Data: make([]openAIEmbeddingData, len(req.Input))}
+		for i := range req.Input {
+			resp.Data[i] = openAIEmbeddingData{Embedding: []float64{0, 0}, Index: i}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 10, 0, 3)
+	if err != nil {
+		t.Fatalf("NewOpenAIEmbedder: %v", err)
+	}
+	texts := make([]string, 30) // 3 waves of 10
+	_, err = e.EmbedBatch(texts)
+	if err == nil {
+		t.Fatal("expected error from failing wave, got nil")
+	}
+	if got := int(calls.Load()); got != 3 {
+		t.Errorf("server calls: got %d want 3 (all waves must run)", got)
+	}
+}
+
+// TestGeminiEmbedder_ParallelBatchConcurrencyExceedsWaveCount confirms that
+// maxParallelBatches larger than the number of waves (semaphore wider than
+// the work queue) still completes correctly without deadlock or missing slots.
+func TestGeminiEmbedder_ParallelBatchConcurrencyExceedsWaveCount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req geminiBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		resp := geminiBatchResponse{Embeddings: make([]geminiEmbedding, len(req.Requests))}
+		for i := range req.Requests {
+			resp.Embeddings[i] = geminiEmbedding{Values: []float64{float64(i), 0}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	// 3 waves of 10, but semaphore allows 20 concurrent — wider than needed.
+	e, err := NewGeminiEmbedder("test-key", "test-model", 10, 0, 20)
+	if err != nil {
+		t.Fatalf("NewGeminiEmbedder: %v", err)
+	}
+	e.client = &http.Client{Transport: rewriteTransport{to: srv.URL}}
+
+	texts := make([]string, 30)
+	out, err := e.EmbedBatch(texts)
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(out) != 30 {
+		t.Fatalf("output length: got %d want 30", len(out))
+	}
+	const batchSize = 10
+	for i, vec := range out {
+		if len(vec) == 0 {
+			t.Fatalf("output[%d] is empty", i)
+		}
+		if want := float64(i % batchSize); vec[0] != want {
+			t.Errorf("output[%d][0]: got %v want %v", i, vec[0], want)
+		}
 	}
 }

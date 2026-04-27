@@ -101,7 +101,7 @@ func TestGeminiEmbedder_RetrySucceedsAfterOneRateLimit(t *testing.T) {
 	srv := httptest.NewServer(mock.handler(t))
 	defer srv.Close()
 
-	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 3)
+	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 3, 1)
 	if err != nil {
 		t.Fatalf("NewGeminiEmbedder: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestGeminiEmbedder_RetrySucceedsAfterTwoRateLimits(t *testing.T) {
 	srv := httptest.NewServer(mock.handler(t))
 	defer srv.Close()
 
-	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 3)
+	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 3, 1)
 	if err != nil {
 		t.Fatalf("NewGeminiEmbedder: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestGeminiEmbedder_RetryExhaustsAndReturnsError(t *testing.T) {
 	srv := httptest.NewServer(mock.handler(t))
 	defer srv.Close()
 
-	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 2)
+	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 2, 1)
 	if err != nil {
 		t.Fatalf("NewGeminiEmbedder: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestGeminiEmbedder_RetryDisabledByZeroMaxRetries(t *testing.T) {
 	srv := httptest.NewServer(mock.handler(t))
 	defer srv.Close()
 
-	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 0)
+	e, err := NewGeminiEmbedder("test-key", "test-model", 100, 0, 1)
 	if err != nil {
 		t.Fatalf("NewGeminiEmbedder: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestOpenAIEmbedder_RetrySucceedsAfterOneRateLimit(t *testing.T) {
 	srv := httptest.NewServer(mock.handler(t))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 3)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 3, 1)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestOpenAIEmbedder_RetryExhaustsAndReturnsError(t *testing.T) {
 	srv := httptest.NewServer(mock.handler(t))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 1)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 1, 1)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestOpenAIEmbedder_RetryDisabledByZeroMaxRetries(t *testing.T) {
 	srv := httptest.NewServer(mock.handler(t))
 	defer srv.Close()
 
-	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0)
+	e, err := NewOpenAIEmbedder(srv.URL, "test-model", "", 100, 0, 1)
 	if err != nil {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}

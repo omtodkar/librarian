@@ -116,6 +116,10 @@ type EmbeddingConfig struct {
 	// retry entirely. Backoff is exponential with full jitter, capped at 30s;
 	// a Retry-After response header overrides the computed delay.
 	MaxRetries int `mapstructure:"max_retries"`
+	// MaxParallelBatches limits how many EmbedBatch waves execute concurrently.
+	// Default 1 (serial). Raise for paid API tiers with real concurrency
+	// headroom; keep at 1 for free-tier Gemini or local endpoints.
+	MaxParallelBatches int `mapstructure:"max_parallel_batches"`
 }
 
 type ChunkingConfig struct {
@@ -226,6 +230,9 @@ func Load() *Config {
 	}
 	if !viper.IsSet("embedding.max_retries") {
 		cfg.Embedding.MaxRetries = 3
+	}
+	if !viper.IsSet("embedding.max_parallel_batches") {
+		cfg.Embedding.MaxParallelBatches = 1
 	}
 
 	if dbPath := viper.GetString("db_path"); dbPath != "" {
