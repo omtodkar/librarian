@@ -287,6 +287,15 @@ func (e *GeminiEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("batch wave panic: %v", r)
+					}
+					mu.Unlock()
+				}
+			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if err := doWave(sp.start, sp.end); err != nil {

@@ -280,8 +280,12 @@ func TestGeminiEmbedder_ParallelBatchPreservesOrder(t *testing.T) {
 		}
 		resp := geminiBatchResponse{Embeddings: make([]geminiEmbedding, len(req.Requests))}
 		for i := range req.Requests {
-			// Encode per-wave position as Values[0] so callers can assert ordering.
-			resp.Embeddings[i] = geminiEmbedding{Values: []float64{float64(i), 0}}
+			// Parse the global chunk index from "chunk-<N>" so each embedding
+			// value is unique across all waves — a complete wave swap would
+			// produce wrong values and fail the assertion below.
+			var globalIdx int
+			fmt.Sscanf(req.Requests[i].Content.Parts[0].Text, "chunk-%d", &globalIdx)
+			resp.Embeddings[i] = geminiEmbedding{Values: []float64{float64(globalIdx), 0}}
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
@@ -304,15 +308,15 @@ func TestGeminiEmbedder_ParallelBatchPreservesOrder(t *testing.T) {
 	if len(out) != 40 {
 		t.Fatalf("output length: got %d want 40", len(out))
 	}
-	// Each wave returns per-wave indices 0..9 as Values[0]. After correct
-	// parallel execution, out[i][0] must equal i%batchSize. This catches
-	// wave-slot scrambling that a nil check alone would miss.
-	const batchSize = 10
+	// Each chunk encodes its global index as Values[0]; a correct run produces
+	// out[i][0] == float64(i). Unlike i%batchSize, this detects complete
+	// wave-for-wave permutations where identical per-local-index values would
+	// have been invisible.
 	for i, vec := range out {
 		if len(vec) == 0 {
 			t.Fatalf("output[%d] is empty (nil slot)", i)
 		}
-		if want := float64(i % batchSize); vec[0] != want {
+		if want := float64(i); vec[0] != want {
 			t.Errorf("output[%d][0]: got %v want %v (wave-slot mismatch)", i, vec[0], want)
 		}
 	}
@@ -370,12 +374,17 @@ func TestOpenAIEmbedder_ParallelBatchPreservesOrder(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		// Return reversed order to exercise the per-wave sort.
+		// Return reversed order to exercise the per-wave index-based write.
+		// Each datum carries the global chunk index as Embedding[0], parsed
+		// from "chunk-<N>", so a complete wave swap produces wrong output
+		// values — invisible to i%batchSize assertions.
 		resp := openAIEmbeddingResponse{Data: make([]openAIEmbeddingData, len(req.Input))}
 		for i := range req.Input {
 			rev := len(req.Input) - 1 - i
+			var globalIdx int
+			fmt.Sscanf(req.Input[rev], "chunk-%d", &globalIdx)
 			resp.Data[i] = openAIEmbeddingData{
-				Embedding: []float64{float64(rev), 0},
+				Embedding: []float64{float64(globalIdx), 0},
 				Index:     rev,
 			}
 		}
@@ -388,6 +397,9 @@ func TestOpenAIEmbedder_ParallelBatchPreservesOrder(t *testing.T) {
 		t.Fatalf("NewOpenAIEmbedder: %v", err)
 	}
 	texts := make([]string, 40) // 4 waves of 10
+	for i := range texts {
+		texts[i] = fmt.Sprintf("chunk-%d", i)
+	}
 	out, err := e.EmbedBatch(texts)
 	if err != nil {
 		t.Fatalf("EmbedBatch: %v", err)
@@ -395,15 +407,13 @@ func TestOpenAIEmbedder_ParallelBatchPreservesOrder(t *testing.T) {
 	if len(out) != 40 {
 		t.Fatalf("output length: got %d want 40", len(out))
 	}
-	// The mock returns each wave reversed: datum with Index=j carries
-	// Embedding[0]=j. After direct-by-d.Index write, out[i][0] must equal
-	// i%batchSize. This catches global slot scrambling.
-	const batchSize = 10
+	// Each chunk encodes its global index as Embedding[0]; a correct run
+	// produces out[i][0] == float64(i) across all waves.
 	for i, vec := range out {
 		if len(vec) == 0 {
 			t.Fatalf("output[%d] is empty (nil slot)", i)
 		}
-		if want := float64(i % batchSize); vec[0] != want {
+		if want := float64(i); vec[0] != want {
 			t.Errorf("output[%d][0]: got %v want %v (wave-slot mismatch)", i, vec[0], want)
 		}
 	}

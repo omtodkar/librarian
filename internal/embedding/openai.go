@@ -211,6 +211,9 @@ func (e *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 				if len(d.Embedding) == 0 {
 					return fmt.Errorf("batch embeddings API returned empty embedding at index %d", start+d.Index)
 				}
+				if out[start+d.Index] != nil {
+					return fmt.Errorf("batch embeddings API returned duplicate index %d", d.Index)
+				}
 				out[start+d.Index] = d.Embedding
 			}
 			return nil
@@ -260,6 +263,15 @@ func (e *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("batch wave panic: %v", r)
+					}
+					mu.Unlock()
+				}
+			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if err := doWave(sp.start, sp.end); err != nil {
