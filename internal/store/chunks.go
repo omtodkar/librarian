@@ -75,7 +75,7 @@ func (s *Store) vectorSearch(vector []float64, fetchLimit int) ([]scoredChunk, e
 		JOIN doc_chunks c ON c.id = v.chunk_id
 		WHERE v.embedding MATCH ?
 		  AND k = ?
-		ORDER BY v.distance`, vecBytes, fetchLimit)
+		ORDER BY v.distance, c.id`, vecBytes, fetchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("search_chunks: %w", err)
 	}
@@ -231,7 +231,7 @@ func hybridRerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].finalScore > candidates[j].finalScore
+		return rankLess(candidates[i], candidates[j])
 	})
 
 	if len(candidates) > limit {
@@ -253,7 +253,7 @@ func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].finalScore > candidates[j].finalScore
+		return rankLess(candidates[i], candidates[j])
 	})
 
 	if len(candidates) > limit {
@@ -265,6 +265,19 @@ func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 		chunks[i] = sc.chunk
 	}
 	return chunks
+}
+
+// rankLess defines a total order for scored chunks: descending by finalScore,
+// ascending by numeric chunk id on ties. A total order makes sort.Slice output
+// deterministic regardless of input permutation, which keeps Claude's prompt-cache
+// prefix identical across repeated identical queries (cache TTL = 5 min).
+func rankLess(a, b scoredChunk) bool {
+	if a.finalScore != b.finalScore {
+		return a.finalScore > b.finalScore
+	}
+	idA, _ := strconv.ParseInt(a.chunk.ID, 10, 64)
+	idB, _ := strconv.ParseInt(b.chunk.ID, 10, 64)
+	return idA < idB
 }
 
 func computeMetadataBoost(signalMetaJSON string) float64 {

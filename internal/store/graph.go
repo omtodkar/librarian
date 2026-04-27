@@ -405,6 +405,7 @@ func (s *Store) Neighbors(nodeID, direction string, kinds ...string) ([]Edge, er
 		b.WriteString(")")
 		query = b.String()
 	}
+	query += " ORDER BY from_node, to_node, kind"
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -472,7 +473,7 @@ func (s *Store) ShortestPath(fromID, toID string, maxDepth int) ([]PathStep, err
 // bouncing on incoming edges.
 func (s *Store) outgoingEdges(nodeID string) ([]Edge, error) {
 	rows, err := s.db.Query(
-		`SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE from_node = ?`,
+		`SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE from_node = ? ORDER BY to_node, kind`,
 		nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("outgoing_edges: %w", err)
