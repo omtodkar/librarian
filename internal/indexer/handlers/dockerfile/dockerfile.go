@@ -452,23 +452,19 @@ func parseFromLine(line string) (baseImage, stageName string) {
 //	"gcr.io/distroless/base" → "gcr.io/distroless/base" (unchanged)
 //	"localhost:5000/myapp"   → "localhost:5000/myapp" (unchanged)
 func normalizeDockerImage(image string) string {
-	// Extract the name part (before tag or digest) to examine the registry component.
-	namePart := image
-	if idx := strings.Index(image, "@"); idx >= 0 {
-		namePart = image[:idx]
-	} else if idx := strings.Index(image, ":"); idx >= 0 {
-		namePart = image[:idx]
-	}
-
-	slashIdx := strings.Index(namePart, "/")
+	// Use a slash-first approach: find the first "/" in the raw image string
+	// (before any tag or digest) and inspect the segment before it. This avoids
+	// the tag-separator colon in "localhost:5000/myapp" being mistaken for the
+	// end of the name part, which the old namePart-extraction approach did.
+	slashIdx := strings.Index(image, "/")
 	if slashIdx < 0 {
 		// No slash: official Docker Hub library image (e.g. "ubuntu:22.04").
 		return "docker.io/library/" + image
 	}
 
-	// Has a slash. Check if the segment before the first slash looks like a
-	// registry (contains a dot or colon, or equals "localhost").
-	prefix := namePart[:slashIdx]
+	// The prefix (before the first slash) is a registry when it contains a
+	// dot ("gcr.io"), a colon ("localhost:5000"), or equals "localhost".
+	prefix := image[:slashIdx]
 	if strings.Contains(prefix, ".") || strings.Contains(prefix, ":") || prefix == "localhost" {
 		return image
 	}

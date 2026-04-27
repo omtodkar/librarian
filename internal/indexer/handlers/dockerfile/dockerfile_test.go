@@ -873,6 +873,27 @@ func TestGraphPass_CustomRegistryImage(t *testing.T) {
 	}
 }
 
+// TestGraphPass_RegistryWithPort verifies that an image whose registry component
+// includes a port number (e.g. localhost:5000/myapp) is left unchanged by
+// normalizeDockerImage — the port colon must not be confused with the tag separator.
+func TestGraphPass_RegistryWithPort(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM localhost:5000/myapp:latest\nCMD [\"/myapp\"]\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 1 {
+		t.Fatalf("expected 1 external import ref, got %d", len(extRefs))
+	}
+	if extRefs[0].Target != "localhost:5000/myapp:latest" {
+		t.Errorf("Target = %q, want localhost:5000/myapp:latest (unchanged)", extRefs[0].Target)
+	}
+}
+
 // TestGraphPass_ExposeCmdEntrypoint verifies that EXPOSE, CMD, and ENTRYPOINT
 // directives are captured as metadata on the stage Unit.
 func TestGraphPass_ExposeCmdEntrypoint(t *testing.T) {
