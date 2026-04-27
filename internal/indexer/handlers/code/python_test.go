@@ -1982,6 +1982,15 @@ func TestPEP695_ClassWithConstraints(t *testing.T) {
 	if u == nil {
 		t.Fatalf("expected typevar unit T; units: %+v", typeVarUnits(doc))
 	}
+	if u.Path != "mymod.Foo.T" {
+		t.Errorf("Path = %q, want mymod.Foo.T", u.Path)
+	}
+	if sc, _ := u.Metadata["scope"].(string); sc != "class" {
+		t.Errorf("scope = %q, want class", sc)
+	}
+	if kh, _ := u.Metadata["kind_hint"].(string); kh != "typevar" {
+		t.Errorf("kind_hint = %q, want typevar", kh)
+	}
 	constraints, _ := u.Metadata["constraints"].([]string)
 	if len(constraints) != 2 || constraints[0] != "int" || constraints[1] != "str" {
 		t.Errorf("constraints = %v, want [int str]", constraints)
@@ -2043,6 +2052,12 @@ func TestPEP695_TypeAlias(t *testing.T) {
 	if sc, _ := vUnit.Metadata["scope"].(string); sc != "type_alias" {
 		t.Errorf("V scope = %q, want type_alias", sc)
 	}
+	if kh, _ := kUnit.Metadata["kind_hint"].(string); kh != "typevar" {
+		t.Errorf("K kind_hint = %q, want typevar", kh)
+	}
+	if kh, _ := vUnit.Metadata["kind_hint"].(string); kh != "typevar" {
+		t.Errorf("V kind_hint = %q, want typevar", kh)
+	}
 }
 
 func TestPEP695_AsyncFunctionSimple(t *testing.T) {
@@ -2101,6 +2116,12 @@ func TestPEP695_ParamSpecSkipped(t *testing.T) {
 	}
 	if tvs[0].Path != "mymod.Foo.T" {
 		t.Errorf("Path = %q, want mymod.Foo.T", tvs[0].Path)
+	}
+	if sc, _ := tvs[0].Metadata["scope"].(string); sc != "class" {
+		t.Errorf("scope = %q, want class", sc)
+	}
+	if kh, _ := tvs[0].Metadata["kind_hint"].(string); kh != "typevar" {
+		t.Errorf("kind_hint = %q, want typevar", kh)
 	}
 }
 
