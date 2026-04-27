@@ -20,6 +20,8 @@ require (
 	github.com/tree-sitter/tree-sitter-java v0.23.5
 	github.com/tree-sitter/tree-sitter-javascript v0.25.0
 	github.com/tree-sitter/tree-sitter-python v0.25.0
+	github.com/tree-sitter/tree-sitter-ruby v0.23.1
+	github.com/tree-sitter/tree-sitter-rust v0.24.2
 	github.com/xuri/excelize/v2 v2.10.1
 	github.com/yuin/goldmark v1.7.16
 	github.com/yuin/goldmark-meta v1.1.0

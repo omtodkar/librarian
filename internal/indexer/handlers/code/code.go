@@ -1058,6 +1058,8 @@ func init() {
 		NewSwiftGrammar(),
 		NewDartGrammar(),
 		NewProtoGrammar(),
+		NewRustGrammar(),
+		NewRubyGrammar(),
 	} {
 		indexer.RegisterDefault(New(g))
 	}
