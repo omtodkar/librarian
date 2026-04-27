@@ -2083,9 +2083,9 @@ func callIt() {}
 	if len(result.Callers) != 1 {
 		t.Fatalf("Callers = %d, want 1; got %+v", len(result.Callers), result.Callers)
 	}
-	// File scan must have fired and found `func callIt()` at a non-zero line.
-	if result.Callers[0].LineNumber == 0 {
-		t.Errorf("legacy fallback: Callers[0].LineNumber = 0, expected non-zero (file scan must fire when LineNumber==0)")
+	// File scan must have fired and found `func callIt()` at line 2.
+	if result.Callers[0].LineNumber != 2 {
+		t.Errorf("legacy fallback: Callers[0].LineNumber = %d, want 2 (`func callIt()` is on line 2 of cmd/main.go)", result.Callers[0].LineNumber)
 	}
 }
 
@@ -2144,9 +2144,9 @@ export default function Page() {
 	if len(result.Callers) != 1 {
 		t.Fatalf("Callers = %d, want 1; got %+v", len(result.Callers), result.Callers)
 	}
-	// File scan must have fired for `function Page()` and returned a non-zero line.
-	if result.Callers[0].LineNumber == 0 {
-		t.Errorf("call_rpc legacy fallback: Callers[0].LineNumber = 0, expected non-zero (file scan must fire when LineNumber==0)")
+	// File scan must have fired and found `function Page()` at line 6.
+	if result.Callers[0].LineNumber != 6 {
+		t.Errorf("call_rpc legacy fallback: Callers[0].LineNumber = %d, want 6 (`function Page()` is on line 6 of app/page.tsx)", result.Callers[0].LineNumber)
 	}
 }
 
