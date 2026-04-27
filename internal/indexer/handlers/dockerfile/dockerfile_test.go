@@ -381,3 +381,131 @@ func TestHandler_EmptyFile(t *testing.T) {
 		t.Errorf("expected 0 chunks for empty Dockerfile, got %d", len(chunks))
 	}
 }
+
+// TestHandler_HandlersForFilenameDispatch verifies that HandlersFor (used by the
+// graph-pass walker) also resolves Dockerfile via the filename glob mechanism.
+func TestHandler_HandlersForFilenameDispatch(t *testing.T) {
+	reg := indexer.DefaultRegistry()
+
+	cases := []string{
+		"Dockerfile",
+		"Dockerfile.prod",
+		"services/api/Dockerfile",
+		"auth.dockerfile",
+	}
+	for _, path := range cases {
+		hs := reg.HandlersFor(path)
+		if len(hs) == 0 {
+			t.Errorf("HandlersFor(%q) returned no handlers, want dockerfile handler", path)
+			continue
+		}
+		if hs[0].Name() != "dockerfile" {
+			t.Errorf("HandlersFor(%q)[0].Name() = %q, want dockerfile", path, hs[0].Name())
+		}
+	}
+}
+
+// TestHandler_HandlersSliceNoDuplicates verifies that Handlers() does not return the
+// dockerfile handler twice when it registers via both Register and RegisterByFilenameGlob.
+func TestHandler_HandlersSliceNoDuplicates(t *testing.T) {
+	reg := indexer.DefaultRegistry()
+	counts := make(map[string]int)
+	for _, h := range reg.Handlers() {
+		counts[h.Name()]++
+	}
+	if counts["dockerfile"] > 1 {
+		t.Errorf("dockerfile handler appears %d times in Handlers(), want 1", counts["dockerfile"])
+	}
+}
+
+// TestHandler_BareFromLine exercises the bare-FROM branch (FROM with no image name),
+// which is syntactically unusual but should not panic.
+func TestHandler_BareFromLine(t *testing.T) {
+	h := dockerfilehandler.New()
+	// A FROM line with only the keyword — treated as a stage boundary.
+	src := "FROM\nRUN echo hello\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// Should yield one unit — the bare FROM still counts as a stage start.
+	if len(doc.Units) == 0 {
+		t.Error("expected at least 1 Unit for bare FROM, got 0")
+	}
+}
+
+// TestHandler_PlatformFlag checks that FROM lines with --platform=... still
+// produce the correct stage title when an AS clause is present.
+func TestHandler_PlatformFlag(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM --platform=$BUILDPLATFORM golang:1.22 AS cross-builder
+WORKDIR /app
+# Download all Go dependencies before copying source for better layer caching.
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /server ./cmd/server
+
+FROM --platform=$TARGETPLATFORM alpine:3.19 AS final
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=cross-builder /server /server
+CMD ["/server"]`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Units) != 2 {
+		t.Fatalf("expected 2 Units, got %d", len(doc.Units))
+	}
+	if doc.Units[0].Title != "stage: cross-builder" {
+		t.Errorf("Units[0].Title = %q, want stage: cross-builder", doc.Units[0].Title)
+	}
+	if doc.Units[1].Title != "stage: final" {
+		t.Errorf("Units[1].Title = %q, want stage: final", doc.Units[1].Title)
+	}
+}
+
+// TestHandler_UnnamedStages_ChunkBehavior verifies Chunk() with stages that have
+// enough content to clear MinTokens. (The Parse-only test uses short bodies.)
+func TestHandler_UnnamedStages_ChunkBehavior(t *testing.T) {
+	h := dockerfilehandler.New()
+	// Both stages have enough content to exceed MinTokens=50.
+	src := `FROM golang:1.22
+WORKDIR /app
+# Download all Go dependencies in a separate step for Docker layer caching.
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /server ./cmd/server
+
+FROM alpine:3.19
+# Install CA certificates and timezone data for production use.
+RUN apk add --no-cache ca-certificates tzdata \
+    && update-ca-certificates \
+    && rm -rf /var/cache/apk/*
+# Create a non-root system user to run the server binary for defence in depth.
+RUN addgroup -S appgroup && adduser -S -G appgroup -u 10001 appuser
+COPY --from=0 /server /server
+RUN chown appuser:appgroup /server
+USER appuser
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s CMD ["/server", "-healthz"]
+CMD ["/server"]`
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Units) != 2 {
+		t.Fatalf("expected 2 Units, got %d", len(doc.Units))
+	}
+	chunks, err := h.Chunk(doc, indexer.DefaultChunkConfig())
+	if err != nil {
+		t.Fatalf("Chunk: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Errorf("expected 2 chunks for 2 unnamed stages, got %d", len(chunks))
+	}
+}

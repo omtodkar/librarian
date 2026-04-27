@@ -89,13 +89,25 @@ func (r *Registry) RegisterAdditional(h FileHandler) {
 // be keyed by extension alone.
 //
 // Pattern collisions follow last-registered-wins semantics matching Register.
-// h is appended to the handlers slice so it appears in Handlers() introspection.
+// h is appended to the handlers slice for Handlers() introspection only when not
+// already present (prevents duplicate entries when a handler calls both Register and
+// RegisterByFilenameGlob from the same init).
 // Unlike Register, this does not populate byExt — pattern-registered handlers are
 // invisible to callers that enumerate extensions (e.g. legacy callers of Extensions()).
 func (r *Registry) RegisterByFilenameGlob(h FileHandler, patterns ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.handlers = append(r.handlers, h)
+	// Deduplicate: only append to handlers if not already registered (e.g. via Register).
+	found := false
+	for _, existing := range r.handlers {
+		if existing == h {
+			found = true
+			break
+		}
+	}
+	if !found {
+		r.handlers = append(r.handlers, h)
+	}
 	for _, p := range patterns {
 		r.byFilenameGlob = append(r.byFilenameGlob, filenamePattern{pattern: p, handler: h})
 	}
