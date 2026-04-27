@@ -31,6 +31,11 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 		mcp.WithBoolean("include_body",
 			mcp.Description("Return full chunk content instead of the 1-2 line summary. Default false — summaries reduce token cost; use expand_chunks or set include_body=true to retrieve full bodies."),
 		),
+		mcp.WithNumber("budget",
+			mcp.Description("Token budget: stop including chunks once cumulative tokens would exceed this value. 0 = disabled (return up to limit chunks). Approximate — uses whitespace-split heuristic (words/0.75)."),
+			mcp.DefaultNumber(0),
+			mcp.Min(0),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -40,6 +45,7 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		limit := req.GetInt("limit", 5)
+		budget := req.GetInt("budget", 0)
 		includeRefs := req.GetBool("include_refs", false)
 		includeBody := req.GetBool("include_body", false)
 
@@ -57,6 +63,8 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
+
+		chunks = store.ApplyTokenBudget(chunks, budget)
 
 		if len(chunks) == 0 {
 			return mcp.NewToolResultText("No results found for query: " + query), nil

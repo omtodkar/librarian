@@ -91,6 +91,8 @@ Semantic vector search. Returns the top chunks ranked by `0.90 × vector_similar
 | `query` | string | yes | — | **STABLE** | Natural-language search query |
 | `limit` | number | no | 5 | **STABLE** | Result count; min 1, max 20 |
 | `include_refs` | boolean | no | false | **STABLE** | Append referenced code file paths for each result |
+| `include_body` | boolean | no | false | **EXPERIMENTAL** | Return full chunk content instead of the 1-2 line summary |
+| `budget` | number | no | 0 | **STABLE** | Token budget: chunks are included in rank order until the next chunk would exceed this value; 0 = disabled. Approximate — uses whitespace-split heuristic (words/0.75). |
 
 **Output:** Plain text. A header line followed by one `### Result N` block per chunk. Each block contains `**File:**`, `**Section:**`, and `**Content:**` fields. When `include_refs=true`, a `**Refs:**` line is appended to blocks that have associated code references.
 

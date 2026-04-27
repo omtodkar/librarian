@@ -13,6 +13,7 @@ import (
 
 var (
 	searchLimit       int
+	searchBudget      int
 	searchJSON        bool
 	searchIncludeRefs bool
 )
@@ -26,6 +27,7 @@ var searchCmd = &cobra.Command{
 
 func init() {
 	searchCmd.Flags().IntVar(&searchLimit, "limit", 5, "Maximum number of results")
+	searchCmd.Flags().IntVar(&searchBudget, "budget", 0, "Token budget: stop including chunks once cumulative tokens would exceed this value (0 = disabled)")
 	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output results as JSON")
 	searchCmd.Flags().BoolVar(&searchIncludeRefs, "include-refs", false, "Include referenced code files for each result")
 	rootCmd.AddCommand(searchCmd)
@@ -59,6 +61,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)
 	}
+
+	chunks = store.ApplyTokenBudget(chunks, searchBudget)
 
 	var refs map[string][]string
 	if searchIncludeRefs {

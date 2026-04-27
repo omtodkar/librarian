@@ -42,6 +42,7 @@ func TestMCPStableSchema(t *testing.T) {
 			{"limit", "number"},
 			{"include_refs", "boolean"},
 			{"include_body", "boolean"},
+			{"budget", "number"},
 		},
 		"expand_chunks": {
 			{"ids", "array"},
