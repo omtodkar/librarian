@@ -96,10 +96,16 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 // instead of the full content body. Callers that always want the full body
 // (expand_chunks, get_context) pass includeBody=true.
 func formatChunkResult(chunk store.DocChunk, includeBody bool) string {
+	var out string
 	if !includeBody && chunk.Summary != "" {
-		return fmt.Sprintf("**File:** %s\n**Section:** %s\n**ID:** %s\n**Summary:**\n%s\n\n",
+		out = fmt.Sprintf("**File:** %s\n**Section:** %s\n**ID:** %s\n**Summary:**\n%s\n",
 			chunk.FilePath, chunk.SectionHeading, chunk.ID, chunk.Summary)
+	} else {
+		out = fmt.Sprintf("**File:** %s\n**Section:** %s\n**ID:** %s\n**Content:**\n%s\n",
+			chunk.FilePath, chunk.SectionHeading, chunk.ID, chunk.Content)
 	}
-	return fmt.Sprintf("**File:** %s\n**Section:** %s\n**ID:** %s\n**Content:**\n%s\n\n",
-		chunk.FilePath, chunk.SectionHeading, chunk.ID, chunk.Content)
+	if len(chunk.Duplicates) > 0 {
+		out += "**Also in:** " + strings.Join(chunk.Duplicates, ", ") + "\n"
+	}
+	return out + "\n"
 }

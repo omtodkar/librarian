@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -234,6 +235,8 @@ func hybridRerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 		return rankLess(candidates[i], candidates[j])
 	})
 
+	candidates = deduplicateByContent(candidates)
+
 	if len(candidates) > limit {
 		candidates = candidates[:limit]
 	}
@@ -256,6 +259,8 @@ func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 		return rankLess(candidates[i], candidates[j])
 	})
 
+	candidates = deduplicateByContent(candidates)
+
 	if len(candidates) > limit {
 		candidates = candidates[:limit]
 	}
@@ -265,6 +270,71 @@ func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 		chunks[i] = sc.chunk
 	}
 	return chunks
+}
+
+// dedupWindow is the maximum number of top-ranked candidates scanned for
+// byte-identical content. Only chunks within this window are deduplicated.
+const dedupWindow = 20
+
+// deduplicateByContent removes byte-identical chunks within the first
+// dedupWindow entries of a sorted candidates slice. The highest-ranked
+// instance (index 0 = best) is kept as the representative; its Duplicates
+// field is set to the file paths of all removed copies. Singletons pass
+// through unchanged. Candidates beyond dedupWindow are appended as-is.
+func deduplicateByContent(candidates []scoredChunk) []scoredChunk {
+	topN := len(candidates)
+	if topN > dedupWindow {
+		topN = dedupWindow
+	}
+
+	// Pass 1: record the representative index and duplicate paths per hash.
+	type hashEntry struct {
+		repIdx   int
+		dupPaths []string
+	}
+	seen := make(map[[32]byte]*hashEntry, topN)
+	for i := 0; i < topN; i++ {
+		h := sha256.Sum256([]byte(candidates[i].chunk.Content))
+		if e, ok := seen[h]; ok {
+			e.dupPaths = append(e.dupPaths, candidates[i].chunk.FilePath)
+		} else {
+			seen[h] = &hashEntry{repIdx: i}
+		}
+	}
+
+	// Short-circuit: if no hash appears ≥2 times, nothing to do.
+	hasDups := false
+	for _, e := range seen {
+		if len(e.dupPaths) > 0 {
+			hasDups = true
+			break
+		}
+	}
+	if !hasDups {
+		return candidates
+	}
+
+	// Pass 2: build a set of representative indices → their duplicate paths.
+	repSet := make(map[int][]string, len(seen))
+	for _, e := range seen {
+		repSet[e.repIdx] = e.dupPaths
+	}
+
+	result := make([]scoredChunk, 0, len(candidates))
+	for i := 0; i < topN; i++ {
+		dupPaths, isRep := repSet[i]
+		if !isRep {
+			continue // duplicate — drop it
+		}
+		c := candidates[i]
+		if len(dupPaths) > 0 {
+			c.chunk.Duplicates = dupPaths
+		}
+		result = append(result, c)
+	}
+	// Candidates beyond the dedup window pass through unchanged.
+	result = append(result, candidates[topN:]...)
+	return result
 }
 
 // rankLess defines a total order for scored chunks: descending by finalScore,

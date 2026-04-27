@@ -16,15 +16,18 @@ type Document struct {
 }
 
 type DocChunk struct {
-	ID               string `json:"id"`
-	FilePath         string `json:"file_path"`
-	SectionHeading   string `json:"section_heading"`
-	SectionHierarchy string `json:"section_hierarchy"`
-	ChunkIndex       uint32 `json:"chunk_index"`
-	Content          string `json:"content"`
-	Summary          string `json:"summary"`
-	TokenCount       uint32 `json:"token_count"`
-	SignalMeta       string `json:"signal_meta"`
+	ID               string   `json:"id"`
+	FilePath         string   `json:"file_path"`
+	SectionHeading   string   `json:"section_heading"`
+	SectionHierarchy string   `json:"section_hierarchy"`
+	ChunkIndex       uint32   `json:"chunk_index"`
+	Content          string   `json:"content"`
+	Summary          string   `json:"summary"`
+	TokenCount       uint32   `json:"token_count"`
+	SignalMeta       string   `json:"signal_meta"`
+	// Duplicates lists file paths where byte-identical content also appears.
+	// Populated by query-time deduplication; nil when no duplicates found.
+	Duplicates []string `json:"duplicates,omitempty"`
 }
 
 type CodeFile struct {
