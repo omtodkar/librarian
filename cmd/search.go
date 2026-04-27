@@ -50,7 +50,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	chunks, err := s.SearchChunks(vector, searchLimit)
+	var chunks []store.DocChunk
+	if cfg.Search.HybridSearch {
+		chunks, err = s.HybridSearch(vector, query, searchLimit)
+	} else {
+		chunks, err = s.SearchChunks(vector, searchLimit)
+	}
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)
 	}

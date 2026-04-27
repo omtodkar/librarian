@@ -58,7 +58,12 @@ func runContext(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("embedding query: %w", err)
 	}
 
-	chunks, err := s.SearchChunks(vector, contextLimit)
+	var chunks []store.DocChunk
+	if cfg.Search.HybridSearch {
+		chunks, err = s.HybridSearch(vector, query, contextLimit)
+	} else {
+		chunks, err = s.SearchChunks(vector, contextLimit)
+	}
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}

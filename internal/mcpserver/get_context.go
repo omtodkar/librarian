@@ -11,7 +11,7 @@ import (
 	"librarian/internal/store"
 )
 
-func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding.Embedder) {
+func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding.Embedder, hybridSearch bool) {
 	tool := mcp.NewTool("get_context",
 		mcp.WithDescription("Comprehensive briefing: semantic search combined with graph traversal for related docs and code references. Use this for understanding a topic in depth. Adjust limit for broader or narrower results."),
 		mcp.WithString("query",
@@ -40,7 +40,12 @@ func registerGetContext(s *server.MCPServer, st *store.Store, embedder embedding
 			return mcp.NewToolResultError(fmt.Sprintf("embedding query: %v", err)), nil
 		}
 
-		chunks, err := st.SearchChunks(vector, limit)
+		var chunks []store.DocChunk
+		if hybridSearch {
+			chunks, err = st.HybridSearch(vector, query, limit)
+		} else {
+			chunks, err = st.SearchChunks(vector, limit)
+		}
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}

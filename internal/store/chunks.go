@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 func (s *Store) AddChunk(input AddChunkInput) (*DocChunk, error) {
@@ -63,23 +64,10 @@ type scoredChunk struct {
 	finalScore float64
 }
 
-func (s *Store) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
-	// vec0 may be absent on a fresh DB, between ClearVectorState and the
-	// first AddChunk of a reindex, or in a long-lived process (MCP server)
-	// that held an open Store while another process dropped the table.
-	// Returning an empty result matches "no matches" semantics instead of
-	// surfacing a sqlite "no such table" error.
-	if !s.vecTableReady {
-		return nil, nil
-	}
+// vectorSearch fetches up to fetchLimit candidates ordered by cosine distance.
+// Internal helper shared by SearchChunks and HybridSearch.
+func (s *Store) vectorSearch(vector []float64, fetchLimit int) ([]scoredChunk, error) {
 	vecBytes := float64sToFloat32Bytes(vector)
-
-	// Over-fetch candidates for re-ranking
-	fetchLimit := limit * 3
-	if fetchLimit < 10 {
-		fetchLimit = 10
-	}
-
 	rows, err := s.db.Query(`
 		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.token_count, c.signal_meta, v.distance
 		FROM doc_chunk_vectors v
@@ -107,8 +95,153 @@ func (s *Store) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	return candidates, nil
+}
 
+// ftsSearch runs an FTS5 BM25 query and returns up to fetchLimit candidates
+// ordered by relevance (best first). Returns nil without error when queryText
+// is empty after sanitization or when the FTS table has no matching rows.
+func (s *Store) ftsSearch(queryText string, fetchLimit int) ([]scoredChunk, error) {
+	ftsQuery := buildFTSQuery(queryText)
+	if ftsQuery == "" {
+		return nil, nil
+	}
+
+	rows, err := s.db.Query(`
+		SELECT c.id, c.file_path, c.section_heading, c.section_hierarchy, c.chunk_index, c.content, c.token_count, c.signal_meta
+		FROM doc_chunks_fts f
+		JOIN doc_chunks c ON c.id = f.rowid
+		WHERE doc_chunks_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?`, ftsQuery, fetchLimit)
+	if err != nil {
+		return nil, fmt.Errorf("fts_search: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []scoredChunk
+	for rows.Next() {
+		var sc scoredChunk
+		var id int64
+		if err := rows.Scan(&id, &sc.chunk.FilePath, &sc.chunk.SectionHeading,
+			&sc.chunk.SectionHierarchy, &sc.chunk.ChunkIndex, &sc.chunk.Content,
+			&sc.chunk.TokenCount, &sc.chunk.SignalMeta); err != nil {
+			return nil, fmt.Errorf("fts_search scan: %w", err)
+		}
+		sc.chunk.ID = strconv.FormatInt(id, 10)
+		candidates = append(candidates, sc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+// SearchChunks performs vector KNN search followed by signal-weighted re-ranking.
+func (s *Store) SearchChunks(vector []float64, limit int) ([]DocChunk, error) {
+	// vec0 may be absent on a fresh DB, between ClearVectorState and the
+	// first AddChunk of a reindex, or in a long-lived process (MCP server)
+	// that held an open Store while another process dropped the table.
+	// Returning an empty result matches "no matches" semantics instead of
+	// surfacing a sqlite "no such table" error.
+	if !s.vecTableReady {
+		return nil, nil
+	}
+
+	fetchLimit := limit * 3
+	if fetchLimit < 10 {
+		fetchLimit = 10
+	}
+
+	candidates, err := s.vectorSearch(vector, fetchLimit)
+	if err != nil {
+		return nil, err
+	}
 	return rerankWithSignals(candidates, limit), nil
+}
+
+// HybridSearch combines vector KNN and FTS5 BM25 results via Reciprocal Rank
+// Fusion (RRF), then applies signal-weighted re-ranking over the merged set.
+// This surfaces exact literal matches (e.g. specific identifiers) that pure
+// vector search may rank below semantically similar but lexically different chunks.
+func (s *Store) HybridSearch(vector []float64, queryText string, limit int) ([]DocChunk, error) {
+	if !s.vecTableReady {
+		return nil, nil
+	}
+
+	fetchLimit := limit * 3
+	if fetchLimit < 10 {
+		fetchLimit = 10
+	}
+
+	vecCandidates, err := s.vectorSearch(vector, fetchLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	ftsCandidates, err := s.ftsSearch(queryText, fetchLimit)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid_search: %w", err)
+	}
+
+	merged := mergeRRF(vecCandidates, ftsCandidates)
+	return hybridRerankWithSignals(merged, limit), nil
+}
+
+// mergeRRF applies Reciprocal Rank Fusion over two ranked lists, returning a
+// merged list with finalScore = sum of 1/(k+rank) contributions. k=60 is the
+// standard constant that dampens the impact of very-high-rank outliers.
+func mergeRRF(vecResults, ftsResults []scoredChunk) []scoredChunk {
+	const k = 60.0
+	scores := make(map[string]*scoredChunk, len(vecResults)+len(ftsResults))
+
+	for rank, sc := range vecResults {
+		rrfScore := 1.0 / (k + float64(rank+1))
+		entry := sc
+		entry.finalScore = rrfScore
+		scores[sc.chunk.ID] = &entry
+	}
+
+	for rank, sc := range ftsResults {
+		rrfScore := 1.0 / (k + float64(rank+1))
+		if existing, ok := scores[sc.chunk.ID]; ok {
+			existing.finalScore += rrfScore
+		} else {
+			entry := sc
+			entry.finalScore = rrfScore
+			scores[sc.chunk.ID] = &entry
+		}
+	}
+
+	result := make([]scoredChunk, 0, len(scores))
+	for _, sc := range scores {
+		result = append(result, *sc)
+	}
+	return result
+}
+
+// hybridRerankWithSignals applies signal boosting on top of pre-computed RRF
+// scores and returns the top-limit chunks. Analogous to rerankWithSignals but
+// treats finalScore as the base (RRF output) rather than recomputing from distance.
+func hybridRerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
+	for i := range candidates {
+		boost := computeMetadataBoost(candidates[i].chunk.SignalMeta)
+		candidates[i].finalScore = 0.90*candidates[i].finalScore + 0.10*boost
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].finalScore > candidates[j].finalScore
+	})
+
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	chunks := make([]DocChunk, len(candidates))
+	for i, sc := range candidates {
+		chunks[i] = sc.chunk
+	}
+	return chunks
 }
 
 func rerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
@@ -204,6 +337,36 @@ func (s *Store) GetChunksForDocument(docID string) ([]DocChunk, error) {
 		chunks = append(chunks, chunk)
 	}
 	return chunks, rows.Err()
+}
+
+// buildFTSQuery converts a natural language query string into an FTS5 OR
+// query: each token is double-quoted and joined with OR so BM25 ranks on any
+// token match. Double-quoting prevents FTS5 reserved words (AND, OR, NOT,
+// NEAR) from being interpreted as operators — they are treated as literals.
+// Returns "" when no valid terms remain after sanitization.
+func buildFTSQuery(query string) string {
+	clean := sanitizeFTSQuery(query)
+	words := strings.Fields(clean)
+	if len(words) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(words))
+	for i, w := range words {
+		quoted[i] = `"` + w + `"`
+	}
+	return strings.Join(quoted, " OR ")
+}
+
+// sanitizeFTSQuery removes characters that carry special meaning in the FTS5
+// query language to prevent syntax errors on arbitrary user input.
+func sanitizeFTSQuery(query string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '"', '*', '(', ')', '^', '{', '}', '[', ']':
+			return -1
+		}
+		return r
+	}, query)
 }
 
 // float64sToFloat32Bytes converts a []float64 vector to little-endian []byte

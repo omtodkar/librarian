@@ -22,14 +22,15 @@ func TestOpen_FreshDB(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT max(version_id) FROM goose_db_version WHERE is_applied = 1`).Scan(&maxVersion); err != nil {
 		t.Fatalf("reading goose_db_version: %v", err)
 	}
-	if maxVersion != 1 {
-		t.Errorf("max applied version_id: got %d want 1", maxVersion)
+	if maxVersion != 2 {
+		t.Errorf("max applied version_id: got %d want 2", maxVersion)
 	}
 
 	// Every baseline table must exist after goose.Up. Include embedding_meta
 	// so a regression that drops it from 0001 fails this test rather than
 	// later at the first AddChunk (cryptic "no such table" from a live run).
-	wantTables := []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta"}
+	// doc_chunks_fts is the FTS5 virtual table added in migration 0002.
+	wantTables := []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta", "doc_chunks_fts"}
 	for _, tbl := range wantTables {
 		var name string
 		err := s.db.QueryRow(
@@ -115,9 +116,9 @@ func TestOpen_PreGooseDBIsRefused(t *testing.T) {
 	}
 }
 
-// TestGooseDown_RestoresEmptyState pins Down symmetry — after applying 0001
-// and reversing it, every librarian table is gone. A broken Down would leave
-// orphan tables that a fresh Up would then trip over via unique constraints.
+// TestGooseDown_RestoresEmptyState pins Down symmetry — after rolling back all
+// migrations to version 0, every librarian table is gone. A broken Down would
+// leave orphan tables that a fresh Up would then trip over via unique constraints.
 func TestGooseDown_RestoresEmptyState(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "rollback.db")
 	s, err := Open(dbPath)
@@ -127,11 +128,12 @@ func TestGooseDown_RestoresEmptyState(t *testing.T) {
 	defer s.Close()
 
 	// Dialect + BaseFS are set in store.go's init(), so no test setup needed.
-	if err := goose.Down(s.db, "migrations"); err != nil {
-		t.Fatalf("goose.Down: %v", err)
+	// DownTo(0) rolls back every migration in reverse order.
+	if err := goose.DownTo(s.db, "migrations", 0); err != nil {
+		t.Fatalf("goose.DownTo(0): %v", err)
 	}
 
-	for _, tbl := range []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta"} {
+	for _, tbl := range []string{"documents", "doc_chunks", "code_files", "refs", "graph_nodes", "graph_edges", "embedding_meta", "doc_chunks_fts"} {
 		var name string
 		err := s.db.QueryRow(
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl,

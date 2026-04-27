@@ -19,9 +19,9 @@ func TestMCPStableSchema(t *testing.T) {
 
 	// Register all tools with nil deps — registration only captures deps in
 	// handler closures; the closures are never invoked in this test.
-	registerSearchDocs(srv, nil, nil)
+	registerSearchDocs(srv, nil, nil, false)
 	registerGetDocument(srv, nil, nil)
-	registerGetContext(srv, nil, nil)
+	registerGetContext(srv, nil, nil, false)
 	registerListDocuments(srv, nil)
 	registerUpdateDocs(srv, nil, nil, nil)
 	registerTraceRPC(srv, nil, nil)

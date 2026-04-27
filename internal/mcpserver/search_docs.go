@@ -12,7 +12,7 @@ import (
 	"librarian/internal/store"
 )
 
-func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding.Embedder) {
+func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding.Embedder, hybridSearch bool) {
 	tool := mcp.NewTool("search_docs",
 		mcp.WithDescription("Semantic search across all indexed documentation. Returns relevant chunks with file paths and section context."),
 		mcp.WithString("query",
@@ -44,7 +44,12 @@ func registerSearchDocs(s *server.MCPServer, st *store.Store, embedder embedding
 			return mcp.NewToolResultError(fmt.Sprintf("embedding query: %v", err)), nil
 		}
 
-		chunks, err := st.SearchChunks(vector, limit)
+		var chunks []store.DocChunk
+		if hybridSearch {
+			chunks, err = st.HybridSearch(vector, query, limit)
+		} else {
+			chunks, err = st.SearchChunks(vector, limit)
+		}
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}

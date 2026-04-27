@@ -10,6 +10,7 @@ type Config struct {
 	Office           OfficeConfig    `mapstructure:"office"`
 	PDF              PDFConfig       `mapstructure:"pdf"`
 	Graph            GraphConfig     `mapstructure:"graph"`
+	Search           SearchConfig    `mapstructure:"search"`
 	Python           PythonConfig    `mapstructure:"python"`
 	CodeFilePatterns []string        `mapstructure:"code_file_patterns"`
 	ExcludePatterns  []string        `mapstructure:"exclude_patterns"`
@@ -98,6 +99,15 @@ type PDFConfig struct {
 	MaxPages int `mapstructure:"max_pages"`
 }
 
+// SearchConfig controls query-time retrieval behaviour.
+type SearchConfig struct {
+	// HybridSearch enables BM25 + vector fusion (Reciprocal Rank Fusion) so
+	// exact literal matches (e.g. specific identifiers) surface alongside
+	// semantic results. Defaults to true; set to false to revert to pure
+	// vector search.
+	HybridSearch bool `mapstructure:"hybrid_search"`
+}
+
 // PythonConfig controls Python-specific indexing behaviour. Today only the
 // relative-import resolver consumes it; future Python-specific knobs land here.
 type PythonConfig struct {
@@ -145,6 +155,9 @@ func Load() *Config {
 			HonorGitignore:  true,
 			DetectGenerated: true,
 		},
+		Search: SearchConfig{
+			HybridSearch: true,
+		},
 		CodeFilePatterns: []string{"*.go", "*.ts", "*.py", "*.rs", "*.java", "*.rb"},
 		ExcludePatterns:  []string{"node_modules/**", ".git/**", "vendor/**"},
 	}
@@ -161,6 +174,9 @@ func Load() *Config {
 	}
 	if !viper.IsSet("graph.detect_generated") {
 		cfg.Graph.DetectGenerated = true
+	}
+	if !viper.IsSet("search.hybrid_search") {
+		cfg.Search.HybridSearch = true
 	}
 
 	if dbPath := viper.GetString("db_path"); dbPath != "" {

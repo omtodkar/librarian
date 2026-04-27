@@ -14,16 +14,16 @@ INFINITY_DATA_DIR ?= $(XDG_DATA_HOME)/librarian/infinity
 INFINITY_VENV = $(INFINITY_DATA_DIR)/.venv
 
 build:
-	go build -o $(BINARY_NAME) .
+	go build -tags fts5 -o $(BINARY_NAME) .
 
 install:
-	go install .
+	go install -tags fts5 .
 
 clean:
 	rm -f $(BINARY_NAME)
 
 test:
-	go test ./...
+	go test -tags fts5 ./...
 
 # Local Infinity server for Qwen3-Embedding + Qwen3-Reranker.
 # First-time setup creates an isolated Python venv and installs infinity-emb.
