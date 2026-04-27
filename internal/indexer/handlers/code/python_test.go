@@ -2086,16 +2086,57 @@ func TestPEP695_DecoratedClassSimple(t *testing.T) {
 	}
 }
 
-func TestPEP695_NestedClassResolvesToOuterClassScope(t *testing.T) {
-	// A nested class's Generic[T] reference where T is the outer class's PEP 695
-	// TypeVar — not a nonexistent inner-class-level one.
+func TestPEP695_ParamSpecSkipped(t *testing.T) {
+	// class Foo[T, **P]: — **P is a ParamSpec, explicitly out of scope.
+	// parsePEP695Param returns ("", nil) for splat_type nodes, so only T is emitted.
+	src := []byte("class Foo[T, **P]:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tvs := typeVarUnits(doc)
+	if len(tvs) != 1 {
+		t.Fatalf("expected exactly 1 typevar unit (T only, **P skipped); got %d (%+v)", len(tvs), tvs)
+	}
+	if tvs[0].Path != "mymod.Foo.T" {
+		t.Errorf("Path = %q, want mymod.Foo.T", tvs[0].Path)
+	}
+}
+
+func TestPEP695_TypeVarTupleSkipped(t *testing.T) {
+	// class Foo[*Ts]: — *Ts is a TypeVarTuple, explicitly out of scope.
+	// parsePEP695Param returns ("", nil) for splat_type nodes, so 0 Units are emitted.
+	src := []byte("class Foo[*Ts]:\n    pass\n")
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tvs := typeVarUnits(doc)
+	if len(tvs) != 0 {
+		t.Errorf("expected no typevar units for TypeVarTuple-only class; got %+v", tvs)
+	}
+}
+
+func TestPEP695_LEGB_NestedClassUsesOuterClassScopeTypeParam(t *testing.T) {
+	// Verifies acceptance criterion 5: "class method referring to class's T →
+	// resolves to class-level TypeVar, not function-level".
+	//
+	// The criterion uses "class method" loosely. The exercised scenario is a
+	// nested class whose Generic[T] base refers to the outer class's TypeVar.
+	// A *method-body* Generic[T] ref would exercise the same lookupTypeVar
+	// code path, but method bodies are not descended by extractPEP695TypeVars
+	// so no inherits refs are produced from them — making a method-body test
+	// structurally impossible with the current design. The nested-class variant
+	// is the only reachable form of this scope-chain resolution.
 	//
 	// class Outer[T]:
 	//     class Inner(Generic[T]):
 	//         pass
 	//
-	// Inner's inherits ref should resolve T to sym:mymod.Outer.T (class scope),
-	// not sym:mymod.Outer.Inner.T (which does not exist).
+	// Inner's inherits ref should resolve T to sym:mymod.Outer.T (outer class
+	// scope), not sym:mymod.Outer.Inner.T (which does not exist).
 	src := []byte(`class Outer[T]:
     class Inner(Generic[T]):
         pass
@@ -2116,7 +2157,7 @@ func TestPEP695_NestedClassResolvesToOuterClassScope(t *testing.T) {
 	// Inner has no PEP 695 TypeVar of its own.
 	for _, u := range typeVarUnits(doc) {
 		if u.Path == "mymod.Outer.Inner.T" {
-			t.Errorf("unexpected function-level TypeVar unit at %q; T should come from Outer", u.Path)
+			t.Errorf("unexpected inner-class-level TypeVar unit at %q; T should come from Outer", u.Path)
 		}
 	}
 	// Inner's inherits ref for Generic[T] must resolve T to Outer's T.

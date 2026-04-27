@@ -1258,6 +1258,12 @@ func parsePEP695Param(typeNode *sitter.Node, source []byte) (string, map[string]
 //
 // sourcePath is the full symbol path of the ref's source (e.g. "mod.Foo.Inner").
 // moduleName is the module prefix to strip when building the local scope chain.
+//
+// Note: a method source path (e.g. "mod.Foo.method") is theoretically valid
+// here, but in practice PostProcess only encounters inherits refs from class
+// bodies (class_definition nodes). Method bodies are not descended by
+// extractPEP695TypeVars, so Generic[T] refs inside a method body are never
+// produced — method-level source paths do not appear in pep695Paths.
 func lookupTypeVar(name, sourcePath, moduleName string, moduleLevelPaths, pep695Paths map[string]string) string {
 	localPath := strings.TrimPrefix(sourcePath, moduleName+".")
 	if localPath != sourcePath {
