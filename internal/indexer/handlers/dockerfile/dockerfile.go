@@ -333,16 +333,22 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 			Metadata: meta,
 		})
 
-		// FROM dependency edge — skip if no base image or special "scratch" base.
-		if s.baseImage == "" || strings.EqualFold(s.baseImage, "scratch") {
+		// FROM dependency edge — skip if no base image, special "scratch" base,
+		// or ARG-substituted name (starts with "$"): unresolvable at parse time.
+		if s.baseImage == "" || strings.EqualFold(s.baseImage, "scratch") || strings.HasPrefix(s.baseImage, "$") {
 			continue
 		}
 
 		lowerBase := strings.ToLower(s.baseImage)
-		// Strip tag for stage name lookup; stage-to-stage refs rarely include tags.
+		// Strip digest and tag for stage name lookup. Digest must be stripped
+		// first because its sha256: colon would fool the tag-stripping index.
+		// e.g. "ubuntu@sha256:abc:tag" → strip "@..." → "ubuntu" (no tag here).
 		baseNameOnly := lowerBase
-		if colonIdx := strings.Index(lowerBase, ":"); colonIdx > 0 {
-			baseNameOnly = lowerBase[:colonIdx]
+		if i := strings.Index(baseNameOnly, "@"); i >= 0 {
+			baseNameOnly = baseNameOnly[:i]
+		}
+		if colonIdx := strings.Index(baseNameOnly, ":"); colonIdx > 0 {
+			baseNameOnly = baseNameOnly[:colonIdx]
 		}
 
 		if parentPath, ok := stageByRawName[lowerBase]; ok {

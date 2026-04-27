@@ -906,11 +906,15 @@ CMD ["nginx", "-g", "daemon off;"]
 	cmd, ok := meta["cmd"].([]string)
 	if !ok || len(cmd) != 1 {
 		t.Errorf("cmd metadata = %v, want 1 entry", meta["cmd"])
+	} else if cmd[0] != `["nginx", "-g", "daemon off;"]` {
+		t.Errorf("cmd[0] = %q, want [\"nginx\", \"-g\", \"daemon off;\"]", cmd[0])
 	}
 
 	ep, ok := meta["entrypoint"].([]string)
 	if !ok || len(ep) != 1 {
 		t.Errorf("entrypoint metadata = %v, want 1 entry", meta["entrypoint"])
+	} else if ep[0] != `["/docker-entrypoint.sh"]` {
+		t.Errorf("entrypoint[0] = %q, want [\"/docker-entrypoint.sh\"]", ep[0])
 	}
 
 	// base_image must always be present.
@@ -1066,5 +1070,59 @@ COPY --from=builder /app /app
 		if e.Source != "stage:web" {
 			t.Errorf("copy edge Source = %q, want stage:web", e.Source)
 		}
+	}
+}
+
+// TestGraphPass_ARGBasedBaseImage verifies that FROM $BASE_IMAGE (ARG substitution)
+// is skipped cleanly: no external import ref is emitted because the value is
+// unresolvable at parse time.
+func TestGraphPass_ARGBasedBaseImage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "ARG BASE_IMAGE=ubuntu:22.04\nFROM $BASE_IMAGE AS app\nRUN echo hello\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+	if stages[0].Path != "stage:app" {
+		t.Errorf("stage path = %q, want stage:app", stages[0].Path)
+	}
+	// ARG-substituted base is unresolvable at parse time — no edge should be emitted.
+	if len(doc.Refs) != 0 {
+		t.Errorf("expected no refs for ARG-based base, got %d: %+v", len(doc.Refs), doc.Refs)
+	}
+}
+
+// TestGraphPass_DigestPinnedBaseImage verifies that FROM ubuntu@sha256:abc123 emits
+// an external import edge and that the digest ref is correctly normalized.
+func TestGraphPass_DigestPinnedBaseImage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM ubuntu@sha256:abc123def456\nRUN echo hello\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 1 {
+		t.Fatalf("expected 1 external import ref for digest-pinned image, got %d: %+v", len(extRefs), extRefs)
+	}
+	// normalizeDockerImage should prepend docker.io/library/ for official images.
+	if extRefs[0].Target != "docker.io/library/ubuntu@sha256:abc123def456" {
+		t.Errorf("Target = %q, want docker.io/library/ubuntu@sha256:abc123def456", extRefs[0].Target)
+	}
+	if extRefs[0].Metadata["node_kind"] != "external" {
+		t.Errorf("node_kind = %q, want external", extRefs[0].Metadata["node_kind"])
 	}
 }
