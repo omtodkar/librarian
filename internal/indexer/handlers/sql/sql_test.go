@@ -346,6 +346,63 @@ func TestHandler_StatementTitle_UnicodeExactlyAtBoundary(t *testing.T) {
 	}
 }
 
+func TestSplitStatements_TrailingLineCommentAtEOF(t *testing.T) {
+	h := sqlhandler.New()
+
+	// Inline trailing comment (no newline between ';' and '--') must NOT produce
+	// a spurious extra Unit.
+	doc, err := h.Parse("test.sql", []byte("SELECT 1; -- trailing comment"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Units) != 1 {
+		t.Errorf("expected 1 Unit for inline trailing comment, got %d: %v", len(doc.Units), unitTitles(doc.Units))
+	}
+
+	// A comment on its own line after the last semicolon is a standalone section
+	// (leading comment for a notional next statement) and must produce 2 Units.
+	doc2, err := h.Parse("test2.sql", []byte("SELECT 1;\n-- trailing comment"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc2.Units) != 2 {
+		t.Errorf("expected 2 Units for standalone trailing comment, got %d: %v", len(doc2.Units), unitTitles(doc2.Units))
+	}
+	if len(doc2.Units) == 2 && !strings.Contains(doc2.Units[1].Content, "trailing comment") {
+		t.Errorf("unit[1] content missing comment text: %q", doc2.Units[1].Content)
+	}
+
+	// An inline trailing block comment must also be dropped (tests isTrailingBlockComment).
+	doc3, err := h.Parse("test3.sql", []byte("SELECT 1; /* inline block comment */"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc3.Units) != 1 {
+		t.Errorf("expected 1 Unit for inline trailing block comment, got %d: %v", len(doc3.Units), unitTitles(doc3.Units))
+	}
+
+	// A standalone block comment on its own line is also dropped (asymmetry: a
+	// standalone line comment on its own line is kept as 2 Units, but a block
+	// comment on its own line is dropped — both handled by isTrailingBlockComment).
+	doc4, err := h.Parse("test4.sql", []byte("SELECT 1;\n/* standalone block */"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc4.Units) != 1 {
+		t.Errorf("expected 1 Unit for standalone trailing block comment, got %d: %v", len(doc4.Units), unitTitles(doc4.Units))
+	}
+
+	// A comment-only file with no trailing newline: len(stmts)==0 so the guard
+	// must NOT fire — the comment is the file's sole content and must be kept.
+	docCommentOnly, err := h.Parse("only_comment.sql", []byte("-- just a comment"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(docCommentOnly.Units) != 1 {
+		t.Errorf("expected 1 Unit for comment-only no-newline input, got %d", len(docCommentOnly.Units))
+	}
+}
+
 func unitTitles(units []indexer.Unit) []string {
 	titles := make([]string, len(units))
 	for i, u := range units {

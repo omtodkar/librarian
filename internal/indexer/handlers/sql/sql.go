@@ -115,6 +115,9 @@ func splitIntoStatementUnits(src string) []indexer.Unit {
 // and dollar-quoted strings ($$ without a matching closing $$) are absorbed to
 // EOF without error. The remaining text is still returned as a statement so
 // partial content is indexed rather than silently dropped.
+// Exception: a trailing line comment at EOF that was never terminated by '\n'
+// (e.g. "SELECT 1; -- note") and a trailing standalone block comment are
+// intentionally discarded — they carry no statement content.
 func splitStatements(src string) []string {
 	type parseState int
 	const (
@@ -237,7 +240,22 @@ func splitStatements(src string) []string {
 
 	// Anything remaining after the last semicolon (or with no semicolons at all).
 	if tail := strings.TrimSpace(pending.String()); tail != "" {
-		stmts = append(stmts, pending.String())
+		// Skip a trailing line comment that was never terminated by '\n': the parser
+		// stayed in stateLineComment at EOF and pending holds no newline, meaning the
+		// comment is on the same line as the preceding code (e.g. "SELECT 1; -- note").
+		// A comment on its own line has a '\n' in pending and is kept so it becomes a
+		// leading comment for a notional next statement.
+		// len(stmts) > 0 guards comment-only files (no semicolons): a bare comment
+		// with no trailing newline is still the file's sole content and must be kept.
+		isTrailingLineComment := state == stateLineComment && !strings.ContainsRune(pending.String(), '\n') && len(stmts) > 0
+		// Skip a standalone block comment that fills the entire tail when it follows a
+		// real statement (len(stmts) > 0). Note the asymmetry with line comments:
+		// "SELECT 1;\n-- c" keeps the line comment (on its own line → 2 Units) while
+		// "SELECT 1;\n/* c */" drops the block comment (entire tail is a block comment).
+		isTrailingBlockComment := strings.HasPrefix(tail, "/*") && strings.HasSuffix(tail, "*/") && stripLeadingComments(tail) == "" && len(stmts) > 0
+		if !isTrailingLineComment && !isTrailingBlockComment {
+			stmts = append(stmts, pending.String())
+		}
 	}
 
 	return stmts
