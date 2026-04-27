@@ -205,14 +205,17 @@ func sqlExtractTable(n *sitter.Node, source []byte, doc *indexer.ParsedDoc, migT
 		meta["migration_tool"] = migTool
 	}
 
-	unit := indexer.Unit{
+	// Append the table unit before column units so parent precedes children
+	// in doc.Units, which matches the order invariant used by AssertGrammarInvariants
+	// and makes the graph-pass projection order predictable.
+	doc.Units = append(doc.Units, indexer.Unit{
 		Kind:     "table",
 		Title:    tableName,
 		Path:     tablePath,
 		Content:  n.Utf8Text(source),
 		Loc:      nodeLocation(n),
 		Metadata: meta,
-	}
+	})
 
 	colDefs := sqlFindChild(n, "column_definitions")
 	if colDefs != nil {
@@ -225,7 +228,7 @@ func sqlExtractTable(n *sitter.Node, source []byte, doc *indexer.ParsedDoc, migT
 			}
 			switch child.Kind() {
 			case "column_definition":
-				col := sqlExtractColumn(child, source, tablePath, schema, tableName, migTool, doc)
+				col := sqlExtractColumn(child, source, tablePath, migTool, doc)
 				if col != nil {
 					colNames = append(colNames, col.Title)
 					lastColPath = col.Path
@@ -244,16 +247,17 @@ func sqlExtractTable(n *sitter.Node, source []byte, doc *indexer.ParsedDoc, migT
 			}
 		}
 		if len(colNames) > 0 {
+			// Update the table unit's metadata with the collected column names.
+			// The unit was already appended; mutate its Metadata map directly
+			// since map values are reference types.
 			meta["columns"] = colNames
 		}
 	}
-
-	doc.Units = append(doc.Units, unit)
 }
 
 // sqlExtractColumn extracts a column_definition node inside a CREATE TABLE.
 // Also emits inline FK References when the column includes a REFERENCES clause.
-func sqlExtractColumn(n *sitter.Node, source []byte, tablePath, tableSchema, tableName string, migTool string, doc *indexer.ParsedDoc) *indexer.Unit {
+func sqlExtractColumn(n *sitter.Node, source []byte, tablePath string, migTool string, doc *indexer.ParsedDoc) *indexer.Unit {
 	// First identifier is the column name.
 	var colName string
 	for i := uint(0); i < n.NamedChildCount(); i++ {

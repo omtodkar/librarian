@@ -234,6 +234,21 @@ func TestSQLGrammar_AlterTableFKNoConstraintName(t *testing.T) {
 	}
 }
 
+func TestSQLGrammar_FKOnDeleteSetDefault(t *testing.T) {
+	src := `ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET DEFAULT;`
+	doc := parseSQLDoc(t, "schema.sql", src)
+
+	ref := sqlRef(doc, store.EdgeKindReferences, "public.orders.user_id", "public.users.id")
+	if ref == nil {
+		t.Errorf("missing FK ref; got refs: %v", refSummary(doc))
+	}
+	if ref != nil {
+		if od, _ := ref.Metadata["on_delete"].(string); od != "SET DEFAULT" {
+			t.Errorf("on_delete = %q, want %q", od, "SET DEFAULT")
+		}
+	}
+}
+
 // ---------- CREATE INDEX ----------
 
 func TestSQLGrammar_CreateIndex(t *testing.T) {

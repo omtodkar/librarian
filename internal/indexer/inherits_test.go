@@ -244,6 +244,10 @@ func TestIsSymbolKind(t *testing.T) {
 		"type", "field",
 		// Kotlin-contributed (lib-wji.2).
 		"object", "property",
+		// SQL structural extraction (lib-do0): "table" was previously listed
+		// under non-code kinds (it appeared in Unit.Kind doc as "tabular data
+		// summary"), but it is now a first-class symbol kind for SQL CREATE TABLE.
+		"table", "column", "index", "view", "sequence", "schema",
 	} {
 		if !isSymbolKind(k) {
 			t.Errorf("isSymbolKind(%q) = false, want true", k)
@@ -251,7 +255,7 @@ func TestIsSymbolKind(t *testing.T) {
 	}
 	// Non-code Unit kinds must stay out of the graph.
 	for _, k := range []string{
-		"section", "paragraph", "key-path", "page", "row", "table", "",
+		"section", "paragraph", "key-path", "page", "row", "",
 	} {
 		if isSymbolKind(k) {
 			t.Errorf("isSymbolKind(%q) = true, want false (non-code kind)", k)

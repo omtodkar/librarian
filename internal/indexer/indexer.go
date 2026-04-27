@@ -1299,6 +1299,8 @@ func graphTargetID(ref Reference) string {
 			return store.ExternalPackageNodeID(strings.TrimPrefix(ref.Target, "ext:"))
 		}
 		return store.SymbolNodeID(ref.Target)
+	case store.EdgeKindContains:
+		return store.SymbolNodeID(ref.Target)
 	case "part":
 		return store.CodeFileNodeID(ref.Target)
 	case "config-key":
@@ -1322,6 +1324,8 @@ func graphNodeKindFromRef(ref Reference) string {
 		if ref.Kind == "inherits" && strings.HasPrefix(ref.Target, "ext:") {
 			return store.NodeKindExternal
 		}
+		return store.NodeKindSymbol
+	case store.EdgeKindContains:
 		return store.NodeKindSymbol
 	case "part":
 		return store.NodeKindCodeFile
