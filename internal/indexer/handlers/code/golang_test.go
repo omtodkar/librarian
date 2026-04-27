@@ -746,3 +746,147 @@ func (b *Box[T]) Peek() T {
 		t.Errorf("Peek Path = %q, want col.Box.Peek (single-arg generic receiver stripped)", got)
 	}
 }
+
+// --- lib-oyk: function-to-function call edges ---
+
+// TestGoGrammar_CallEdges_SameFileResolved verifies that a same-file call from
+// A() to B() emits a resolved call Reference with Source="pkg.A", Target="pkg.B",
+// and Metadata["confidence"]="resolved".
+func TestGoGrammar_CallEdges_SameFileResolved(t *testing.T) {
+	src := []byte(`package svc
+
+func A() {
+	B()
+}
+
+func B() {}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("svc/service.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "svc.A")
+	if len(refs) == 0 {
+		t.Fatalf("expected call refs from svc.A, got none")
+	}
+
+	var toB *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "svc.B" {
+			toB = &refs[i]
+			break
+		}
+	}
+	if toB == nil {
+		t.Fatalf("expected call edge svc.A → svc.B; refs from A: %+v", refs)
+	}
+	if toB.Metadata == nil || toB.Metadata["confidence"] != "resolved" {
+		t.Errorf("call edge svc.A → svc.B: confidence = %v, want resolved", toB.Metadata)
+	}
+}
+
+// TestGoGrammar_CallEdges_CrossFileUnresolved verifies that a call to an
+// identifier not defined in the same file gets confidence="unresolved" and
+// the target is the bare callee name (not sym-prefixed).
+func TestGoGrammar_CallEdges_CrossFileUnresolved(t *testing.T) {
+	src := []byte(`package svc
+
+func Handler() {
+	ExternalHelper()
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("svc/handler.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "svc.Handler")
+	if len(refs) == 0 {
+		t.Fatalf("expected call refs from svc.Handler, got none")
+	}
+
+	var toExt *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "ExternalHelper" {
+			toExt = &refs[i]
+			break
+		}
+	}
+	if toExt == nil {
+		t.Fatalf("expected unresolved call to ExternalHelper; refs: %+v", refs)
+	}
+	if toExt.Metadata == nil || toExt.Metadata["confidence"] != "unresolved" {
+		t.Errorf("expected confidence=unresolved; got %v", toExt.Metadata)
+	}
+}
+
+// TestGoGrammar_CallEdges_MethodCallerPath verifies that a call inside a method
+// anchors the edge at the receiver-qualified path (e.g. svc.Service.Handle),
+// not the bare function name.
+func TestGoGrammar_CallEdges_MethodCallerPath(t *testing.T) {
+	src := []byte(`package svc
+
+type Service struct{}
+
+func (s *Service) Handle() {
+	s.validate()
+}
+
+func (s *Service) validate() {}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("svc/service.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "svc.Service.Handle")
+	if len(refs) == 0 {
+		t.Fatalf("expected call refs from svc.Service.Handle, got none")
+	}
+
+	var toValidate *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "svc.Service.validate" {
+			toValidate = &refs[i]
+			break
+		}
+	}
+	if toValidate == nil {
+		t.Fatalf("expected resolved edge to svc.Service.validate; refs from Handle: %+v", refs)
+	}
+	if toValidate.Metadata == nil || toValidate.Metadata["confidence"] != "resolved" {
+		t.Errorf("expected confidence=resolved; got %v", toValidate.Metadata)
+	}
+}
+
+// TestGoGrammar_CallEdges_PackageLevelNoEdge verifies that calls at package
+// level (e.g. var init, package-level function calls outside any function body)
+// do NOT produce call edges because there is no enclosing sym: node.
+func TestGoGrammar_CallEdges_PackageLevelNoEdge(t *testing.T) {
+	src := []byte(`package svc
+
+func helper() string { return "x" }
+
+var x = helper()
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("svc/vars.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// helper() is called at package level — no call ref should be emitted at all.
+	var callRefs []indexer.Reference
+	for _, r := range doc.Refs {
+		if r.Kind == "call" {
+			callRefs = append(callRefs, r)
+		}
+	}
+	if len(callRefs) != 0 {
+		t.Errorf("package-level call produced %d call ref(s); want 0: %+v", len(callRefs), callRefs)
+	}
+}

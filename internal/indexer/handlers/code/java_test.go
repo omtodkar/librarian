@@ -584,3 +584,74 @@ func TestJavaGrammar_EmptyFile(t *testing.T) {
 	}
 }
 
+// --- lib-oyk: function-to-function call edges ---
+
+// TestJavaGrammar_CallEdges_SameClassResolved verifies that a method calling
+// another method in the same class emits a resolved call Reference anchored at
+// the fully-qualified caller path.
+func TestJavaGrammar_CallEdges_SameClassResolved(t *testing.T) {
+	src := []byte(`package com.example;
+
+public class AuthService {
+    public void handle() {
+        validate();
+    }
+
+    private void validate() {}
+}
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("AuthService.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "com.example.AuthService.handle")
+	var toValidate *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "com.example.AuthService.validate" {
+			toValidate = &refs[i]
+			break
+		}
+	}
+	if toValidate == nil {
+		t.Fatalf("expected resolved call to com.example.AuthService.validate; refs from handle: %+v", refs)
+	}
+	if toValidate.Metadata == nil || toValidate.Metadata["confidence"] != "resolved" {
+		t.Errorf("expected confidence=resolved; got %v", toValidate.Metadata)
+	}
+}
+
+// TestJavaGrammar_CallEdges_ExternalUnresolved verifies that a call to a method
+// not defined in the same file gets confidence="unresolved".
+func TestJavaGrammar_CallEdges_ExternalUnresolved(t *testing.T) {
+	src := []byte(`package com.example;
+
+public class Controller {
+    public void run() {
+        externalService.doWork();
+    }
+}
+`)
+	h := code.New(code.NewJavaGrammar())
+	doc, err := h.Parse("Controller.java", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "com.example.Controller.run")
+	var toExt *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "doWork" {
+			toExt = &refs[i]
+			break
+		}
+	}
+	if toExt == nil {
+		t.Fatalf("expected unresolved call ref for doWork; refs: %+v", refs)
+	}
+	if toExt.Metadata == nil || toExt.Metadata["confidence"] != "unresolved" {
+		t.Errorf("expected confidence=unresolved; got %v", toExt.Metadata)
+	}
+}
+

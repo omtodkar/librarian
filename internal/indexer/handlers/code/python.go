@@ -552,3 +552,90 @@ func buildFromPath(module, dots string, isRelative bool, name string) string {
 		return name
 	}
 }
+
+// CallExpressions implements callExtractor for Python. Walks the file AST for
+// `call` nodes, extracts the bare callee identifier, and attributes each call
+// to the innermost enclosing function_definition.
+//
+// Because Python's PackageName returns "" (no explicit package declaration),
+// the returned CallerPath is a LOCAL path without the module prefix — e.g.
+// "MyClass.process" rather than "module.MyClass.process". extractCallRefs
+// resolves it via suffix matching against doc.Units.
+//
+// Callee extraction:
+//   - identifier: foo() → "foo"
+//   - attribute: obj.method() → "method"
+//
+// Closures and nested functions are attributed to the INNERMOST enclosing
+// function_definition. Calls at module scope (no enclosing function) are
+// skipped — they have no sym: node to anchor an edge.
+func (*PythonGrammar) CallExpressions(root *sitter.Node, source []byte) []CallRef {
+	var out []CallRef
+	walk(root, func(n *sitter.Node) bool {
+		if n.Kind() != "call" {
+			return true
+		}
+		funcNode := n.ChildByFieldName("function")
+		if funcNode == nil {
+			return true
+		}
+		callee := pyCalleeIdent(funcNode, source)
+		if callee == "" {
+			return true
+		}
+		callerPath := pyCallerLocalPath(n, source)
+		if callerPath == "" {
+			return true
+		}
+		out = append(out, CallRef{
+			CallerPath: callerPath,
+			CalleeName: callee,
+			Loc:        nodeLocation(n),
+		})
+		return true
+	})
+	return out
+}
+
+// pyCalleeIdent extracts the bare callee identifier from a Python call's
+// `function` field child. Returns "" for complex expressions.
+func pyCalleeIdent(funcNode *sitter.Node, source []byte) string {
+	switch funcNode.Kind() {
+	case "identifier":
+		return funcNode.Utf8Text(source)
+	case "attribute":
+		if attr := funcNode.ChildByFieldName("attribute"); attr != nil {
+			return attr.Utf8Text(source)
+		}
+	}
+	return ""
+}
+
+// pyCallerLocalPath builds the local caller path (without the module prefix)
+// by walking from n upward to collect enclosing class and function names.
+//
+//   - top-level function: returns "myFunc"
+//   - method inside class: returns "MyClass.myMethod"
+//   - nested function: returns "outer.inner" (inner has no sym: node, so
+//     extractCallRefs will drop the edge — correct v1 behaviour)
+//
+// Returns "" when no enclosing function_definition is found (module-scope call).
+func pyCallerLocalPath(n *sitter.Node, source []byte) string {
+	var parts []string
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "function_definition":
+			if nameNode := p.ChildByFieldName("name"); nameNode != nil {
+				parts = append([]string{nameNode.Utf8Text(source)}, parts...)
+			}
+		case "class_definition":
+			if nameNode := p.ChildByFieldName("name"); nameNode != nil {
+				parts = append([]string{nameNode.Utf8Text(source)}, parts...)
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ".")
+}

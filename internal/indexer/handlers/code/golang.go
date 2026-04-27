@@ -267,6 +267,83 @@ func goInterfaceEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 	return out
 }
 
+// CallExpressions implements callExtractor for Go. Walks the file AST for
+// call_expression nodes, extracts the callee identifier, and attributes each
+// call to its innermost enclosing function or method.
+//
+// Callee extraction:
+//   - identifier (bare call): foo() → "foo"
+//   - selector_expression (method/selector call): x.Method() → "Method"
+//
+// Other call forms (type conversions, generics, etc.) return "" and are
+// skipped. Closures (func_literal) are transparent — calls inside a closure
+// are attributed to the nearest named enclosing function/method, because
+// closures have no sym: node of their own.
+func (g *GoGrammar) CallExpressions(root *sitter.Node, source []byte) []CallRef {
+	pkg := g.PackageName(root, source)
+	var out []CallRef
+	walk(root, func(n *sitter.Node) bool {
+		if n.Kind() != "call_expression" {
+			return true
+		}
+		funcNode := n.ChildByFieldName("function")
+		if funcNode == nil {
+			return true
+		}
+		callee := goCalleeIdent(funcNode, source)
+		if callee == "" {
+			return true
+		}
+		callerPath := goCallerPath(n, source, pkg)
+		if callerPath == "" {
+			return true
+		}
+		out = append(out, CallRef{
+			CallerPath: callerPath,
+			CalleeName: callee,
+			Loc:        nodeLocation(n),
+		})
+		return true
+	})
+	return out
+}
+
+// goCalleeIdent extracts the bare callee identifier from a call_expression's
+// `function` field child. Returns "" for complex expressions (type
+// conversions, index expressions, etc.) that aren't a simple call.
+func goCalleeIdent(funcNode *sitter.Node, source []byte) string {
+	switch funcNode.Kind() {
+	case "identifier":
+		return funcNode.Utf8Text(source)
+	case "selector_expression":
+		if sel := funcNode.ChildByFieldName("field"); sel != nil {
+			return sel.Utf8Text(source)
+		}
+	}
+	return ""
+}
+
+// goCallerPath returns the Unit.Path of the innermost enclosing function or
+// method declaration for node n. Returns "" when n is not inside any named
+// function (e.g., package-level variable initialisation).
+func goCallerPath(n *sitter.Node, source []byte, pkg string) string {
+	enc := findAncestor(n, "function_declaration", "method_declaration")
+	if enc == nil {
+		return ""
+	}
+	nameNode := enc.ChildByFieldName("name")
+	if nameNode == nil {
+		return ""
+	}
+	name := nameNode.Utf8Text(source)
+	if enc.Kind() == "method_declaration" {
+		if recv := goReceiverTypeName(enc, source); recv != "" {
+			return joinPath(pkg, recv+"."+name)
+		}
+	}
+	return joinPath(pkg, name)
+}
+
 // Imports returns ImportRefs for every import declaration in the file. Both
 // `import "foo"` and `import ( "foo"; "bar" )` forms are handled via a full
 // walk; blank imports (`import _ "foo"`) carry Alias="_"; aliased imports

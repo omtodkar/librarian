@@ -364,6 +364,83 @@ func (*JavaGrammar) ResolveParents(refs []indexer.Reference, path string, ctx in
 	return resolveInheritsRefs(refs, localTypeBindings(refs, true /* skipStatic */))
 }
 
+// CallExpressions implements callExtractor for Java. Walks the file AST for
+// method_invocation nodes, extracts the callee method name, and attributes
+// each call to the innermost enclosing method or constructor.
+//
+// Because PackageName returns the dotted package name (e.g. "com.example"),
+// the returned CallerPath is the fully-qualified path built by walking up
+// through enclosing class declarations — e.g. "com.example.MyClass.myMethod".
+//
+// Callee extraction: the `name` field child of method_invocation gives the
+// bare method name ("login" from "authService.login(req)").
+func (g *JavaGrammar) CallExpressions(root *sitter.Node, source []byte) []CallRef {
+	pkg := g.PackageName(root, source)
+	var out []CallRef
+	walk(root, func(n *sitter.Node) bool {
+		if n.Kind() != "method_invocation" {
+			return true
+		}
+		nameNode := n.ChildByFieldName("name")
+		if nameNode == nil {
+			return true
+		}
+		callee := nameNode.Utf8Text(source)
+		if callee == "" {
+			return true
+		}
+		callerPath := javaCallerPath(n, source, pkg)
+		if callerPath == "" {
+			return true
+		}
+		out = append(out, CallRef{
+			CallerPath: callerPath,
+			CalleeName: callee,
+			Loc:        nodeLocation(n),
+		})
+		return true
+	})
+	return out
+}
+
+// javaCallerPath returns the Unit.Path of the innermost enclosing method or
+// constructor in a Java file. Collects enclosing class names (outermost to
+// innermost) and prepends the package qualifier.
+func javaCallerPath(n *sitter.Node, source []byte, pkg string) string {
+	enc := findAncestor(n, "method_declaration", "constructor_declaration")
+	if enc == nil {
+		return ""
+	}
+	nameNode := enc.ChildByFieldName("name")
+	if nameNode == nil {
+		return ""
+	}
+	methodName := nameNode.Utf8Text(source)
+
+	// Collect enclosing class/interface/enum/record names bottom-up then reverse.
+	var classes []string
+	for p := enc.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "class_declaration", "interface_declaration",
+			"enum_declaration", "record_declaration":
+			if cn := p.ChildByFieldName("name"); cn != nil {
+				classes = append(classes, cn.Utf8Text(source))
+			}
+		}
+	}
+	for i, j := 0, len(classes)-1; i < j; i, j = i+1, j-1 {
+		classes[i], classes[j] = classes[j], classes[i]
+	}
+
+	parts := make([]string, 0, len(classes)+2)
+	if pkg != "" {
+		parts = append(parts, pkg)
+	}
+	parts = append(parts, classes...)
+	parts = append(parts, methodName)
+	return strings.Join(parts, ".")
+}
+
 // javaAnnotationName pulls the identifier (or dotted scoped_identifier) out
 // of an annotation node, ignoring the `@` token and any argument list.
 // `@Deprecated` → "Deprecated"; `@lombok.Data` → "lombok.Data";

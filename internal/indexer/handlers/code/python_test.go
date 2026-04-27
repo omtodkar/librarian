@@ -769,3 +769,100 @@ class Foo(UnknownBase):
 	}
 }
 
+// --- lib-oyk: function-to-function call edges ---
+
+// TestPythonGrammar_CallEdges_SameFileResolved verifies that a same-file call
+// from process() to helper() emits a resolved call edge.
+func TestPythonGrammar_CallEdges_SameFileResolved(t *testing.T) {
+	src := []byte(`
+def process():
+    helper()
+
+def helper():
+    pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("svc.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// doc.Title = "svc" (file stem), so Unit paths are "svc.process" and "svc.helper".
+	refs := callRefsBySource(doc, "svc.process")
+	var toHelper *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "svc.helper" {
+			toHelper = &refs[i]
+			break
+		}
+	}
+	if toHelper == nil {
+		t.Fatalf("expected resolved call svc.process → svc.helper; refs: %+v", refs)
+	}
+	if toHelper.Metadata == nil || toHelper.Metadata["confidence"] != "resolved" {
+		t.Errorf("expected confidence=resolved; got %v", toHelper.Metadata)
+	}
+}
+
+// TestPythonGrammar_CallEdges_MethodCallResolved verifies that a method calling
+// another method in the same class resolves correctly using the local path.
+func TestPythonGrammar_CallEdges_MethodCallResolved(t *testing.T) {
+	src := []byte(`
+class Service:
+    def handle(self):
+        self.validate()
+
+    def validate(self):
+        pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("service.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "service.Service.handle")
+	var toValidate *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "service.Service.validate" {
+			toValidate = &refs[i]
+			break
+		}
+	}
+	if toValidate == nil {
+		t.Fatalf("expected resolved call service.Service.handle → service.Service.validate; refs: %+v", refs)
+	}
+	if toValidate.Metadata == nil || toValidate.Metadata["confidence"] != "resolved" {
+		t.Errorf("expected confidence=resolved; got %v", toValidate.Metadata)
+	}
+}
+
+// TestPythonGrammar_CallEdges_ExternalUnresolved verifies that a call to a
+// name not in the same file gets confidence="unresolved".
+func TestPythonGrammar_CallEdges_ExternalUnresolved(t *testing.T) {
+	src := []byte(`
+def run():
+    external_func()
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("runner.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "runner.run")
+	var toExt *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "external_func" {
+			toExt = &refs[i]
+			break
+		}
+	}
+	if toExt == nil {
+		t.Fatalf("expected unresolved call ref for external_func; refs: %+v", refs)
+	}
+	if toExt.Metadata == nil || toExt.Metadata["confidence"] != "unresolved" {
+		t.Errorf("expected confidence=unresolved; got %v", toExt.Metadata)
+	}
+}
+

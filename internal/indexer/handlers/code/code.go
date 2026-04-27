@@ -20,6 +20,7 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
 	"librarian/internal/indexer"
+	"librarian/internal/store"
 )
 
 // ImportRef captures a single import declaration. Path is the module / file
@@ -309,6 +310,34 @@ type parsedDocPostProcessor interface {
 	PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, source []byte)
 }
 
+// CallRef captures one call expression identified during AST walking.
+// CallerPath is the Unit.Path of the enclosing function/method as computed
+// by the grammar. CalleeName is the bare callee identifier extracted from the
+// call expression node.
+//
+// Grammars that cannot determine the full package-qualified path (e.g. Python,
+// whose PackageName returns "") return a local path — "ClassName.method" rather
+// than "module.ClassName.method". extractCallRefs resolves it via suffix
+// matching against the file's parsed Units.
+type CallRef struct {
+	CallerPath string
+	CalleeName string
+	Loc        indexer.Location
+}
+
+// callExtractor is an optional interface a Grammar implements to surface
+// function-to-function call relationships during the graph pass.
+// CallExpressions is called once per file after all Units have been built.
+// Each returned CallRef becomes a ParsedDoc.Reference with Kind="call",
+// Source resolved against doc.Units, Target resolved or bare, and
+// Metadata["confidence"] of "resolved" (same-file callee) or "unresolved".
+//
+// Grammars that don't implement this are unaffected; ParseCtx type-asserts
+// and only calls it when present.
+type callExtractor interface {
+	CallExpressions(root *sitter.Node, source []byte) []CallRef
+}
+
 // CodeHandler implements indexer.FileHandler for a single Grammar.
 type CodeHandler struct {
 	grammar Grammar
@@ -400,11 +429,71 @@ func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseCon
 		doc.Refs = r.ResolveParents(doc.Refs, path, ctx)
 	}
 	doc.Signals = extractAllCommentSignals(root, content, commentSet)
+	if ce, ok := h.grammar.(callExtractor); ok {
+		h.extractCallRefs(ce, root, content, doc)
+	}
 	if pp, ok := h.grammar.(parsedDocPostProcessor); ok {
 		pp.PostProcess(doc, root, content)
 	}
 
 	return doc, nil
+}
+
+// extractCallRefs invokes the grammar's callExtractor and appends one
+// Reference{Kind="call"} per returned CallRef to doc.Refs.
+//
+// Caller resolution: both the full Unit.Path and the path-without-first-segment
+// are indexed so Python/Java grammars that omit the module/package prefix still
+// match (e.g. "Service.validate" resolves to "module.Service.validate").
+// CallRefs whose CallerPath matches no Unit are silently dropped — a call
+// outside any known symbol boundary has no graph node to anchor the edge.
+//
+// Callee resolution: the callee name is looked up by Unit.Title. A match sets
+// confidence="resolved" and uses the full Unit.Path as the target; no match
+// keeps the bare CalleeName and sets confidence="unresolved" so downstream
+// queries can tell precise edges from speculative ones.
+func (h *CodeHandler) extractCallRefs(ce callExtractor, root *sitter.Node, source []byte, doc *indexer.ParsedDoc) {
+	// callerMap: full-path and path-without-first-segment → canonical Unit.Path.
+	callerMap := make(map[string]string, len(doc.Units)*2)
+	// calleeMap: bare Title → Unit.Path for same-file callee resolution.
+	calleeMap := make(map[string]string, len(doc.Units))
+	for _, u := range doc.Units {
+		callerMap[u.Path] = u.Path
+		if dot := strings.Index(u.Path, "."); dot >= 0 {
+			local := u.Path[dot+1:]
+			if _, exists := callerMap[local]; !exists {
+				callerMap[local] = u.Path
+			}
+		}
+		if _, exists := calleeMap[u.Title]; !exists {
+			calleeMap[u.Title] = u.Path
+		}
+	}
+
+	for _, cr := range ce.CallExpressions(root, source) {
+		if cr.CallerPath == "" || cr.CalleeName == "" {
+			continue
+		}
+		callerPath, ok := callerMap[cr.CallerPath]
+		if !ok {
+			continue
+		}
+		target := cr.CalleeName
+		confidence := "unresolved"
+		if path, ok := calleeMap[cr.CalleeName]; ok {
+			target = path
+			confidence = "resolved"
+		}
+		doc.Refs = append(doc.Refs, indexer.Reference{
+			Kind:   store.EdgeKindCall,
+			Source: callerPath,
+			Target: target,
+			Loc:    cr.Loc,
+			Metadata: map[string]any{
+				"confidence": confidence,
+			},
+		})
+	}
 }
 
 // Chunk implements indexer.FileHandler. Each symbol Unit becomes one

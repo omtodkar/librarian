@@ -67,3 +67,16 @@ func inheritsRefsBySource(doc *indexer.ParsedDoc, source string) []indexer.Refer
 	}
 	return out
 }
+
+// callRefsBySource filters a doc's References to Kind="call" entries whose
+// Source matches the given symbol Path. Shared across per-language call-edge
+// tests so each file doesn't re-declare the same lookup loop.
+func callRefsBySource(doc *indexer.ParsedDoc, source string) []indexer.Reference {
+	var out []indexer.Reference
+	for _, r := range doc.Refs {
+		if r.Kind == "call" && r.Source == source {
+			out = append(out, r)
+		}
+	}
+	return out
+}
