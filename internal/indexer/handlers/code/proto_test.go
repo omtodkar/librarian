@@ -613,11 +613,10 @@ message Msg {
 	}
 }
 
-// Field type metadata: a field with no explicit type (an error in real proto,
-// but the grammar may still parse it) must not crash; missing keys are simply
-// absent rather than populated with empty strings.
-func TestProtoGrammar_FieldTypeMetadata_NoTypeCrash(t *testing.T) {
-	// This is a valid proto3 message — ensure parsing never panics.
+// Field type metadata: a basic single-field message produces the expected type
+// key. Guards against regressions where the type extraction loop is skipped or
+// the guard condition trims a valid type to empty.
+func TestProtoGrammar_FieldTypeMetadata_BasicTypedField(t *testing.T) {
 	src := []byte(`syntax = "proto3";
 package ft;
 message Msg {
@@ -633,9 +632,11 @@ message Msg {
 	if u == nil {
 		t.Fatalf("field ok missing")
 	}
-	// Keys must be present for the valid field.
-	if _, ok := u.Metadata["type"]; !ok {
-		t.Errorf("ok.type absent; expected present for typed field")
+	if got, _ := u.Metadata["type"].(string); got != "string" {
+		t.Errorf("ok.type = %q, want string", got)
+	}
+	if _, hasRepeated := u.Metadata["repeated"]; hasRepeated {
+		t.Errorf("ok.repeated should be absent for non-repeated field")
 	}
 }
 
