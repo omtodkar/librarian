@@ -469,17 +469,38 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 			Metadata: map[string]any{"qualified_name": strings.TrimSpace(c.Utf8Text(source))},
 		}
 	case "subscript":
-		// `Generic[T, U]` — base name is the subscripted value; slice entries
-		// are the type arguments.
+		// `Generic[T, U]` / `typing.Generic[T]` — base name is the subscripted
+		// value; slice entries are the type arguments. When the value is itself
+		// an attribute chain (e.g. typing.Generic), extract the leaf identifier
+		// as Name and stash the full dotted chain in qualified_name so
+		// downstream resolvers (lib-0pa.2, lib-6wz) have the FQN context.
+		// ResolveParents does NOT rewrite Target via qualified_name when
+		// type_args are present — import-binding resolution (rule 4) is the
+		// preferred path for parameterised bases like Generic/Protocol.
 		value := c.ChildByFieldName("value")
 		if value == nil {
 			return nil
 		}
-		name := strings.TrimSpace(value.Utf8Text(source))
-		if name == "" {
-			return nil
-		}
+		var name string
 		meta := map[string]any{}
+		switch value.Kind() {
+		case "attribute":
+			// e.g. typing.Generic[T] — leaf is "Generic", qualified_name is "typing.Generic"
+			attrField := value.ChildByFieldName("attribute")
+			if attrField == nil {
+				return nil
+			}
+			name = strings.TrimSpace(attrField.Utf8Text(source))
+			if name == "" {
+				return nil
+			}
+			meta["qualified_name"] = strings.TrimSpace(value.Utf8Text(source))
+		default:
+			name = strings.TrimSpace(value.Utf8Text(source))
+			if name == "" {
+				return nil
+			}
+		}
 		var args []string
 		for i := uint(0); i < c.NamedChildCount(); i++ {
 			cc := c.NamedChild(i)
@@ -553,12 +574,18 @@ func extractPythonBase(c *sitter.Node, source []byte) *ParentRef {
 func (*PythonGrammar) ResolveParents(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference {
 	// Rule 1: attribute-chain bases carry qualified_name — use it as the FQN
 	// so resolveInheritsRefs sees a dotted target and leaves it alone cleanly.
+	// Exception: subscript-of-attribute bases (e.g. typing.Generic[T]) also
+	// carry qualified_name but additionally have type_args; for those, keep
+	// the bare leaf as Target so import-binding resolution (rule 4) can fire
+	// when the class is imported (e.g. `from typing import Generic`).
 	for i, r := range refs {
 		if r.Kind != "inherits" {
 			continue
 		}
 		if qn, ok := r.Metadata["qualified_name"].(string); ok && qn != "" {
-			refs[i].Target = qn
+			if _, hasArgs := r.Metadata["type_args"]; !hasArgs {
+				refs[i].Target = qn
+			}
 		}
 	}
 	return resolveInheritsRefs(refs, localTypeBindings(refs, false /* skipStatic */))

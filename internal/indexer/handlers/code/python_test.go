@@ -914,13 +914,12 @@ func TestPythonGrammar_CallBase_UnknownFactory(t *testing.T) {
 	}
 }
 
-// TestPythonGrammar_SubscriptBase_AttributeValue documents the current
-// behaviour when the subscript's value is itself an attribute chain
-// (e.g. typing.Generic[T]). The full dotted form is used as the Target
-// because extractPythonBase does not split attribute-valued subscript targets;
-// resolveInheritsRefs sees a dotted name and leaves it alone (no unresolved).
-// Splitting attribute-valued subscript targets is deferred (out of scope for
-// lib-0pa.1).
+// TestPythonGrammar_SubscriptBase_AttributeValue covers the case where the
+// subscript's value is itself an attribute chain (e.g. typing.Generic[T]).
+// extractPythonBase splits the attribute into leaf + qualified_name, same as
+// for a plain attribute base. ResolveParents does NOT rewrite Target via
+// qualified_name when type_args are present — import-binding resolution is
+// the preferred path for parameterised bases.
 func TestPythonGrammar_SubscriptBase_AttributeValue(t *testing.T) {
 	src := []byte(`class Foo(typing.Generic[T]):
     pass
@@ -934,16 +933,16 @@ func TestPythonGrammar_SubscriptBase_AttributeValue(t *testing.T) {
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
 	}
-	// Full dotted form is emitted as Target (resolveInheritsRefs skips dotted names).
-	if refs[0].Target != "typing.Generic" {
-		t.Errorf("Target = %q, want typing.Generic", refs[0].Target)
+	// Leaf identifier is the Target; qualified_name carries the full chain.
+	if refs[0].Target != "Generic" {
+		t.Errorf("Target = %q, want Generic", refs[0].Target)
+	}
+	if qn, _ := refs[0].Metadata["qualified_name"].(string); qn != "typing.Generic" {
+		t.Errorf("qualified_name = %q, want typing.Generic", qn)
 	}
 	args, _ := refs[0].Metadata["type_args"].([]string)
 	if len(args) != 1 || args[0] != "T" {
 		t.Errorf("type_args = %v, want [T]", args)
-	}
-	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
-		t.Errorf("dotted subscript target should not be marked unresolved: %+v", refs[0].Metadata)
 	}
 }
 
