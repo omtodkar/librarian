@@ -96,8 +96,9 @@ type traceRPCRelated struct {
 }
 
 // traceRPCCaller is a transitive call site reaching an implementation symbol.
-// Depth is the BFS distance (1 = direct caller). LineNumber is best-effort
-// via file scan for the caller's symbol name.
+// Depth is the BFS distance (1 = direct caller). LineNumber prefers the
+// persisted node.LineNumber (available after lib-r4s.5 re-index); falls back
+// to best-effort via file scan for legacy nodes (LineNumber == 0).
 type traceRPCCaller struct {
 	Language   string `json:"language,omitempty"`
 	SymbolPath string `json:"symbol_path"`
@@ -316,7 +317,9 @@ func runTraceRPC(st storeReader, projectRoot, rpcInput string) (*traceRPCResult,
 			}
 			seenPaths[symPath] = true
 			line := 0
-			if callerNode.SourcePath != "" {
+			if callerNode.LineNumber > 0 {
+				line = callerNode.LineNumber
+			} else if callerNode.SourcePath != "" {
 				symName := symPath
 				if idx := strings.LastIndex(symPath, "."); idx >= 0 {
 					symName = symPath[idx+1:]
@@ -396,7 +399,9 @@ func walkTraceRPCCallers(st storeReader, seeds []string, maxDepth int, projectRo
 				next = append(next, e.From)
 				symPath := strings.TrimPrefix(callerNode.ID, "sym:")
 				line := 0
-				if callerNode.SourcePath != "" {
+				if callerNode.LineNumber > 0 {
+					line = callerNode.LineNumber
+				} else if callerNode.SourcePath != "" {
 					symName := symPath
 					if idx := strings.LastIndex(symPath, "."); idx >= 0 {
 						symName = symPath[idx+1:]

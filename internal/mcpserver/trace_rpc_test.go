@@ -1929,3 +1929,224 @@ service TypedSvc {
 	}
 }
 
+// TestTraceRPC_CallerLineNumber_FastPath_CallRPC pins that when a call_rpc
+// caller node has LineNumber > 0 (fresh index after lib-r4s.5), the
+// persisted value is used directly — scanTraceRPCMethodLine is NOT called.
+// We verify by UpsertNode-ing the caller with a sentinel LineNumber (9999)
+// that the file scan could never produce for `func Page()` on line ~8.
+// If the fast path is bypassed, the result would be a real file-scanned
+// value (≠ 9999), causing the assertion to fail.
+func TestTraceRPC_CallerLineNumber_FastPath_CallRPC(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+message LoginRequest { string user = 1; }
+message LoginReply { bool ok = 1; }
+`,
+		"gen/ts/auth_connect.ts": `import { MethodKind } from "@bufbuild/protobuf";
+export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: {
+    login: { name: "Login", kind: MethodKind.Unary },
+  },
+} as const;
+`,
+		"app/page.tsx": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../../gen/ts/auth_connect";
+
+const transport = {};
+
+export default function Page() {
+  const client = createPromiseClient(AuthService, transport);
+  return client.login({ user: "alice" });
+}
+`,
+	})
+
+	s := openTraceRPCStore(t, dir)
+
+	// Override the caller node's LineNumber with a sentinel (9999) that the
+	// file scan would never produce — the real `function Page` is at line ~8.
+	callerID := store.SymbolNodeID("page.Page")
+	callerNode, err := s.GetNode(callerID)
+	if err != nil || callerNode == nil {
+		t.Fatalf("caller node %s not indexed; err=%v node=%v", callerID, err, callerNode)
+	}
+	callerNode.LineNumber = 9999
+	if err := s.UpsertNode(*callerNode); err != nil {
+		t.Fatalf("UpsertNode sentinel: %v", err)
+	}
+
+	result, err := runTraceRPC(s, dir, "auth.v1.AuthService.Login")
+	if err != nil {
+		t.Fatalf("runTraceRPC: %v", err)
+	}
+	if len(result.Callers) != 1 {
+		t.Fatalf("Callers = %d, want 1; got %+v", len(result.Callers), result.Callers)
+	}
+	if result.Callers[0].LineNumber != 9999 {
+		t.Errorf("call_rpc fast path: Callers[0].LineNumber = %d, want 9999 (sentinel from node, not file-scanned value)", result.Callers[0].LineNumber)
+	}
+}
+
+// TestTraceRPC_CallerLineNumber_FastPath_BFS pins that when a BFS `call`
+// caller node has LineNumber > 0, walkTraceRPCCallers uses the persisted
+// value rather than calling scanTraceRPCMethodLine. Uses the same sentinel
+// strategy: set LineNumber=8888 on the caller node after indexing and verify
+// the result carries 8888 (not the file-scanned line of `func callIt()`).
+func TestTraceRPC_CallerLineNumber_FastPath_BFS(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": crossLanguageProto,
+		"gen/go/auth/service.go": `package auth
+type AuthServiceServer struct{}
+func (s *AuthServiceServer) Login() error { return nil }
+`,
+		"cmd/main.go": `package main
+func callIt() {}
+`,
+	})
+	s := openTraceRPCStore(t, dir)
+
+	// Inject the call edge that the BFS walker will traverse.
+	implID := store.SymbolNodeID("auth.AuthServiceServer.Login")
+	callerID := store.SymbolNodeID("main.callIt")
+	if err := s.UpsertEdge(store.Edge{From: callerID, To: implID, Kind: "call"}); err != nil {
+		t.Fatalf("UpsertEdge: %v", err)
+	}
+
+	// Override the caller node's LineNumber with a sentinel (8888) that the
+	// file scan would never produce — `func callIt()` is on line 2.
+	callerNode, err := s.GetNode(callerID)
+	if err != nil || callerNode == nil {
+		t.Fatalf("caller node %s not indexed; err=%v node=%v", callerID, err, callerNode)
+	}
+	callerNode.LineNumber = 8888
+	if err := s.UpsertNode(*callerNode); err != nil {
+		t.Fatalf("UpsertNode sentinel: %v", err)
+	}
+
+	result, err := runTraceRPC(s, dir, "auth.AuthService.Login")
+	if err != nil {
+		t.Fatalf("runTraceRPC: %v", err)
+	}
+	if len(result.Callers) != 1 {
+		t.Fatalf("Callers = %d, want 1; got %+v", len(result.Callers), result.Callers)
+	}
+	if result.Callers[0].LineNumber != 8888 {
+		t.Errorf("BFS fast path: Callers[0].LineNumber = %d, want 8888 (sentinel from node, not file-scanned value)", result.Callers[0].LineNumber)
+	}
+}
+
+// TestTraceRPC_CallerLineNumber_LegacyFallback_BFS pins that when a BFS
+// caller node has LineNumber == 0 (legacy pre-lib-r4s.5 node), the file scan
+// fires and produces a non-zero result. Complements the fast-path test above
+// by verifying the else branch.
+func TestTraceRPC_CallerLineNumber_LegacyFallback_BFS(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": crossLanguageProto,
+		"gen/go/auth/service.go": `package auth
+type AuthServiceServer struct{}
+func (s *AuthServiceServer) Login() error { return nil }
+`,
+		"cmd/main.go": `package main
+func callIt() {}
+`,
+	})
+	s := openTraceRPCStore(t, dir)
+
+	implID := store.SymbolNodeID("auth.AuthServiceServer.Login")
+	callerID := store.SymbolNodeID("main.callIt")
+	if err := s.UpsertEdge(store.Edge{From: callerID, To: implID, Kind: "call"}); err != nil {
+		t.Fatalf("UpsertEdge: %v", err)
+	}
+
+	// Force LineNumber = 0 to simulate a legacy node that hasn't been re-indexed.
+	callerNode, err := s.GetNode(callerID)
+	if err != nil || callerNode == nil {
+		t.Fatalf("caller node %s not indexed; err=%v node=%v", callerID, err, callerNode)
+	}
+	callerNode.LineNumber = 0
+	if err := s.UpsertNode(*callerNode); err != nil {
+		t.Fatalf("UpsertNode zero: %v", err)
+	}
+
+	result, err := runTraceRPC(s, dir, "auth.AuthService.Login")
+	if err != nil {
+		t.Fatalf("runTraceRPC: %v", err)
+	}
+	if len(result.Callers) != 1 {
+		t.Fatalf("Callers = %d, want 1; got %+v", len(result.Callers), result.Callers)
+	}
+	// File scan must have fired and found `func callIt()` at a non-zero line.
+	if result.Callers[0].LineNumber == 0 {
+		t.Errorf("legacy fallback: Callers[0].LineNumber = 0, expected non-zero (file scan must fire when LineNumber==0)")
+	}
+}
+
+// TestTraceRPC_CallerLineNumber_LegacyFallback_CallRPC mirrors the BFS
+// legacy-fallback test for the call_rpc site: when the caller node has
+// LineNumber == 0, the file scan branch fires and returns a non-zero line.
+// Symmetry pair for TestTraceRPC_CallerLineNumber_FastPath_CallRPC.
+func TestTraceRPC_CallerLineNumber_LegacyFallback_CallRPC(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": `syntax = "proto3";
+package auth.v1;
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+message LoginRequest { string user = 1; }
+message LoginReply { bool ok = 1; }
+`,
+		"gen/ts/auth_connect.ts": `import { MethodKind } from "@bufbuild/protobuf";
+export const AuthService = {
+  typeName: "auth.v1.AuthService",
+  methods: {
+    login: { name: "Login", kind: MethodKind.Unary },
+  },
+} as const;
+`,
+		"app/page.tsx": `import { createPromiseClient } from "@connectrpc/connect";
+import { AuthService } from "../../gen/ts/auth_connect";
+
+const transport = {};
+
+export default function Page() {
+  const client = createPromiseClient(AuthService, transport);
+  return client.login({ user: "alice" });
+}
+`,
+	})
+
+	s := openTraceRPCStore(t, dir)
+
+	// Force LineNumber = 0 to simulate a legacy node that hasn't been re-indexed.
+	callerID := store.SymbolNodeID("page.Page")
+	callerNode, err := s.GetNode(callerID)
+	if err != nil || callerNode == nil {
+		t.Fatalf("caller node %s not indexed; err=%v node=%v", callerID, err, callerNode)
+	}
+	callerNode.LineNumber = 0
+	if err := s.UpsertNode(*callerNode); err != nil {
+		t.Fatalf("UpsertNode zero: %v", err)
+	}
+
+	result, err := runTraceRPC(s, dir, "auth.v1.AuthService.Login")
+	if err != nil {
+		t.Fatalf("runTraceRPC: %v", err)
+	}
+	if len(result.Callers) != 1 {
+		t.Fatalf("Callers = %d, want 1; got %+v", len(result.Callers), result.Callers)
+	}
+	// File scan must have fired for `func Page()` and returned a non-zero line.
+	if result.Callers[0].LineNumber == 0 {
+		t.Errorf("call_rpc legacy fallback: Callers[0].LineNumber = 0, expected non-zero (file scan must fire when LineNumber==0)")
+	}
+}
+
