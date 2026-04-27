@@ -1440,6 +1440,11 @@ func TestIntegration_Graph_PythonTypeVarProjectedAsSymbolNode(t *testing.T) {
 }
 
 // --- lib-0pa.5: cross-module TypeVar resolution integration tests ---
+//
+// NOTE: Tests below use absolute imports (from mytypes import T) for simplicity.
+// An integration test for the relative-import form (from .types import T), which
+// exercises ResolveImports rewriting .types.T → mypkg.types.T via the
+// __init__.py walk, is tracked as out-of-scope for lib-0pa.5 in lib-4w1.
 
 // TestIntegration_Graph_PythonCrossModuleTypeVar_Resolved pins the lib-0pa.5
 // guarantee: when T is imported from another module in the same project and

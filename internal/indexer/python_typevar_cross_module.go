@@ -60,14 +60,17 @@ func (idx *Indexer) buildPythonTypeVarCrossModuleEdges(result *GraphResult) {
 
 	// Step 3+4: resolve and upsert.
 	for _, e := range pendingEdges {
-		updated, changed := resolvePendingTypeVarEdge(e, typeVarSet)
+		updated, changed, anyNew := resolvePendingTypeVarEdge(e, typeVarSet)
 		if !changed {
 			continue
 		}
 		if err := idx.store.UpsertEdge(updated); err != nil {
 			result.Errors = append(result.Errors,
 				fmt.Sprintf("python typevar cross-module resolver: upsert edge %s→%s: %s", e.From, e.To, err))
-		} else {
+		} else if anyNew {
+			// Only count edges where a new TypeVar was actually resolved;
+			// cleanup-only upserts (pending key removed, nothing resolved) are
+			// metadata housekeeping, not new graph relationships.
 			result.EdgesAdded++
 		}
 	}
@@ -77,24 +80,25 @@ func (idx *Indexer) buildPythonTypeVarCrossModuleEdges(result *GraphResult) {
 // e.Metadata, resolves any candidates present in typeVarSet, merges new
 // resolutions into type_args_resolved, and removes the pending key.
 //
-// Returns (updated edge, true) after consuming the pending key, regardless of
-// whether any TypeVar was resolved — the key is always removed to prevent
-// repeated no-op scans on subsequent IndexProjectGraph runs. Returns
-// (original edge, false) only when metadata cannot be parsed or the pending
-// map is absent or empty.
-func resolvePendingTypeVarEdge(e store.Edge, typeVarSet map[string]bool) (store.Edge, bool) {
+// Returns (updated edge, changed=true, anyNew) after consuming the pending key.
+// changed=true whenever the pending key was present and the edge was mutated
+// (regardless of resolution outcome — the key is always removed). anyNew is
+// true only when at least one TypeVar was actually resolved and added to
+// type_args_resolved. Returns (original, false, false) when metadata cannot be
+// parsed or the pending map is absent or empty.
+func resolvePendingTypeVarEdge(e store.Edge, typeVarSet map[string]bool) (store.Edge, bool, bool) {
 	var meta map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(e.Metadata), &meta); err != nil {
-		return e, false
+		return e, false, false
 	}
 	pendingRaw, ok := meta["type_args_pending_cross_module"]
 	if !ok {
-		return e, false
+		return e, false, false
 	}
 
 	var pending map[string]string // localAlias → canonicalDottedPath
 	if err := json.Unmarshal(pendingRaw, &pending); err != nil || len(pending) == 0 {
-		return e, false
+		return e, false, false
 	}
 
 	// Collect already-resolved IDs so we don't duplicate.
@@ -135,13 +139,13 @@ func resolvePendingTypeVarEdge(e store.Edge, typeVarSet map[string]bool) (store.
 	if anyNew {
 		resolvedBytes, err := json.Marshal(resolvedList)
 		if err != nil {
-			return e, false
+			return e, false, false
 		}
 		meta["type_args_resolved"] = resolvedBytes
 	}
 
 	e.Metadata = marshalSortedRawMetadata(meta)
-	return e, true
+	return e, true, anyNew
 }
 
 // marshalSortedRawMetadata serialises map[string]json.RawMessage with
@@ -149,6 +153,10 @@ func resolvePendingTypeVarEdge(e store.Edge, typeVarSet map[string]bool) (store.
 // enforces on the write path. Sorted key order is required because the
 // edge is stored with INSERT OR REPLACE — non-deterministic JSON would
 // trigger real disk writes even when the logical metadata is unchanged.
+//
+// This is a 3rd copy of the sorted-key JSON builder alongside refMetadataJSON
+// and unitMetadataJSON in indexer.go (differs in map value type). Consolidation
+// is tracked in lib-xnu.
 func marshalSortedRawMetadata(m map[string]json.RawMessage) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
