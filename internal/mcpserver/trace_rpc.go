@@ -564,10 +564,19 @@ func buildTraceRPCDefinition(node *store.Node, projectRoot string) (traceRPCDefi
 	def.ClientStreaming = meta.ClientStreaming
 	def.ServerStreaming = meta.ServerStreaming
 
-	// Best-effort line + docstring. Falls back to 0 / "" on any read error —
-	// the graph doesn't persist proto line numbers, so reading the source file
-	// is the only way to populate these fields without modifying the grammar.
-	if node.SourcePath != "" {
+	// Best-effort line + docstring.
+	// Prefer the persisted line number (available after lib-r4s.5 re-index).
+	// Fall back to scanning the source file for nodes indexed before lib-r4s.5
+	// (LineNumber == 0) or when the node has no SourcePath.
+	if node.LineNumber > 0 {
+		def.LineNumber = node.LineNumber
+		if node.SourcePath != "" {
+			abs := resolveTraceRPCPath(projectRoot, node.SourcePath)
+			if _, doc := scanTraceRPCDefinitionSite(abs, method); doc != "" {
+				def.Docstring = doc
+			}
+		}
+	} else if node.SourcePath != "" {
 		abs := resolveTraceRPCPath(projectRoot, node.SourcePath)
 		if line, doc := scanTraceRPCDefinitionSite(abs, method); line > 0 {
 			def.LineNumber = line
@@ -580,7 +589,9 @@ func buildTraceRPCDefinition(node *store.Node, projectRoot string) (traceRPCDefi
 
 // buildTraceRPCImplementation projects a generated-code symbol node into the
 // response shape, including a best-effort Language + Kind classification and
-// a best-effort LineNumber via file scan for the method name.
+// a best-effort LineNumber. Prefers the persisted node.LineNumber (available
+// after lib-r4s.5 re-index); falls back to scanTraceRPCMethodLine for legacy
+// nodes (LineNumber == 0).
 func buildTraceRPCImplementation(node *store.Node, service, projectRoot string) traceRPCImplementation {
 	path := strings.TrimPrefix(node.ID, "sym:")
 	impl := traceRPCImplementation{
@@ -590,7 +601,9 @@ func buildTraceRPCImplementation(node *store.Node, service, projectRoot string) 
 		File:       node.SourcePath,
 		Kind:       traceRPCImplKind(path, service),
 	}
-	if node.SourcePath != "" {
+	if node.LineNumber > 0 {
+		impl.LineNumber = node.LineNumber
+	} else if node.SourcePath != "" {
 		method := path
 		if idx := strings.LastIndex(path, "."); idx >= 0 {
 			method = path[idx+1:]
@@ -951,11 +964,13 @@ func resolveTraceRPCPath(projectRoot, sourcePath string) string {
 // stripped of their markers and joined with spaces. Returns (0, "") when the
 // file can't be read or the declaration isn't found.
 //
-// The proto grammar now emits docstrings via DocstringFromNode (lib-r4s.4),
-// so newly-indexed nodes have the comment text in their Unit.Content. However,
-// graph_nodes does not persist a separate docstring column, so reading the
-// source file is still the mechanism used here. Also serves as a fallback for
-// nodes indexed before lib-r4s.4.
+// Fallback for pre-lib-r4s.5 nodes: since lib-r4s.5, graph_nodes persists
+// line_number directly, so callers should prefer node.LineNumber when non-zero
+// and only call this function when LineNumber == 0 (legacy indexes) or to
+// extract the docstring (graph_nodes does not persist a separate docstring
+// column). The line-scan approach is brittle against formatters that split rpc
+// declarations across lines; node.LineNumber is the authoritative source for
+// freshly-indexed graphs.
 func scanTraceRPCDefinitionSite(absPath, method string) (int, string) {
 	data, err := os.ReadFile(absPath)
 	if err != nil {
@@ -992,10 +1007,13 @@ func scanTraceRPCDefinitionSite(absPath, method string) (int, string) {
 // at / near the top of a class body and a pre-declaration call would be a
 // compiler error, so the first `methodName(` is overwhelmingly the
 // declaration. A regression that points at a call line is still useful
-// context for the caller. Same no-touch-grammar rationale as
-// scanTraceRPCDefinitionSite: graph_nodes doesn't persist Loc.Line, and the
-// file scan keeps the feature working without grammar mutations (tracked as
-// lib-cta follow-up).
+// context for the caller.
+//
+// Fallback for pre-lib-r4s.5 nodes: since lib-r4s.5, graph_nodes persists
+// line_number directly for every indexed symbol; callers should prefer
+// node.LineNumber when non-zero and only invoke this function for legacy
+// nodes (LineNumber == 0). A future pass (lib-cta) will extend grammar-level
+// line emission to all languages, further reducing reliance on this heuristic.
 func scanTraceRPCMethodLine(absPath, methodName string) int {
 	if absPath == "" || methodName == "" {
 		return 0

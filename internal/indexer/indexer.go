@@ -758,6 +758,7 @@ func (idx *Indexer) indexGraphFileDirect(file WalkResult, result *GraphResult, f
 			Label:      u.Title,
 			SourcePath: file.FilePath,
 			Metadata:   unitMetadataJSON(u.Metadata),
+			LineNumber: u.Loc.Line,
 		}); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("symbol %s: %s", u.Path, err))
 			continue

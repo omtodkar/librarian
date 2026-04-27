@@ -203,6 +203,7 @@ func TestGraph_UpsertPlaceholderNode_DoesNotOverwrite(t *testing.T) {
 		Label:      "Base",
 		SourcePath: "src/Base.java",
 		Metadata:   "{}",
+		LineNumber: 42,
 	}
 	if err := s.UpsertNode(real); err != nil {
 		t.Fatalf("UpsertNode (real): %v", err)
@@ -214,6 +215,7 @@ func TestGraph_UpsertPlaceholderNode_DoesNotOverwrite(t *testing.T) {
 		Label:      "Base", // raw target name, not the qualified label
 		SourcePath: "Base",
 		Metadata:   `{"unresolved":true}`,
+		// LineNumber intentionally zero — placeholder callers don't know the line.
 	}
 	if err := s.UpsertPlaceholderNode(placeholder); err != nil {
 		t.Fatalf("UpsertPlaceholderNode: %v", err)
@@ -231,6 +233,9 @@ func TestGraph_UpsertPlaceholderNode_DoesNotOverwrite(t *testing.T) {
 	}
 	if got.Metadata != "{}" {
 		t.Errorf("Metadata overwritten: got %q, want %q (placeholder must not poison real node with unresolved=true)", got.Metadata, "{}")
+	}
+	if got.LineNumber != 42 {
+		t.Errorf("LineNumber overwritten: got %d, want 42 (placeholder with zero LineNumber must not clobber real node)", got.LineNumber)
 	}
 }
 
@@ -425,4 +430,71 @@ func TestAffectedSourcePathsForFile(t *testing.T) {
 			t.Errorf("expected other.py in result; got %v", paths)
 		}
 	})
+}
+
+func TestGraph_LineNumberRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a symbol node with a non-zero line number and read it back.
+	if err := s.UpsertNode(Node{
+		ID:         "sym:pkg.MyFunc",
+		Kind:       NodeKindSymbol,
+		Label:      "MyFunc",
+		SourcePath: "pkg/my.go",
+		LineNumber: 42,
+	}); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	got, err := s.GetNode("sym:pkg.MyFunc")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected node, got nil")
+	}
+	if got.LineNumber != 42 {
+		t.Errorf("LineNumber = %d, want 42", got.LineNumber)
+	}
+
+	// Upsert with an updated line number (re-index scenario).
+	if err := s.UpsertNode(Node{
+		ID:         "sym:pkg.MyFunc",
+		Kind:       NodeKindSymbol,
+		Label:      "MyFunc",
+		SourcePath: "pkg/my.go",
+		LineNumber: 99,
+	}); err != nil {
+		t.Fatalf("UpsertNode update: %v", err)
+	}
+	got, err = s.GetNode("sym:pkg.MyFunc")
+	if err != nil {
+		t.Fatalf("GetNode after update: %v", err)
+	}
+	if got.LineNumber != 99 {
+		t.Errorf("LineNumber after update = %d, want 99", got.LineNumber)
+	}
+}
+
+func TestGraph_LineNumberZeroIsValidSentinel(t *testing.T) {
+	s := newTestStore(t)
+
+	// Zero line_number is the sentinel for "no location" — it must round-trip
+	// and be distinguishable from a missing row.
+	if err := s.UpsertNode(Node{
+		ID:   "sym:pkg.Unknown",
+		Kind: NodeKindSymbol,
+	}); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	got, err := s.GetNode("sym:pkg.Unknown")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected node, got nil")
+	}
+	if got.LineNumber != 0 {
+		t.Errorf("LineNumber = %d, want 0 sentinel", got.LineNumber)
+	}
 }

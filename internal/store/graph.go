@@ -46,6 +46,10 @@ type Node struct {
 	Label      string `json:"label"`
 	SourcePath string `json:"source_path,omitempty"`
 	Metadata   string `json:"metadata"` // JSON blob
+	// LineNumber is the 1-indexed source line where this symbol is declared.
+	// Zero means unknown (document nodes, code-file nodes, buf_manifest nodes,
+	// and any symbol node indexed before lib-r4s.5 that hasn't been re-indexed).
+	LineNumber int `json:"line_number,omitempty"`
 }
 
 // Edge is a row in graph_edges.
@@ -120,14 +124,15 @@ func (s *Store) UpsertNode(n Node) error {
 		n.Metadata = "{}"
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO graph_nodes (id, kind, label, source_path, metadata)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO graph_nodes (id, kind, label, source_path, metadata, line_number)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			kind        = excluded.kind,
 			label       = excluded.label,
 			source_path = excluded.source_path,
-			metadata    = excluded.metadata`,
-		n.ID, n.Kind, n.Label, nullString(n.SourcePath), n.Metadata)
+			metadata    = excluded.metadata,
+			line_number = excluded.line_number`,
+		n.ID, n.Kind, n.Label, nullString(n.SourcePath), n.Metadata, n.LineNumber)
 	if err != nil {
 		return fmt.Errorf("upsert_node: %w", err)
 	}
@@ -160,10 +165,10 @@ func (s *Store) UpsertPlaceholderNode(n Node) error {
 		n.Metadata = "{}"
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO graph_nodes (id, kind, label, source_path, metadata)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO graph_nodes (id, kind, label, source_path, metadata, line_number)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING`,
-		n.ID, n.Kind, n.Label, nullString(n.SourcePath), n.Metadata)
+		n.ID, n.Kind, n.Label, nullString(n.SourcePath), n.Metadata, n.LineNumber)
 	if err != nil {
 		return fmt.Errorf("upsert_placeholder_node: %w", err)
 	}
@@ -194,9 +199,9 @@ func (s *Store) GetNode(id string) (*Node, error) {
 	var n Node
 	var sp sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, kind, label, source_path, metadata FROM graph_nodes WHERE id = ?`,
+		`SELECT id, kind, label, source_path, metadata, line_number FROM graph_nodes WHERE id = ?`,
 		id,
-	).Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata)
+	).Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata, &n.LineNumber)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -219,7 +224,7 @@ func (s *Store) FindNodes(query string, limit int) ([]Node, error) {
 	}
 	like := "%" + likeEscaper.Replace(query) + "%"
 	rows, err := s.db.Query(`
-		SELECT id, kind, label, source_path, metadata
+		SELECT id, kind, label, source_path, metadata, line_number
 		FROM graph_nodes
 		WHERE id = ? OR label LIKE ? ESCAPE '\' OR source_path LIKE ? ESCAPE '\'
 		ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, label
@@ -233,7 +238,7 @@ func (s *Store) FindNodes(query string, limit int) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var sp sql.NullString
-		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata, &n.LineNumber); err != nil {
 			return nil, fmt.Errorf("find_nodes scan: %w", err)
 		}
 		if sp.Valid {
@@ -247,7 +252,7 @@ func (s *Store) FindNodes(query string, limit int) ([]Node, error) {
 // ListNodes returns every graph_node row. Used by graph-wide analytics
 // (community detection, centrality) that need the full topology in memory.
 func (s *Store) ListNodes() ([]Node, error) {
-	rows, err := s.db.Query(`SELECT id, kind, label, source_path, metadata FROM graph_nodes`)
+	rows, err := s.db.Query(`SELECT id, kind, label, source_path, metadata, line_number FROM graph_nodes`)
 	if err != nil {
 		return nil, fmt.Errorf("list_nodes: %w", err)
 	}
@@ -256,7 +261,7 @@ func (s *Store) ListNodes() ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var sp sql.NullString
-		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata, &n.LineNumber); err != nil {
 			return nil, fmt.Errorf("list_nodes scan: %w", err)
 		}
 		if sp.Valid {
@@ -294,7 +299,7 @@ func (s *Store) ListSymbolNodesWithMetadataContaining(substring string) ([]Node,
 func (s *Store) ListNodesByKindWithMetadataContaining(kind, substring string) ([]Node, error) {
 	like := "%" + likeEscaper.Replace(substring) + "%"
 	rows, err := s.db.Query(`
-		SELECT id, kind, label, source_path, metadata
+		SELECT id, kind, label, source_path, metadata, line_number
 		FROM graph_nodes
 		WHERE kind = ? AND metadata LIKE ? ESCAPE '\'`,
 		kind, like)
@@ -306,7 +311,7 @@ func (s *Store) ListNodesByKindWithMetadataContaining(kind, substring string) ([
 	for rows.Next() {
 		var n Node
 		var sp sql.NullString
-		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata, &n.LineNumber); err != nil {
 			return nil, fmt.Errorf("list_nodes_by_kind_with_metadata scan: %w", err)
 		}
 		if sp.Valid {
@@ -322,7 +327,7 @@ func (s *Store) ListNodesByKindWithMetadataContaining(kind, substring string) ([
 // a kind regardless of metadata content.
 func (s *Store) ListNodesByKind(kind string) ([]Node, error) {
 	rows, err := s.db.Query(
-		`SELECT id, kind, label, source_path, metadata FROM graph_nodes WHERE kind = ?`, kind)
+		`SELECT id, kind, label, source_path, metadata, line_number FROM graph_nodes WHERE kind = ?`, kind)
 	if err != nil {
 		return nil, fmt.Errorf("list_nodes_by_kind: %w", err)
 	}
@@ -331,7 +336,7 @@ func (s *Store) ListNodesByKind(kind string) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var sp sql.NullString
-		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata, &n.LineNumber); err != nil {
 			return nil, fmt.Errorf("list_nodes_by_kind scan: %w", err)
 		}
 		if sp.Valid {
@@ -626,7 +631,7 @@ AND gn.source_path != ?
 // schema evolutions (lib-o8m renamed sym:.utils → sym:mypkg.utils, leaving
 // old nodes unreachable).
 func (s *Store) ListOrphanNodes(kinds []string) ([]Node, error) {
-	query, args := orphanNodeQuery(kinds, "SELECT id, kind, label, source_path, metadata FROM graph_nodes")
+	query, args := orphanNodeQuery(kinds, "SELECT id, kind, label, source_path, metadata, line_number FROM graph_nodes")
 	query += " ORDER BY id"
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -637,7 +642,7 @@ func (s *Store) ListOrphanNodes(kinds []string) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var sp sql.NullString
-		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata); err != nil {
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Label, &sp, &n.Metadata, &n.LineNumber); err != nil {
 			return nil, fmt.Errorf("list_orphan_nodes scan: %w", err)
 		}
 		if sp.Valid {

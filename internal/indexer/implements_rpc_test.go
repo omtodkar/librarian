@@ -1941,3 +1941,85 @@ export const AuthService = {
 		t.Errorf("edge source = %s, want %s", edges[0].From, src)
 	}
 }
+
+// TestLineNumber_ProtoRPCNodePersisted verifies that after indexing a proto
+// fixture the rpc symbol node carries a non-zero LineNumber matching the actual
+// source line of the `rpc` declaration (lib-r4s.5).
+func TestLineNumber_ProtoRPCNodePersisted(t *testing.T) {
+	// Proto fixture: the `rpc Login` declaration is on line 8 (1-indexed).
+	protoSrc := `syntax = "proto3";
+package auth;
+
+message LoginRequest { string user = 1; }
+message LoginReply   { bool ok = 1; }
+
+service AuthService {
+  rpc Login (LoginRequest) returns (LoginReply);
+}
+`
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"api/auth.proto": protoSrc,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	rpcNodeID := store.SymbolNodeID("auth.AuthService.Login")
+	node, err := s.GetNode(rpcNodeID)
+	if err != nil {
+		t.Fatalf("GetNode(%s): %v", rpcNodeID, err)
+	}
+	if node == nil {
+		t.Fatalf("rpc node %s not found after indexing", rpcNodeID)
+	}
+	// Pin the exact expected line — `rpc Login` is on line 8 of the fixture.
+	// This catches grammar-level off-by-one errors that a mere non-zero check
+	// would miss; the containsRPCDecl cross-check below confirms the content.
+	const wantLine = 8
+	if node.LineNumber != wantLine {
+		t.Errorf("rpc node LineNumber = %d, want %d", node.LineNumber, wantLine)
+	}
+	// Verify the stored line actually contains "rpc Login" in the fixture.
+	lines := splitLines(protoSrc)
+	if node.LineNumber > len(lines) {
+		t.Fatalf("LineNumber %d out of range (fixture has %d lines)", node.LineNumber, len(lines))
+	}
+	got := lines[node.LineNumber-1]
+	if !containsRPCDecl(got, "Login") {
+		t.Errorf("line %d = %q; expected it to contain the rpc Login declaration", node.LineNumber, got)
+	}
+}
+
+// splitLines splits s on newlines without the stdlib dependency on strings
+// package — a simple helper so the test body stays self-contained.
+func splitLines(s string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
+	}
+	return out
+}
+
+// containsRPCDecl returns true if line contains "rpc <method>" as a word-boundary prefix.
+func containsRPCDecl(line, method string) bool {
+	prefix := "rpc " + method
+	for i := 0; i <= len(line)-len(prefix); i++ {
+		if line[i:i+len(prefix)] == prefix {
+			rest := line[i+len(prefix):]
+			if rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '(' {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -22,8 +22,8 @@ func TestOpen_FreshDB(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT max(version_id) FROM goose_db_version WHERE is_applied = 1`).Scan(&maxVersion); err != nil {
 		t.Fatalf("reading goose_db_version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max applied version_id: got %d want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max applied version_id: got %d want 4", maxVersion)
 	}
 
 	// Every baseline table must exist after goose.Up. Include embedding_meta
@@ -53,6 +53,19 @@ func TestOpen_FreshDB(t *testing.T) {
 	}
 	if colCount != 1 {
 		t.Errorf("code_files.content_hash: got %d columns want 1", colCount)
+	}
+
+	// graph_nodes.line_number must be present — added by migration 0004.
+	// Catches regressions where the column is accidentally dropped or the
+	// migration is rolled back without a corresponding schema baseline update.
+	var lnCount int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM pragma_table_info('graph_nodes') WHERE name='line_number'`,
+	).Scan(&lnCount); err != nil {
+		t.Fatalf("pragma_table_info graph_nodes: %v", err)
+	}
+	if lnCount != 1 {
+		t.Errorf("graph_nodes.line_number: got %d columns want 1", lnCount)
 	}
 }
 

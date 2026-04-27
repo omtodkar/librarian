@@ -1135,7 +1135,8 @@ func (s *AuthServiceServer) Login() error { return nil }
 		t.Fatal("default MCP call failed")
 	}
 
-	// Case 2: explicit json output.
+	// Case 2: explicit json output — also verifies LineNumber is non-zero after
+	// a fresh index (lib-r4s.5: graph_nodes now persists line_number).
 	if res, ok := callTool(map[string]any{"rpc": "auth.AuthService.Login", "format": "json"}); ok {
 		text := toolResultText(t, res)
 		var parsed traceRPCResult
@@ -1144,6 +1145,9 @@ func (s *AuthServiceServer) Login() error { return nil }
 		}
 		if parsed.Definition.Method != "Login" {
 			t.Errorf("json output wrong method: %q", parsed.Definition.Method)
+		}
+		if parsed.Definition.LineNumber == 0 {
+			t.Errorf("Definition.LineNumber = 0 after fresh index; expected non-zero (lib-r4s.5 regression check)")
 		}
 	} else {
 		t.Fatal("json-format MCP call failed")
