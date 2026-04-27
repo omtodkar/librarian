@@ -987,6 +987,16 @@ type migrationConvention struct {
 	FileRegex *regexp.Regexp
 }
 
+// migrationConventions is an ordered allow-list matched by first-win semantics.
+// Entries must be ordered from most-specific to least-specific — an entry whose
+// DirNames and FileRegex are a strict subset of an earlier entry can never be
+// reached and would be dead code.
+//
+// dbmate and atlas are intentionally absent: both share the same
+// DirNames/FileRegex as goose (db/migrations or migrations + 14-digit prefix),
+// so they would be permanently shadowed. Proper disambiguation requires
+// content-based detection (dbmate uses "-- migrate:up" comments; atlas uses
+// an atlas.sum sibling file). That is tracked in lib-jeev.
 var migrationConventions = []migrationConvention{
 	{
 		Tool:      "goose",
@@ -999,16 +1009,8 @@ var migrationConventions = []migrationConvention{
 		FileRegex: regexp.MustCompile(`^V\d+__.*\.sql$`),
 	},
 	{
-		Tool:      "dbmate",
-		DirNames:  []string{"db/migrations"},
-		FileRegex: regexp.MustCompile(`^\d{14}_.*\.sql$`),
-	},
-	{
-		Tool:      "atlas",
-		DirNames:  []string{"migrations"},
-		FileRegex: regexp.MustCompile(`^\d{14}_.*\.sql$`),
-	},
-	{
+		// sqlx uses shorter numeric prefixes (e.g. 001_) that don't match the
+		// 14-digit goose/dbmate/atlas pattern, so this entry is reachable.
 		Tool:      "sqlx",
 		DirNames:  []string{"migrations"},
 		FileRegex: regexp.MustCompile(`^\d+_.*\.sql$`),
