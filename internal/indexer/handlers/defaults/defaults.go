@@ -13,4 +13,5 @@ import (
 	_ "librarian/internal/indexer/handlers/markdown"        // register markdown handler
 	_ "librarian/internal/indexer/handlers/office"          // register DOCX/XLSX/PPTX handlers
 	_ "librarian/internal/indexer/handlers/pdf"             // register PDF handler
+	_ "librarian/internal/indexer/handlers/sql"             // register SQL handler (.sql/.psql/.ddl)
 )
