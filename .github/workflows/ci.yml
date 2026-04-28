@@ -24,9 +24,13 @@ jobs:
           cache: true
 
       - name: Build
+        env:
+          CGO_ENABLED: "1"
         run: go build ./...
 
       - name: Test (with race detector)
+        env:
+          CGO_ENABLED: "1"
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage artifact

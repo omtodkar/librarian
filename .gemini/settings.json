@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "perles-observer": {
+      "httpUrl": "http://localhost:49355/observer"
+    }
+  }
+}

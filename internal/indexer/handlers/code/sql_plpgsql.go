@@ -37,12 +37,6 @@ import (
 //
 // Returns (refs, true) on success or (nil, false) on parse error; callers
 // should set unit.Metadata["partial"]=true when ok is false.
-// plpgsqlExtractRefs parses a PL/pgSQL function body and extracts in-memory
-// body reference records. fullFuncSQL must be the complete CREATE FUNCTION ...
-// LANGUAGE plpgsql statement (not just the body text).
-//
-// Returns (refs, true) on success or (nil, false) on parse error; callers
-// should set unit.Metadata["partial"]=true when ok is false.
 func plpgsqlExtractRefs(funcPath, defaultSchema, fullFuncSQL string) ([]indexer.Reference, bool) {
 	return plpgsqlParseAndResolve(funcPath, defaultSchema, fullFuncSQL, "")
 }
@@ -441,8 +435,9 @@ func plpgsqlScanAssignStmt(stmt map[string]any, assigned map[int]bool) {
 		}
 		switch key {
 		case "PLpgSQL_stmt_assign":
-			varno := plpgsqlIntField(data, "varno")
-			assigned[varno] = true
+			if varno := plpgsqlIntField(data, "varno"); varno > 0 {
+				assigned[varno] = true
+			}
 		case "PLpgSQL_stmt_block":
 			body, _ := data["body"].([]any)
 			plpgsqlScanAssignStmtList(body, assigned)
