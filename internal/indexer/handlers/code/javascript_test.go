@@ -774,6 +774,43 @@ func TestJavaScriptGrammar_MixinNonClassArg(t *testing.T) {
 	}
 }
 
+// Mixin-application with a dotted callee (member_expression): class Foo extends
+// pkg.Mixin(Base) emits two refs — callee Target is "pkg.Mixin" (dotted) and
+// base Target is "Base", both carrying dynamic=true and mixin_chain=["pkg.Mixin","Base"].
+func TestJavaScriptGrammar_MixinMemberExpressionCallee(t *testing.T) {
+	src := `class Foo extends pkg.Mixin(Base) {}`
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("m.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/m.js", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs (callee + base), got %d (%+v)", len(refs), refs)
+	}
+	targets := map[string]bool{}
+	for _, r := range refs {
+		targets[r.Target] = true
+		if v, _ := r.Metadata["dynamic"].(bool); !v {
+			t.Errorf("ref %q: expected dynamic=true; got %+v", r.Target, r.Metadata)
+		}
+		chain, _ := r.Metadata["mixin_chain"].([]string)
+		wantChain := []string{"pkg.Mixin", "Base"}
+		if len(chain) != 2 || chain[0] != wantChain[0] || chain[1] != wantChain[1] {
+			t.Errorf("ref %q: mixin_chain = %v, want %v", r.Target, chain, wantChain)
+		}
+		if v, _ := r.Metadata["unresolved_expression"].(bool); v {
+			t.Errorf("ref %q: must not carry unresolved_expression=true", r.Target)
+		}
+	}
+	if !targets["pkg.Mixin"] {
+		t.Errorf("expected a ref with Target=pkg.Mixin (dotted callee); got %+v", refs)
+	}
+	if !targets["Base"] {
+		t.Errorf("expected a ref with Target=Base; got %+v", refs)
+	}
+}
+
 func TestJavaScriptGrammar_MemberExpressionExtendsLeftAlone(t *testing.T) {
 	// JS `class X extends pkg.Base` — dotted identifier; resolver skips it
 	// (dotted Target is considered already-qualified).
