@@ -955,12 +955,14 @@ func (*PythonGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, sou
 }
 
 // buildTypeVarLocalNames returns a set of local identifier names that resolve
-// to typing.TypeVar in the file's imports. "TypeVar" is always included so
-// bare TypeVar(...) calls work without an explicit typing import.
+// to typing.TypeVar or typing_extensions.TypeVar in the file's imports.
+// "TypeVar" is always included so bare TypeVar(...) calls work without an
+// explicit typing import.
 //
 // Handles:
-//   - from typing import TypeVar        → adds "TypeVar"
-//   - from typing import TypeVar as TV  → adds "TV"
+//   - from typing import TypeVar              → adds "TypeVar"
+//   - from typing_extensions import TypeVar   → adds "TypeVar"
+//   - from typing import TypeVar as TV        → adds "TV"
 //
 // Does NOT handle `import typing; typing.TypeVar(...)` — attribute-form calls
 // are out of scope for v1; only bare identifier call targets are matched.
@@ -970,10 +972,7 @@ func buildTypeVarLocalNames(refs []indexer.Reference) map[string]bool {
 		if r.Kind != "import" || r.Target == "" {
 			continue
 		}
-		// HasSuffix is intentionally broad for v1 — it also matches user-defined
-		// classes named TypeVar (e.g. mylib.TypeVar). Tracked for tightening
-		// to require a typing/typing_extensions origin in lib-9j4.
-		if r.Target != "typing.TypeVar" && !strings.HasSuffix(r.Target, ".TypeVar") {
+		if r.Target != "typing.TypeVar" && r.Target != "typing_extensions.TypeVar" {
 			continue
 		}
 		local := ""

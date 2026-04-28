@@ -1232,6 +1232,35 @@ func TestPythonGrammar_TypeVarBareAssignmentNotRecognised(t *testing.T) {
 	}
 }
 
+func TestPythonGrammar_TypeVarNonTypingOriginIgnored(t *testing.T) {
+	// from mylib import TypeVar  — user-defined class named TypeVar should NOT
+	// be treated as typing.TypeVar, so T = mylib.TypeVar("T") must not produce
+	// a typevar unit.
+	src := []byte(`from mylib import TypeVar
+T = TypeVar("T")
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// The bare name "TypeVar" is always in the set (for un-imported usage), so
+	// T = TypeVar("T") WILL still match via the default entry. To isolate the
+	// non-typing-origin path, we need a distinct alias.
+	src2 := []byte(`from mylib import TypeVar as TV
+T = TV("T")
+`)
+	doc2, err := h.Parse("mymod.py", src2)
+	if err != nil {
+		t.Fatalf("Parse src2: %v", err)
+	}
+	tvs := typeVarUnits(doc2)
+	if len(tvs) != 0 {
+		t.Errorf("expected no typevar units for aliased import from non-typing module; got %+v", tvs)
+	}
+	_ = doc // suppress unused-variable error; bare TypeVar is always matched
+}
+
 func TestPythonGrammar_TypeVarResolvedInGenericBase(t *testing.T) {
 	src := []byte(`T = TypeVar("T")
 
