@@ -72,7 +72,8 @@ func plpgsqlExtractRefs(funcPath, defaultSchema, fullFuncSQL string) ([]indexer.
 
 	if isTrigger {
 		datums, _ := funcData["datums"].([]any)
-		refs = append(refs, plpgsqlTriggerFieldRefs(datums, newVarno, oldVarno, funcPath)...)
+		assignedDnos := plpgsqlScanAssignedDnos(action)
+		refs = append(refs, plpgsqlTriggerFieldRefs(datums, newVarno, oldVarno, funcPath, assignedDnos)...)
 	}
 
 	// lib-o5dn.4: resolve pending_execute and trigger_special refs.
@@ -362,9 +363,16 @@ func plpgsqlExtractFirstIdent(expr, defaultSchema string) string {
 // plpgsqlTriggerFieldRefs emits body_references for NEW/OLD record field
 // accesses found in the datums array. lib-o5dn.4 resolves these to the actual
 // trigger table; this bead only captures them with trigger_special=true.
-func plpgsqlTriggerFieldRefs(datums []any, newVarno, oldVarno int, funcPath string) []indexer.Reference {
+//
+// assignedDnos is the set of datum numbers that appear on the LHS of a
+// PLpgSQL_stmt_assign in the function body (collected by plpgsqlScanAssignedDnos).
+// The datum number (dno) for each entry is its array index — pg_query's JSON
+// omits an explicit "dno" field for PLpgSQL_recfield nodes.
+// NEW recfields whose dno is in assignedDnos get context="assignment" so that
+// ResolveTriggerNewOld can emit op=write for those refs (lib-uer8).
+func plpgsqlTriggerFieldRefs(datums []any, newVarno, oldVarno int, funcPath string, assignedDnos map[int]bool) []indexer.Reference {
 	var refs []indexer.Reference
-	for _, d := range datums {
+	for i, d := range datums {
 		dmap, _ := d.(map[string]any)
 		if dmap == nil {
 			continue
@@ -378,6 +386,7 @@ func plpgsqlTriggerFieldRefs(datums []any, newVarno, oldVarno int, funcPath stri
 			continue
 		}
 		recparentno := plpgsqlIntField(recfield, "recparentno")
+		dno := i // datum number is the array index; pg_query JSON omits explicit "dno" for recfields
 
 		var target string
 		switch {
@@ -388,17 +397,115 @@ func plpgsqlTriggerFieldRefs(datums []any, newVarno, oldVarno int, funcPath stri
 		default:
 			continue
 		}
+		meta := map[string]any{
+			"op":              "read",
+			"trigger_special": true,
+		}
+		if recparentno == newVarno && assignedDnos[dno] {
+			meta["context"] = "assignment"
+		}
 		refs = append(refs, indexer.Reference{
-			Kind:   store.EdgeKindBodyReferences,
-			Source: "sym:" + funcPath,
-			Target: target, // resolved in lib-o5dn.4
-			Metadata: map[string]any{
-				"op":              "read",
-				"trigger_special": true,
-			},
+			Kind:     store.EdgeKindBodyReferences,
+			Source:   "sym:" + funcPath,
+			Target:   target, // resolved in lib-o5dn.4
+			Metadata: meta,
 		})
 	}
 	return refs
+}
+
+// plpgsqlScanAssignedDnos scans a top-level stmt node (the action field of a
+// PLpgSQL_function) and returns the set of varno values that appear as the LHS
+// of PLpgSQL_stmt_assign nodes anywhere in the body.
+func plpgsqlScanAssignedDnos(action map[string]any) map[int]bool {
+	assigned := make(map[int]bool)
+	plpgsqlScanAssignStmt(action, assigned)
+	return assigned
+}
+
+func plpgsqlScanAssignStmt(stmt map[string]any, assigned map[int]bool) {
+	for key, val := range stmt {
+		data, _ := val.(map[string]any)
+		if data == nil {
+			continue
+		}
+		switch key {
+		case "PLpgSQL_stmt_assign":
+			varno := plpgsqlIntField(data, "varno")
+			assigned[varno] = true
+		case "PLpgSQL_stmt_block":
+			body, _ := data["body"].([]any)
+			plpgsqlScanAssignStmtList(body, assigned)
+			if excNode, ok := data["exceptions"].(map[string]any); ok {
+				if excBlock, ok := excNode["PLpgSQL_exception_block"].(map[string]any); ok {
+					if excList, ok := excBlock["exc_list"].([]any); ok {
+						for _, exc := range excList {
+							excMap, _ := exc.(map[string]any)
+							if excMap == nil {
+								continue
+							}
+							handler, _ := excMap["PLpgSQL_exception"].(map[string]any)
+							if handler == nil {
+								continue
+							}
+							handlerAction, _ := handler["action"].([]any)
+							plpgsqlScanAssignStmtList(handlerAction, assigned)
+						}
+					}
+				}
+			}
+		case "PLpgSQL_stmt_if":
+			if thenBody, ok := data["then_body"].([]any); ok {
+				plpgsqlScanAssignStmtList(thenBody, assigned)
+			}
+			if elsifList, ok := data["elsif_list"].([]any); ok {
+				for _, elsif := range elsifList {
+					elsifMap, _ := elsif.(map[string]any)
+					if elsifMap == nil {
+						continue
+					}
+					if elsifItem, ok := elsifMap["PLpgSQL_if_elsif"].(map[string]any); ok {
+						if stmts, ok := elsifItem["stmts"].([]any); ok {
+							plpgsqlScanAssignStmtList(stmts, assigned)
+						}
+					}
+				}
+			}
+			if elseBody, ok := data["else_body"].([]any); ok {
+				plpgsqlScanAssignStmtList(elseBody, assigned)
+			}
+		case "PLpgSQL_stmt_case":
+			if cwList, ok := data["case_when_list"].([]any); ok {
+				for _, cw := range cwList {
+					cwMap, _ := cw.(map[string]any)
+					if cwMap == nil {
+						continue
+					}
+					if cwItem, ok := cwMap["PLpgSQL_case_when"].(map[string]any); ok {
+						if stmts, ok := cwItem["stmts"].([]any); ok {
+							plpgsqlScanAssignStmtList(stmts, assigned)
+						}
+					}
+				}
+			}
+			if elseStmts, ok := data["else_stmts"].([]any); ok {
+				plpgsqlScanAssignStmtList(elseStmts, assigned)
+			}
+		case "PLpgSQL_stmt_fors", "PLpgSQL_stmt_fori", "PLpgSQL_stmt_while":
+			if body, ok := data["body"].([]any); ok {
+				plpgsqlScanAssignStmtList(body, assigned)
+			}
+		}
+	}
+}
+
+func plpgsqlScanAssignStmtList(stmts []any, assigned map[int]bool) {
+	for _, s := range stmts {
+		smap, _ := s.(map[string]any)
+		if smap != nil {
+			plpgsqlScanAssignStmt(smap, assigned)
+		}
+	}
 }
 
 // plpgsqlBodyRef creates a body_references Reference with a sym: target.

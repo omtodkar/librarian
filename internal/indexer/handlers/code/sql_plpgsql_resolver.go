@@ -73,9 +73,10 @@ func ResolveDynamicExecute(refs []indexer.Reference, declaredVars map[string]boo
 // ResolveTriggerNewOld resolves body_references refs that carry
 // trigger_special=true (emitted by plpgsqlTriggerFieldRefs).
 //
-// For NEW.col: rewrites Target to sym:<schema>.<triggerTarget>.<col>,
-// preserving the walker's op (read for datum-level refs; assignment-context
-// detection is deferred to lib-uer8).
+// For NEW.col: rewrites Target to sym:<schema>.<triggerTarget>.<col>.
+// op=write when the ref carries context="assignment" (lib-uer8: set by
+// plpgsqlTriggerFieldRefs when the recfield dno is the LHS of a
+// PLpgSQL_stmt_assign); op=read otherwise.
 // For OLD.col: rewrites Target to sym:<schema>.<triggerTarget>.<col> with
 // op=read.
 // For NEW.* (wildcard, table-level read): emits a table-level ref.
@@ -104,8 +105,6 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 		}
 
 		target := r.Target
-		// Preserve the walker's op; write-context detection (PLpgSQL_stmt_assign
-		// scanning) is a future improvement tracked in lib-uer8.
 		op, _ := r.Metadata["op"].(string)
 		if op == "" {
 			op = "read"
@@ -126,11 +125,15 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 		case strings.HasPrefix(target, "NEW."):
 			col := strings.TrimPrefix(target, "NEW.")
 			symTarget := "sym:" + schema + "." + triggerTarget + "." + col
+			resolvedOp := op
+			if ctx, _ := r.Metadata["context"].(string); ctx == "assignment" {
+				resolvedOp = "write"
+			}
 			out = append(out, indexer.Reference{
 				Kind:     store.EdgeKindBodyReferences,
 				Source:   r.Source,
 				Target:   symTarget,
-				Metadata: map[string]any{"op": op},
+				Metadata: map[string]any{"op": resolvedOp},
 			})
 
 		case strings.HasPrefix(target, "OLD."):

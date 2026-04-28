@@ -185,8 +185,8 @@ func TestPlpgsqlMatrix(t *testing.T) {
 			edges:    []plpgsqlEdge{{"write", "public.audit"}},
 		},
 		{
-			// Trigger assigning NEW.updated_at := now(): datum-based ref captured then dropped
-			// by empty-triggerTarget resolver; PLpgSQL_stmt_assign skipped by walker.
+			// Trigger assigning NEW.updated_at := now(): datum-based ref captured with
+			// context=assignment (lib-uer8), then dropped by empty-triggerTarget resolver.
 			name:     "trigger_new_write",
 			file:     "trigger_new_write.sql",
 			funcPath: "public.trigger_new_write",

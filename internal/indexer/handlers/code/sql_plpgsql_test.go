@@ -7,8 +7,11 @@ package code
 // only in-memory Reference records are verified.
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 
 	"librarian/internal/indexer"
 	"librarian/internal/store"
@@ -755,9 +758,8 @@ func TestResolve_ExecuteNested(t *testing.T) {
 	}
 }
 
-// TestResolve_TriggerNewColWrite verifies NEW.col is rewritten to a sym: path
-// preserving the walker's op (read — walker cannot distinguish assignment vs
-// condition context without PLpgSQL_stmt_assign scanning; tracked in lib-uer8).
+// TestResolve_TriggerNewColWrite verifies NEW.col without context=assignment is
+// resolved with op=read (condition or expression context).
 func TestResolve_TriggerNewColWrite(t *testing.T) {
 	refs := []indexer.Reference{
 		triggerSpecialRef("sym:public.audit_trigger", "NEW.email"),
@@ -770,9 +772,37 @@ func TestResolve_TriggerNewColWrite(t *testing.T) {
 		}
 	}
 
-	// Walker emits op=read for all datum refs; resolver preserves it.
 	if !hasBodyRef(t, out, "read", "public.users.email") {
 		t.Errorf("expected read ref to sym:public.users.email; got %v", out)
+	}
+}
+
+// TestResolve_TriggerNewColAssignment verifies NEW.col with context=assignment
+// is resolved with op=write (lib-uer8: assignment LHS detected via
+// PLpgSQL_stmt_assign scan).
+func TestResolve_TriggerNewColAssignment(t *testing.T) {
+	refs := []indexer.Reference{
+		{
+			Kind:   store.EdgeKindBodyReferences,
+			Source: "sym:public.audit_trigger",
+			Target: "NEW.updated_at",
+			Metadata: map[string]any{
+				"op":              "read",
+				"trigger_special": true,
+				"context":         "assignment",
+			},
+		},
+	}
+	out := ResolveTriggerNewOld(refs, "users", "public")
+
+	for _, r := range out {
+		if v, _ := r.Metadata["trigger_special"].(bool); v {
+			t.Errorf("trigger_special not cleared: %v", r)
+		}
+	}
+
+	if !hasBodyRef(t, out, "write", "public.users.updated_at") {
+		t.Errorf("expected write ref to sym:public.users.updated_at; got %v", out)
 	}
 }
 
@@ -832,6 +862,61 @@ func TestResolve_TriggerSelectNewStar(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected read ref to sym:public.users for NEW.*; got %v", out)
+	}
+}
+
+// TestPlpgsql_TriggerNewWriteContextFlag verifies that a trigger function with
+// NEW.col := expr emits context=assignment on the trigger_special ref, and that
+// full resolution with a real triggerTarget produces op=write (lib-uer8).
+func TestPlpgsql_TriggerNewWriteContextFlag(t *testing.T) {
+	const funcSQL = `CREATE FUNCTION public.trigger_new_write() RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;`
+
+	result, err := pg_query.ParsePlPgSqlToJSON(funcSQL)
+	if err != nil {
+		t.Fatal("parse failed:", err)
+	}
+	var funcs []map[string]any
+	if err := json.Unmarshal([]byte(result), &funcs); err != nil {
+		t.Fatal("unmarshal failed:", err)
+	}
+	if len(funcs) == 0 {
+		t.Fatal("no functions parsed")
+	}
+	funcData, _ := funcs[0]["PLpgSQL_function"].(map[string]any)
+	if funcData == nil {
+		t.Fatal("PLpgSQL_function node missing")
+	}
+
+	newVarno := plpgsqlIntField(funcData, "new_varno")
+	oldVarno := plpgsqlIntField(funcData, "old_varno")
+	action, _ := funcData["action"].(map[string]any)
+	datums, _ := funcData["datums"].([]any)
+
+	assignedDnos := plpgsqlScanAssignedDnos(action)
+	rawRefs := plpgsqlTriggerFieldRefs(datums, newVarno, oldVarno, "public.trigger_new_write", assignedDnos)
+
+	// Verify context=assignment is set for the assigned NEW.updated_at ref.
+	foundAssignment := false
+	for _, r := range rawRefs {
+		if r.Target == "NEW.updated_at" {
+			if ctx, _ := r.Metadata["context"].(string); ctx == "assignment" {
+				foundAssignment = true
+			}
+		}
+	}
+	if !foundAssignment {
+		t.Errorf("expected context=assignment on NEW.updated_at ref; got %v", rawRefs)
+	}
+
+	// Full resolution with a real triggerTarget must produce op=write.
+	resolved := ResolveTriggerNewOld(rawRefs, "my_table", "public")
+	if !hasBodyRef(t, resolved, "write", "public.my_table.updated_at") {
+		t.Errorf("expected write ref to sym:public.my_table.updated_at; got %v", resolved)
 	}
 }
 
