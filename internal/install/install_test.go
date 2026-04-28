@@ -86,8 +86,9 @@ func TestRun_AllPlatformsEndToEnd(t *testing.T) {
 	// /librarian is actually invocable.
 	mustExist(t, filepath.Join(ws.Root, ".claude", "skills", "librarian", "SKILL.md"))
 
-	// Git hook.
-	mustContain(t, filepath.Join(ws.Root, ".git", "hooks", "post-commit"), "librarian index")
+	// Git hook — template uses a resolved $bin variable so the literal
+	// "librarian index" doesn't appear; assert on the invariant call shape.
+	mustContain(t, filepath.Join(ws.Root, ".git", "hooks", "post-commit"), `"$bin" index`)
 }
 
 func TestRun_IdempotentReRun(t *testing.T) {

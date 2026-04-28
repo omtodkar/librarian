@@ -3,6 +3,7 @@ package install
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -22,8 +23,8 @@ func TestInstallGitPostCommit_FreshRepo(t *testing.T) {
 	if !strings.Contains(content, "librarian:start") {
 		t.Errorf("missing start marker:\n%s", content)
 	}
-	if !strings.Contains(content, "librarian index") {
-		t.Errorf("hook body missing librarian index invocation:\n%s", content)
+	if !strings.Contains(content, `"$bin" index`) {
+		t.Errorf("hook body missing `$bin index` invocation:\n%s", content)
 	}
 
 	// Executable bit.
@@ -121,8 +122,75 @@ func TestInstallGitPostCommit_Worktree(t *testing.T) {
 		t.Errorf("expected hook under %s, got %s", wantPrefix, path)
 	}
 	mustExist := readString(t, path)
-	if !strings.Contains(mustExist, "librarian index") {
-		t.Errorf("worktree hook missing body:\n%s", mustExist)
+	if !strings.Contains(mustExist, `"$bin" index`) {
+		t.Errorf("worktree hook missing `$bin index` body:\n%s", mustExist)
+	}
+}
+
+// Binary resolution: the template must prefer a repo-local ./librarian
+// over the $PATH lookup. This matters during development (librarian's
+// own checkout doesn't put the binary on $PATH) and for any workspace
+// where librarian lives at the repo root rather than a system location.
+//
+// Regression guard for a real bug: prior template required $PATH exclusively
+// and silently no-op'd every commit on workspaces that only had ./librarian.
+func TestPostCommitTemplate_PrefersRepoLocalBinaryBeforePATH(t *testing.T) {
+	body := tmplGitPostCommit
+	if !strings.Contains(body, `"$repo_root/librarian"`) {
+		t.Errorf("template should check repo-local $repo_root/librarian; got:\n%s", body)
+	}
+	// The repo-local -x test MUST come before the command -v PATH lookup,
+	// otherwise a coincidentally-installed librarian on $PATH would mask the
+	// repo-local binary during development.
+	localIdx := strings.Index(body, `-x "$repo_root/librarian"`)
+	pathIdx := strings.Index(body, `command -v librarian`)
+	if localIdx < 0 || pathIdx < 0 {
+		t.Fatalf("missing expected resolver checks: local=%d path=%d", localIdx, pathIdx)
+	}
+	if localIdx > pathIdx {
+		t.Errorf("repo-local check (idx=%d) must come before PATH check (idx=%d)", localIdx, pathIdx)
+	}
+}
+
+// Concurrency guard: a rebase / cherry-pick / merge storm triggers one
+// post-commit hook per commit. Without a lockfile, N concurrent background
+// re-indexes race against the same SQLite database. The template must
+// serialize via .librarian/out/post-commit.lock with PID-liveness checks
+// so stale locks from crashed runs don't wedge the hook forever.
+func TestPostCommitTemplate_HasLockfileWithLivenessCheck(t *testing.T) {
+	body := tmplGitPostCommit
+	if !strings.Contains(body, "post-commit.lock") {
+		t.Errorf("template should use a lockfile at .librarian/out/post-commit.lock; got:\n%s", body)
+	}
+	if !strings.Contains(body, "kill -0") {
+		t.Errorf("template should probe lockfile's PID via kill -0 for liveness; got:\n%s", body)
+	}
+	if !strings.Contains(body, `rm -f "$lock"`) {
+		t.Errorf("template should clear stale lockfile (rm -f) when owner PID is gone; got:\n%s", body)
+	}
+}
+
+// Log preservation: both `librarian index` and `librarian report` output
+// must APPEND to the log (>>) rather than truncate with >. Truncating on
+// every run destroys history mid-debug — if a commit's index fails and the
+// next commit succeeds, the failure record is gone by the time the user
+// opens the log.
+//
+// Regression guard: prior template used `>"$log"` for the index invocation,
+// wiping the log every commit.
+func TestPostCommitTemplate_AppendsToLogInsteadOfTruncating(t *testing.T) {
+	body := tmplGitPostCommit
+	// Catch any single > redirect to $log. Go regexp has no negative
+	// lookbehind, so we match the character BEFORE the > and require it
+	// not be another > (or start-of-line, but redirects aren't ever at
+	// column 0 in this template). This cleanly distinguishes >"$log"
+	// from the allowed >>"$log".
+	truncate := regexp.MustCompile(`[^>]>[ \t]*"\$log"`)
+	if truncate.MatchString(body) {
+		t.Errorf("template must not truncate the log with single >; use >> to append. body:\n%s", body)
+	}
+	if !strings.Contains(body, `>> "$log"`) {
+		t.Errorf("template should redirect output to log via >>; got:\n%s", body)
 	}
 }
 
