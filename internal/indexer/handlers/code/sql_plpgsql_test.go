@@ -7,11 +7,8 @@ package code
 // only in-memory Reference records are verified.
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
-
-	pg_query "github.com/pganalyze/pg_query_go/v6"
 
 	"librarian/internal/indexer"
 	"librarian/internal/store"
@@ -865,10 +862,10 @@ func TestResolve_TriggerSelectNewStar(t *testing.T) {
 	}
 }
 
-// TestPlpgsql_TriggerNewWriteContextFlag verifies that a trigger function with
-// NEW.col := expr emits context=assignment on the trigger_special ref, and that
-// full resolution with a real triggerTarget produces op=write (lib-uer8).
-func TestPlpgsql_TriggerNewWriteContextFlag(t *testing.T) {
+// TestPlpgsql_TriggerNewWriteFullPipeline verifies the full
+// plpgsqlParseAndResolve pipeline for a trigger with NEW.col := expr:
+// when called with a real triggerTarget it must produce op=write (lib-uer8).
+func TestPlpgsql_TriggerNewWriteFullPipeline(t *testing.T) {
 	const funcSQL = `CREATE FUNCTION public.trigger_new_write() RETURNS trigger AS $$
 BEGIN
   NEW.updated_at := now();
@@ -876,47 +873,84 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;`
 
-	result, err := pg_query.ParsePlPgSqlToJSON(funcSQL)
-	if err != nil {
-		t.Fatal("parse failed:", err)
-	}
-	var funcs []map[string]any
-	if err := json.Unmarshal([]byte(result), &funcs); err != nil {
-		t.Fatal("unmarshal failed:", err)
-	}
-	if len(funcs) == 0 {
-		t.Fatal("no functions parsed")
-	}
-	funcData, _ := funcs[0]["PLpgSQL_function"].(map[string]any)
-	if funcData == nil {
-		t.Fatal("PLpgSQL_function node missing")
+	refs, ok := plpgsqlParseAndResolve("public.trigger_new_write", "public", funcSQL, "my_table")
+	if !ok {
+		t.Fatal("parse failed")
 	}
 
-	newVarno := plpgsqlIntField(funcData, "new_varno")
-	oldVarno := plpgsqlIntField(funcData, "old_varno")
-	action, _ := funcData["action"].(map[string]any)
-	datums, _ := funcData["datums"].([]any)
-
-	assignedDnos := plpgsqlScanAssignedDnos(action)
-	rawRefs := plpgsqlTriggerFieldRefs(datums, newVarno, oldVarno, "public.trigger_new_write", assignedDnos)
-
-	// Verify context=assignment is set for the assigned NEW.updated_at ref.
-	foundAssignment := false
-	for _, r := range rawRefs {
-		if r.Target == "NEW.updated_at" {
-			if ctx, _ := r.Metadata["context"].(string); ctx == "assignment" {
-				foundAssignment = true
-			}
-		}
+	if !hasBodyRef(t, refs, "write", "public.my_table.updated_at") {
+		t.Errorf("expected write ref to sym:public.my_table.updated_at; got %v", refs)
 	}
-	if !foundAssignment {
-		t.Errorf("expected context=assignment on NEW.updated_at ref; got %v", rawRefs)
+}
+
+// TestPlpgsql_TriggerNewReadFullPipeline verifies that a trigger where NEW.col
+// is read (not assigned) still emits op=read after full pipeline resolution.
+func TestPlpgsql_TriggerNewReadFullPipeline(t *testing.T) {
+	const funcSQL = `CREATE FUNCTION public.trigger_new_read() RETURNS trigger AS $$
+BEGIN
+  INSERT INTO audit(email) VALUES (NEW.email);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;`
+
+	refs, ok := plpgsqlParseAndResolve("public.trigger_new_read", "public", funcSQL, "users")
+	if !ok {
+		t.Fatal("parse failed")
 	}
 
-	// Full resolution with a real triggerTarget must produce op=write.
-	resolved := ResolveTriggerNewOld(rawRefs, "my_table", "public")
-	if !hasBodyRef(t, resolved, "write", "public.my_table.updated_at") {
-		t.Errorf("expected write ref to sym:public.my_table.updated_at; got %v", resolved)
+	if !hasBodyRef(t, refs, "read", "public.users.email") {
+		t.Errorf("expected read ref to sym:public.users.email; got %v", refs)
+	}
+	if hasBodyRef(t, refs, "write", "public.users.email") {
+		t.Errorf("unexpected write ref to sym:public.users.email; got %v", refs)
+	}
+}
+
+// TestPlpgsql_TriggerMixedReadWrite verifies that when a trigger both reads and
+// assigns NEW.col, the assignment field gets op=write and a different read-only
+// field gets op=read.
+func TestPlpgsql_TriggerMixedReadWrite(t *testing.T) {
+	const funcSQL = `CREATE FUNCTION public.trigger_mixed() RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at := now();
+  INSERT INTO audit(email) VALUES (NEW.email);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;`
+
+	refs, ok := plpgsqlParseAndResolve("public.trigger_mixed", "public", funcSQL, "users")
+	if !ok {
+		t.Fatal("parse failed")
+	}
+
+	if !hasBodyRef(t, refs, "write", "public.users.updated_at") {
+		t.Errorf("expected write ref for assigned NEW.updated_at; got %v", refs)
+	}
+	if !hasBodyRef(t, refs, "read", "public.users.email") {
+		t.Errorf("expected read ref for read-only NEW.email; got %v", refs)
+	}
+}
+
+// TestPlpgsql_TriggerNewWriteInLoop verifies that NEW.col := expr inside a
+// LOOP body is detected as a write (PLpgSQL_stmt_loop scan — lib-uer8).
+func TestPlpgsql_TriggerNewWriteInLoop(t *testing.T) {
+	const funcSQL = `CREATE FUNCTION public.trigger_loop_write() RETURNS trigger AS $$
+BEGIN
+  LOOP
+    NEW.seq := NEW.seq + 1;
+    EXIT WHEN NEW.seq >= 5;
+  END LOOP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;`
+
+	refs, ok := plpgsqlParseAndResolve("public.trigger_loop_write", "public", funcSQL, "my_table")
+	if !ok {
+		t.Fatal("parse failed")
+	}
+
+	if !hasBodyRef(t, refs, "write", "public.my_table.seq") {
+		t.Errorf("expected write ref for NEW.seq assigned inside LOOP; got %v", refs)
 	}
 }
 

@@ -37,7 +37,21 @@ import (
 //
 // Returns (refs, true) on success or (nil, false) on parse error; callers
 // should set unit.Metadata["partial"]=true when ok is false.
+// plpgsqlExtractRefs parses a PL/pgSQL function body and extracts in-memory
+// body reference records. fullFuncSQL must be the complete CREATE FUNCTION ...
+// LANGUAGE plpgsql statement (not just the body text).
+//
+// Returns (refs, true) on success or (nil, false) on parse error; callers
+// should set unit.Metadata["partial"]=true when ok is false.
 func plpgsqlExtractRefs(funcPath, defaultSchema, fullFuncSQL string) ([]indexer.Reference, bool) {
+	return plpgsqlParseAndResolve(funcPath, defaultSchema, fullFuncSQL, "")
+}
+
+// plpgsqlParseAndResolve is the shared implementation used by plpgsqlExtractRefs
+// and tests. triggerTarget is passed through to ResolveTriggerNewOld: when "", trigger_special
+// refs are dropped (normal parse-time path); when non-empty, they are resolved
+// to sym: paths against that table (used by tests to exercise the full pipeline).
+func plpgsqlParseAndResolve(funcPath, defaultSchema, fullFuncSQL, triggerTarget string) ([]indexer.Reference, bool) {
 	result, err := pg_query.ParsePlPgSqlToJSON(fullFuncSQL)
 	if err != nil {
 		slog.Debug("plpgsql body parse error", "func", funcPath, "err", err)
@@ -76,12 +90,8 @@ func plpgsqlExtractRefs(funcPath, defaultSchema, fullFuncSQL string) ([]indexer.
 		refs = append(refs, plpgsqlTriggerFieldRefs(datums, newVarno, oldVarno, funcPath, assignedDnos)...)
 	}
 
-	// lib-o5dn.4: resolve pending_execute and trigger_special refs.
-	// triggerTarget is not available at function-parse time (it lives on the
-	// CREATE TRIGGER unit); pass "" so ResolveTriggerNewOld drops unresolvable
-	// trigger_special refs rather than producing malformed sym: paths.
 	refs = ResolveDynamicExecute(refs, nil)
-	refs = ResolveTriggerNewOld(refs, "", defaultSchema)
+	refs = ResolveTriggerNewOld(refs, triggerTarget, defaultSchema)
 
 	return refs, true
 }
@@ -491,7 +501,8 @@ func plpgsqlScanAssignStmt(stmt map[string]any, assigned map[int]bool) {
 			if elseStmts, ok := data["else_stmts"].([]any); ok {
 				plpgsqlScanAssignStmtList(elseStmts, assigned)
 			}
-		case "PLpgSQL_stmt_fors", "PLpgSQL_stmt_fori", "PLpgSQL_stmt_while":
+		case "PLpgSQL_stmt_fors", "PLpgSQL_stmt_fori", "PLpgSQL_stmt_while",
+			"PLpgSQL_stmt_loop", "PLpgSQL_stmt_foreach_a":
 			if body, ok := data["body"].([]any); ok {
 				plpgsqlScanAssignStmtList(body, assigned)
 			}
