@@ -2487,6 +2487,46 @@ func TestPEP695_FunctionBodyNestedClassNotDescended(t *testing.T) {
 	}
 }
 
+func TestPEP695_MethodBodyNestedClassNotDescended(t *testing.T) {
+	// Documents the current limitation: extractPEP695TypeVars does NOT descend
+	// method bodies. A class defined inside a method that references the outer
+	// class's PEP 695 TypeVar via Generic[T] does not produce an inherits ref
+	// because the method body is never walked.
+	//
+	// When function-body descent is added, this test should be updated to verify
+	// that Generic[T] inside the method body IS resolved to sym:mymod.Outer.T
+	// (LEGB chain: method scope → class scope). See lib-udam.7 for the
+	// follow-up tracking.
+	//
+	// class Outer[T]:
+	//     def method(self):
+	//         class Inner(Generic[T]):
+	//             pass
+	src := []byte(`class Outer[T]:
+    def method(self):
+        class Inner(Generic[T]):
+            pass
+`)
+	h := code.New(code.NewPythonGrammar())
+	doc, err := h.Parse("mymod.py", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// Outer's TypeVar T must be emitted (class-level TypeVars are always walked).
+	outerT := findTypeVarUnit(doc, "T")
+	if outerT == nil {
+		t.Fatalf("expected typevar unit T from Outer; units: %+v", typeVarUnits(doc))
+	}
+	if outerT.Path != "mymod.Outer.T" {
+		t.Errorf("Outer.T Path = %q, want mymod.Outer.T", outerT.Path)
+	}
+	// Inner is inside a method body — no inherits refs should be produced for it.
+	innerRefs := inheritsRefsBySource(doc, "mymod.Outer.method.Inner")
+	if len(innerRefs) != 0 {
+		t.Errorf("expected no inherits refs for method-body-nested Inner; got %+v", innerRefs)
+	}
+}
+
 func TestPEP695_ClassUsesOwnTypeVarInGenericBase(t *testing.T) {
 	// class Foo[T](Generic[T]): — Foo uses its own PEP 695 TypeVar T in its
 	// own Generic base list. This exercises the i==len(parts) case of
