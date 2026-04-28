@@ -581,7 +581,10 @@ func (idx *Indexer) runGraphWorkers(files []WalkResult, shared *GraphResult, for
 		if err := idx.indexGraphFileDirect(affFile, dummy, true); err != nil {
 			shared.Errors = append(shared.Errors, fmt.Sprintf("reconstitute %s: %s", affPath, err))
 		}
-		mergeGraphResult(shared, dummy)
+		// Reconstitution is a correctness repair pass, not a first-class indexing
+		// event. Only propagate non-fatal per-symbol errors; skip metric counters
+		// to avoid double-counting files that also appeared in the walk queue.
+		shared.Errors = append(shared.Errors, dummy.Errors...)
 		return true
 	})
 }
