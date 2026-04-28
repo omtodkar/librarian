@@ -349,6 +349,48 @@ END`))
 	}
 }
 
+// TestPlpgsql_MergeStatement verifies MERGE emits both to the target and read
+// to the source relation.
+func TestPlpgsql_MergeStatement(t *testing.T) {
+	refs, ok := plpgsqlExtractRefs(plTestFuncPath, plTestSchema, wrap(`
+BEGIN
+  MERGE INTO target USING source ON target.id = source.id
+  WHEN MATCHED THEN UPDATE SET name = source.name
+  WHEN NOT MATCHED THEN INSERT (id, name) VALUES (source.id, source.name);
+END`))
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if !hasBodyRef(t, refs, "both", "public.target") {
+		t.Errorf("missing both ref to public.target; got %v", refs)
+	}
+	if !hasBodyRef(t, refs, "read", "public.source") {
+		t.Errorf("missing read ref to public.source; got %v", refs)
+	}
+}
+
+// TestPlpgsql_CaseWhen verifies CASE WHEN branches are walked and refs collected
+// from both THEN and ELSE bodies.
+func TestPlpgsql_CaseWhen(t *testing.T) {
+	refs, ok := plpgsqlExtractRefs(plTestFuncPath, plTestSchema, wrap(`
+DECLARE x int := 1;
+BEGIN
+  CASE x
+    WHEN 1 THEN INSERT INTO t1(v) VALUES (1);
+    ELSE INSERT INTO t2(v) VALUES (2);
+  END CASE;
+END`))
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if !hasBodyRef(t, refs, "write", "public.t1") {
+		t.Errorf("missing write ref to public.t1 (THEN branch); got %v", refs)
+	}
+	if !hasBodyRef(t, refs, "write", "public.t2") {
+		t.Errorf("missing write ref to public.t2 (ELSE branch); got %v", refs)
+	}
+}
+
 // TestPlpgsql_ExecutePendingFlag verifies EXECUTE nodes are captured with
 // pending_execute=true and not resolved.
 func TestPlpgsql_ExecutePendingFlag(t *testing.T) {
