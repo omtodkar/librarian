@@ -1,6 +1,8 @@
 package code_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -491,6 +493,53 @@ func TestSQLGrammar_MigrationDetection_Sqlx(t *testing.T) {
 
 	if tool, _ := doc.Metadata["migration_tool"].(string); tool != "sqlx" {
 		t.Errorf("migration_tool = %q, want %q", tool, "sqlx")
+	}
+}
+
+func TestSQLGrammar_MigrationDetection_Dbmate(t *testing.T) {
+	// dbmate files use the same dir+regex as goose but contain "-- migrate:up".
+	src := `-- migrate:up
+CREATE TABLE users (id SERIAL);
+-- migrate:down
+DROP TABLE users;`
+	doc := parseSQLDoc(t, "db/migrations/20230101123456_create_users.sql", src)
+
+	if tool, _ := doc.Metadata["migration_tool"].(string); tool != "dbmate" {
+		t.Errorf("migration_tool = %q, want %q", tool, "dbmate")
+	}
+}
+
+func TestSQLGrammar_MigrationDetection_Atlas(t *testing.T) {
+	// atlas files use the same dir+regex as goose but have an atlas.sum sibling.
+	migrationsDir := filepath.Join(t.TempDir(), "migrations")
+	if err := os.MkdirAll(migrationsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(migrationsDir, "atlas.sum"), []byte("h1:abc123\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile atlas.sum: %v", err)
+	}
+
+	sqlPath := filepath.Join(migrationsDir, "20230101123456_create_users.sql")
+	src := []byte("CREATE TABLE users (id SERIAL);")
+
+	h := code.New(code.NewSQLGrammar())
+	doc, err := h.Parse(sqlPath, src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if tool, _ := doc.Metadata["migration_tool"].(string); tool != "atlas" {
+		t.Errorf("migration_tool = %q, want %q", tool, "atlas")
+	}
+}
+
+func TestSQLGrammar_MigrationDetection_GooseNotDbmate(t *testing.T) {
+	// When no dbmate or atlas markers are present, goose is the fallback.
+	src := `CREATE TABLE users (id SERIAL);`
+	doc := parseSQLDoc(t, "db/migrations/20230101123456_create_users.sql", src)
+
+	if tool, _ := doc.Metadata["migration_tool"].(string); tool != "goose" {
+		t.Errorf("migration_tool = %q, want %q (no dbmate/atlas markers present)", tool, "goose")
 	}
 }
 

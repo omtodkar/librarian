@@ -41,6 +41,8 @@ package code
 //   - "sequence" — CREATE SEQUENCE
 //   - "schema"   — CREATE SCHEMA
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -93,7 +95,7 @@ func (g *SQLGrammar) PostProcess(doc *indexer.ParsedDoc, root *sitter.Node, sour
 	if doc.Metadata == nil {
 		doc.Metadata = map[string]any{}
 	}
-	if tool := detectMigrationTool(doc.Path); tool != "" {
+	if tool := detectMigrationTool(doc.Path, source); tool != "" {
 		doc.Metadata["migration_tool"] = tool
 	}
 	sqlExtractAll(root, source, doc)
@@ -982,23 +984,36 @@ func sqlExtractAlterTableFKs(n *sitter.Node, source []byte, doc *indexer.ParsedD
 // --- Migration tool detection ---
 
 type migrationConvention struct {
-	Tool      string
-	DirNames  []string
-	FileRegex *regexp.Regexp
+	Tool          string
+	DirNames      []string
+	FileRegex     *regexp.Regexp
+	ContentMarker string // if non-empty, file content must contain this substring
+	SiblingFile   string // if non-empty, this file must exist in the same directory
 }
 
 // migrationConventions is an ordered allow-list matched by first-win semantics.
-// Entries must be ordered from most-specific to least-specific — an entry whose
-// DirNames and FileRegex are a strict subset of an earlier entry can never be
-// reached and would be dead code.
-//
-// dbmate and atlas are intentionally absent: both share the same
-// DirNames/FileRegex as goose (db/migrations or migrations + 14-digit prefix),
-// so they would be permanently shadowed. Proper disambiguation requires
-// content-based detection (dbmate uses "-- migrate:up" comments; atlas uses
-// an atlas.sum sibling file). That is tracked in lib-jeev.
+// dbmate, atlas, and goose all share DirNames and FileRegex, so they are
+// disambiguated by additional constraints checked after the dir+regex match:
+//   - dbmate:  content must contain "-- migrate:up"
+//   - atlas:   directory must contain an "atlas.sum" sibling file
+//   - goose:   fallback when neither dbmate nor atlas markers are present
 var migrationConventions = []migrationConvention{
 	{
+		// dbmate: same dir+regex as goose, distinguished by content marker.
+		Tool:          "dbmate",
+		DirNames:      []string{"migrations", "db/migrations"},
+		FileRegex:     regexp.MustCompile(`^\d{14}_.*\.sql$`),
+		ContentMarker: "-- migrate:up",
+	},
+	{
+		// atlas: same dir+regex as goose, distinguished by atlas.sum sibling.
+		Tool:        "atlas",
+		DirNames:    []string{"migrations", "db/migrations"},
+		FileRegex:   regexp.MustCompile(`^\d{14}_.*\.sql$`),
+		SiblingFile: "atlas.sum",
+	},
+	{
+		// goose: fallback for 14-digit-prefix migrations with no dbmate/atlas markers.
 		Tool:      "goose",
 		DirNames:  []string{"migrations", "db/migrations"},
 		FileRegex: regexp.MustCompile(`^\d{14}_.*\.sql$`),
@@ -1018,14 +1033,14 @@ var migrationConventions = []migrationConvention{
 }
 
 // detectMigrationTool returns the first matching migration tool name for a
-// .sql file path, or "" if none match. Matching is based on parent directory
-// name pattern and filename convention. First match wins.
-func detectMigrationTool(path string) string {
+// .sql file, or "" if none match. Matching uses dir+regex as a first gate,
+// then checks ContentMarker (substring in file content) and SiblingFile
+// (sibling file existence) when present. First match wins.
+func detectMigrationTool(path string, content []byte) string {
 	dir := filepath.ToSlash(filepath.Dir(path))
 	base := filepath.Base(path)
 
 	for _, conv := range migrationConventions {
-		// Check if the file is in a matching directory.
 		dirMatches := false
 		for _, pattern := range conv.DirNames {
 			if dir == pattern || strings.HasSuffix(dir, "/"+pattern) {
@@ -1033,11 +1048,24 @@ func detectMigrationTool(path string) string {
 				break
 			}
 		}
-		if dirMatches && conv.FileRegex.MatchString(base) {
-			return conv.Tool
+		if !dirMatches || !conv.FileRegex.MatchString(base) {
+			continue
 		}
+		if conv.ContentMarker != "" && !bytes.Contains(content, []byte(conv.ContentMarker)) {
+			continue
+		}
+		if conv.SiblingFile != "" && !siblingExists(path, conv.SiblingFile) {
+			continue
+		}
+		return conv.Tool
 	}
 	return ""
+}
+
+// siblingExists reports whether name exists as a file sibling to path.
+func siblingExists(path, name string) bool {
+	_, err := os.Stat(filepath.Join(filepath.Dir(path), name))
+	return err == nil
 }
 
 func init() {
