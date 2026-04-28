@@ -72,8 +72,9 @@ func ResolveDynamicExecute(refs []indexer.Reference, declaredVars map[string]boo
 // ResolveTriggerNewOld resolves body_references refs that carry
 // trigger_special=true (emitted by plpgsqlTriggerFieldRefs).
 //
-// For NEW.col: rewrites Target to sym:<schema>.<triggerTarget>.<col> with
-// op=write.
+// For NEW.col: rewrites Target to sym:<schema>.<triggerTarget>.<col>,
+// preserving the walker's op (read for datum-level refs; assignment-context
+// detection is deferred to lib-uer8).
 // For OLD.col: rewrites Target to sym:<schema>.<triggerTarget>.<col> with
 // op=read.
 // For NEW.* (wildcard, table-level read): emits a table-level ref.
@@ -102,42 +103,43 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 		}
 
 		target := r.Target
+		// Preserve the walker's op; write-context detection (PLpgSQL_stmt_assign
+		// scanning) is a future improvement tracked in lib-uer8.
+		op, _ := r.Metadata["op"].(string)
+		if op == "" {
+			op = "read"
+		}
 
 		switch {
+		// NOTE: current walker never emits NEW.* refs; this branch is a future
+		// extension point for PLpgSQL SELECT NEW.* detection.
 		case target == "NEW.*":
-			// Table-level read of the whole NEW record.
 			tableTarget := "sym:" + schema + "." + triggerTarget
 			out = append(out, indexer.Reference{
-				Kind:   edgeKindBodyReferences,
-				Source: r.Source,
-				Target: tableTarget,
-				Metadata: map[string]any{
-					"op": "read",
-				},
+				Kind:     edgeKindBodyReferences,
+				Source:   r.Source,
+				Target:   tableTarget,
+				Metadata: map[string]any{"op": "read"},
 			})
 
 		case strings.HasPrefix(target, "NEW."):
 			col := strings.TrimPrefix(target, "NEW.")
 			symTarget := "sym:" + schema + "." + triggerTarget + "." + col
 			out = append(out, indexer.Reference{
-				Kind:   edgeKindBodyReferences,
-				Source: r.Source,
-				Target: symTarget,
-				Metadata: map[string]any{
-					"op": "write",
-				},
+				Kind:     edgeKindBodyReferences,
+				Source:   r.Source,
+				Target:   symTarget,
+				Metadata: map[string]any{"op": op},
 			})
 
 		case strings.HasPrefix(target, "OLD."):
 			col := strings.TrimPrefix(target, "OLD.")
 			symTarget := "sym:" + schema + "." + triggerTarget + "." + col
 			out = append(out, indexer.Reference{
-				Kind:   edgeKindBodyReferences,
-				Source: r.Source,
-				Target: symTarget,
-				Metadata: map[string]any{
-					"op": "read",
-				},
+				Kind:     edgeKindBodyReferences,
+				Source:   r.Source,
+				Target:   symTarget,
+				Metadata: map[string]any{"op": "read"},
 			})
 		}
 		// Any other trigger_special target (e.g. bare "NEW"/"OLD") is dropped.
@@ -145,33 +147,55 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 	return out
 }
 
-// isStringLiteralExpr reports whether expr is a single SQL string literal
-// (e.g. "'INSERT INTO t VALUES (1)'") and returns the unescaped inner
-// content.  Returns (false, "") for concatenations, variables, or other
-// non-literal expressions.
+// isStringLiteralExpr reports whether expr is a single SQL string literal and
+// returns the unescaped inner content.  Recognises two forms:
+//   - Single-quoted: 'INSERT INTO t VALUES (1)'  ('' = escaped quote inside)
+//   - Dollar-quoted: $$INSERT INTO t$$ or $tag$INSERT INTO t$tag$
+//
+// Returns (false, "") for concatenations, variables, or other non-literal
+// expressions.
 func isStringLiteralExpr(expr string) (bool, string) {
 	s := strings.TrimSpace(expr)
-	if len(s) < 2 || s[0] != '\'' {
+
+	// Single-quoted string literal.
+	if len(s) >= 2 && s[0] == '\'' {
+		i := 1
+		for i < len(s) {
+			if s[i] == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i += 2 // SQL escaped quote ''
+					continue
+				}
+				// Closing quote found — verify nothing follows.
+				rest := strings.TrimSpace(s[i+1:])
+				if rest != "" {
+					return false, ""
+				}
+				inner := s[1:i]
+				inner = strings.ReplaceAll(inner, "''", "'")
+				return true, inner
+			}
+			i++
+		}
 		return false, ""
 	}
-	i := 1
-	for i < len(s) {
-		if s[i] == '\'' {
-			if i+1 < len(s) && s[i+1] == '\'' {
-				i += 2 // SQL escaped quote ''
-				continue
+
+	// Dollar-quoted string literal: $$...$$  or  $tag$...$tag$
+	if len(s) >= 4 && s[0] == '$' {
+		tagEnd := strings.Index(s[1:], "$")
+		if tagEnd >= 0 {
+			tag := s[0 : tagEnd+2] // e.g., "$$" or "$body$"
+			if strings.HasSuffix(s, tag) && len(s) >= 2*len(tag) {
+				inner := s[len(tag) : len(s)-len(tag)]
+				// Reject if the closing tag appears inside (would indicate
+				// multiple statements or a more complex expression).
+				if !strings.Contains(inner, tag) {
+					return true, inner
+				}
 			}
-			// Closing quote found — verify nothing follows.
-			rest := strings.TrimSpace(s[i+1:])
-			if rest != "" {
-				return false, ""
-			}
-			inner := s[1:i]
-			inner = strings.ReplaceAll(inner, "''", "'")
-			return true, inner
 		}
-		i++
 	}
+
 	return false, ""
 }
 

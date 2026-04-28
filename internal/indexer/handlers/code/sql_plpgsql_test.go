@@ -723,7 +723,8 @@ func TestResolve_ExecuteNested(t *testing.T) {
 }
 
 // TestResolve_TriggerNewColWrite verifies NEW.col is rewritten to a sym: path
-// with op=write.
+// preserving the walker's op (read — walker cannot distinguish assignment vs
+// condition context without PLpgSQL_stmt_assign scanning; tracked in lib-uer8).
 func TestResolve_TriggerNewColWrite(t *testing.T) {
 	refs := []indexer.Reference{
 		triggerSpecialRef("sym:public.audit_trigger", "NEW.email"),
@@ -736,8 +737,9 @@ func TestResolve_TriggerNewColWrite(t *testing.T) {
 		}
 	}
 
-	if !hasBodyRef(t, out, "write", "public.users.email") {
-		t.Errorf("expected write ref to sym:public.users.email; got %v", out)
+	// Walker emits op=read for all datum refs; resolver preserves it.
+	if !hasBodyRef(t, out, "read", "public.users.email") {
+		t.Errorf("expected read ref to sym:public.users.email; got %v", out)
 	}
 }
 
@@ -797,5 +799,34 @@ func TestResolve_TriggerSelectNewStar(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected read ref to sym:public.users for NEW.*; got %v", out)
+	}
+}
+
+// TestResolve_ExecuteDollarQuote verifies that dollar-quoted EXECUTE literals
+// are recognised as Case A (string literal) and resolved as table refs.
+func TestResolve_ExecuteDollarQuote(t *testing.T) {
+	refs := []indexer.Reference{
+		pendingExecuteRef("sym:public.testfunc", "$$DELETE FROM logs$$"),
+	}
+	out := ResolveDynamicExecute(refs, nil)
+
+	// No pending_execute should remain.
+	for _, r := range out {
+		if v, _ := r.Metadata["pending_execute"].(bool); v {
+			t.Errorf("pending_execute not cleared: %v", r)
+		}
+	}
+
+	// Should have a via_execute=true ref to public.logs.
+	found := false
+	for _, r := range out {
+		if r.Kind == edgeKindBodyReferences && r.Target == "sym:public.logs" {
+			if v, _ := r.Metadata["via_execute"].(bool); v {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected via_execute=true ref to sym:public.logs from $$...$$ literal; got %v", out)
 	}
 }
