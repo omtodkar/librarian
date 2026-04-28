@@ -300,26 +300,13 @@ func plpgsqlGetExprQuery(stmt map[string]any, fieldName string) string {
 // plpgsqlResolveCallTarget tries to extract a canonical "schema.name" procedure
 // path from a CALL expression string. Returns "" on failure.
 func plpgsqlResolveCallTarget(query, defaultSchema string) string {
-	result, err := pg_query.ParseToJSON(query)
-	if err != nil {
-		return plpgsqlExtractFirstIdent(query, defaultSchema)
+	// PLpgSQL_expr.query for PLpgSQL_stmt_call is the full CALL statement
+	// ("CALL proc(args)"). Strip the keyword, then extract the callee identifier.
+	trimmed := strings.TrimSpace(query)
+	if strings.HasPrefix(strings.ToUpper(trimmed), "CALL ") {
+		trimmed = strings.TrimSpace(trimmed[5:])
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
-		return plpgsqlExtractFirstIdent(query, defaultSchema)
-	}
-	stmts, _ := parsed["stmts"].([]any)
-	if len(stmts) == 0 {
-		return plpgsqlExtractFirstIdent(query, defaultSchema)
-	}
-	stmtWrapper, _ := stmts[0].(map[string]any)
-	stmtNode, _ := stmtWrapper["stmt"].(map[string]any)
-	if callStmt, ok := stmtNode["CallStmt"].(map[string]any); ok {
-		if name := plpgsqlFuncCallName(callStmt["funccall"], defaultSchema); name != "" {
-			return name
-		}
-	}
-	return plpgsqlExtractFirstIdent(query, defaultSchema)
+	return plpgsqlExtractFirstIdent(trimmed, defaultSchema)
 }
 
 // plpgsqlFuncCallName extracts "schema.name" from a FuncCall JSON node.
@@ -327,6 +314,11 @@ func plpgsqlFuncCallName(funccall any, defaultSchema string) string {
 	fc, _ := funccall.(map[string]any)
 	if fc == nil {
 		return ""
+	}
+	// pg_query wraps FuncCall nodes as {"FuncCall": {...}} in expression contexts;
+	// unwrap if present so funcname is accessible at the right level.
+	if inner, ok := fc["FuncCall"].(map[string]any); ok {
+		fc = inner
 	}
 	funcname, _ := fc["funcname"].([]any)
 	var parts []string

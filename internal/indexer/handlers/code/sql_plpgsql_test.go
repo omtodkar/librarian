@@ -180,6 +180,38 @@ END`))
 	}
 }
 
+// TestPlpgsql_QualifiedCallProcedure verifies CALL with a schema-qualified name
+// emits the correct procedure_call reference.
+func TestPlpgsql_QualifiedCallProcedure(t *testing.T) {
+	refs, ok := plpgsqlExtractRefs(plTestFuncPath, plTestSchema, wrap(`
+BEGIN
+  CALL audit.refresh_cache(1);
+END`))
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if !hasBodyRef(t, refs, "procedure_call", "audit.refresh_cache") {
+		t.Errorf("missing procedure_call ref to audit.refresh_cache; got %v", refs)
+	}
+}
+
+// TestPlpgsql_FuncCallNameWrapped verifies plpgsqlFuncCallName handles the
+// {"FuncCall": {...}} wrapper that pg_query uses in expression contexts.
+func TestPlpgsql_FuncCallNameWrapped(t *testing.T) {
+	wrapped := map[string]any{
+		"FuncCall": map[string]any{
+			"funcname": []any{
+				map[string]any{"String": map[string]any{"sval": "myschema"}},
+				map[string]any{"String": map[string]any{"sval": "myproc"}},
+			},
+		},
+	}
+	got := plpgsqlFuncCallName(wrapped, "public")
+	if got != "myschema.myproc" {
+		t.Errorf("plpgsqlFuncCallName(wrapped) = %q, want %q", got, "myschema.myproc")
+	}
+}
+
 // TestPlpgsql_QualifiedTable verifies schema-qualified table names are preserved.
 func TestPlpgsql_QualifiedTable(t *testing.T) {
 	refs, ok := plpgsqlExtractRefs(plTestFuncPath, plTestSchema, wrap(`
