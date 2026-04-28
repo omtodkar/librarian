@@ -348,6 +348,14 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 	// file exist in the store before resolution begins (lib-0pa.5).
 	idx.buildPythonTypeVarCrossModuleEdges(result)
 
+	// Generic bare-name → FQN resolver: rewrites placeholder inherits edges
+	// (bare parent names with no same-file import binding, and TS re-export
+	// chains where the per-file resolver mapped to a module-stem proxy that
+	// isn't a real symbol) to their fully-qualified workspace symbols. Runs
+	// after all other per-file projection passes so the full symbol set is
+	// available (lib-udam.3).
+	idx.buildGenericFQNResolutionEdges(result)
+
 	// Test-subject linker: emit tests edges from test files to their likely
 	// subject files via path-naming conventions (lib-8bg). Runs after all
 	// per-file projection so every code_file node exists in the store.

@@ -983,16 +983,16 @@ extend Base {
 		{"kotlin", "sym:com.example.kt.KtChild", "sym:com.example.kt.KtBase", "extends"},
 		// Swift's per-flavor heuristic: first inheritance_specifier on a
 		// class-flavor declaration is relation=extends. SwBase is in the
-		// same stem (no imports to resolve), so it stays as the bare
-		// name; since there's no cross-file symbol resolver, the
-		// unresolved=true flag lands but the edge still materialises.
-		{"swift", "sym:SwChild.SwChild", "sym:SwBase", "extends"},
+		// same stem (no imports to resolve), so the per-file resolver
+		// leaves it unresolved. The post-graph FQN resolver (lib-udam.3)
+		// rewrites it to the real symbol.
+		{"swift", "sym:SwChild.SwChild", "sym:SwBase.SwBase", "extends"},
 		// Dart's class heritage: `class DrChild extends DrBase implements
 		// Comparable with Mixable` emits three inherits edges. The
 		// extends edge (asserted here) is the clean case; the implements
 		// + mixes edges are verified in the dart_inheritance_all_relations
-		// subtest below.
-		{"dart", "sym:dr.child.DrChild", "sym:DrBase", "extends"},
+		// subtest below. DrBase is resolved by lib-udam.3 to its FQN.
+		{"dart", "sym:dr.child.DrChild", "sym:dr.base.DrBase", "extends"},
 	}
 
 	for _, tc := range cases {
@@ -1126,10 +1126,13 @@ extend Base {
 		if err != nil {
 			t.Fatalf("Neighbors: %v", err)
 		}
+		// DrBase and Mixable are resolved by the post-graph FQN resolver
+		// (lib-udam.3) to their fully-qualified sym: IDs. Comparable has
+		// no in-workspace definition and stays as a placeholder.
 		wantByTarget := map[string]string{
-			"sym:DrBase":     `"relation":"extends"`,
-			"sym:Comparable": `"relation":"implements"`,
-			"sym:Mixable":    `"relation":"mixes"`,
+			"sym:dr.base.DrBase":   `"relation":"extends"`,
+			"sym:Comparable":       `"relation":"implements"`,
+			"sym:dr.mixin.Mixable": `"relation":"mixes"`,
 		}
 		seen := map[string]string{}
 		for _, e := range edges {

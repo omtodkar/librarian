@@ -374,6 +374,40 @@ func (s *Store) ListEdgesWithMetadataContaining(kind, substring string) ([]Edge,
 	return out, rows.Err()
 }
 
+// ListEdgesByKind returns every graph_edges row with the given kind. Used by
+// post-graph-pass resolvers that need to iterate all edges of a specific kind
+// (e.g., the FQN resolution pass which scans all inherits edges for placeholders).
+func (s *Store) ListEdgesByKind(kind string) ([]Edge, error) {
+	rows, err := s.db.Query(
+		`SELECT from_node, to_node, kind, weight, metadata FROM graph_edges WHERE kind = ?`, kind)
+	if err != nil {
+		return nil, fmt.Errorf("list_edges_by_kind: %w", err)
+	}
+	defer rows.Close()
+	var out []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.From, &e.To, &e.Kind, &e.Weight, &e.Metadata); err != nil {
+			return nil, fmt.Errorf("list_edges_by_kind scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// DeleteEdge removes a single edge identified by its (from_node, to_node, kind)
+// triple. A no-op when the edge doesn't exist. Used by post-graph-pass resolvers
+// to replace placeholder edges with resolved ones.
+func (s *Store) DeleteEdge(from, to, kind string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM graph_edges WHERE from_node = ? AND to_node = ? AND kind = ?`,
+		from, to, kind)
+	if err != nil {
+		return fmt.Errorf("delete_edge: %w", err)
+	}
+	return nil
+}
+
 // ListEdges returns every graph_edges row. Companion to ListNodes for
 // graph-wide analytics.
 func (s *Store) ListEdges() ([]Edge, error) {
