@@ -1431,3 +1431,152 @@ CMD ["/app"]
 		t.Errorf("base stage expose = %v, want [8080]", expose)
 	}
 }
+
+// TestGraphPass_CopyFromExternalImage verifies that COPY --from=<external-image>
+// (a ref that contains '/' or ':' and matches no local stage) emits an external
+// import edge rather than being silently dropped.
+func TestGraphPass_CopyFromExternalImage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM alpine:3.19 AS runtime
+COPY --from=gcr.io/distroless/base /lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+CMD ["/app"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	// One for the FROM alpine base, one for the COPY --from external image.
+	if len(extRefs) != 2 {
+		t.Fatalf("expected 2 external import refs (FROM + COPY --from), got %d: %+v", len(extRefs), extRefs)
+	}
+
+	// Find the COPY --from ref specifically.
+	var copyFromRef *indexer.Reference
+	for i := range extRefs {
+		if strings.Contains(extRefs[i].Target, "distroless") {
+			copyFromRef = &extRefs[i]
+		}
+	}
+	if copyFromRef == nil {
+		t.Fatalf("expected external import ref for COPY --from=gcr.io/distroless/base, got refs: %+v", doc.Refs)
+	}
+	if copyFromRef.Target != "gcr.io/distroless/base" {
+		t.Errorf("Target = %q, want gcr.io/distroless/base", copyFromRef.Target)
+	}
+	if copyFromRef.Metadata["node_kind"] != "external" {
+		t.Errorf("node_kind = %q, want external", copyFromRef.Metadata["node_kind"])
+	}
+	if copyFromRef.Source != "stage:runtime" {
+		t.Errorf("Source = %q, want stage:runtime", copyFromRef.Source)
+	}
+
+	// No spurious copy-from (inherits) edge should be emitted for an external ref.
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 0 {
+		t.Errorf("expected no copy-from inherits edges for external ref, got %d: %+v", len(copyEdges), copyEdges)
+	}
+}
+
+// TestGraphPass_CopyFromExternalImage_Tagged verifies that a tagged external image
+// in COPY --from (e.g. gcr.io/distroless/base:nonroot) is also handled.
+func TestGraphPass_CopyFromExternalImage_Tagged(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN go build -o /app .
+
+FROM gcr.io/distroless/base:nonroot AS final
+COPY --from=builder /app /app
+COPY --from=gcr.io/distroless/base:debug /busybox/sh /busybox/sh
+CMD ["/app"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// One copy-from inherits edge (builder → final) and one external import for
+	// the COPY --from=gcr.io/distroless/base:debug ref.
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 1 {
+		t.Fatalf("expected 1 copy-from inherits edge, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	if copyEdges[0].Source != "stage:final" || copyEdges[0].Target != "stage:builder" {
+		t.Errorf("copy-from edge = {%q→%q}, want {stage:final→stage:builder}", copyEdges[0].Source, copyEdges[0].Target)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	var debugRef *indexer.Reference
+	for i := range extRefs {
+		if strings.Contains(extRefs[i].Target, "debug") {
+			debugRef = &extRefs[i]
+		}
+	}
+	if debugRef == nil {
+		t.Fatalf("expected external import ref for COPY --from=gcr.io/distroless/base:debug, refs: %+v", extRefs)
+	}
+	if debugRef.Target != "gcr.io/distroless/base:debug" {
+		t.Errorf("Target = %q, want gcr.io/distroless/base:debug", debugRef.Target)
+	}
+	if debugRef.Metadata["node_kind"] != "external" {
+		t.Errorf("node_kind = %q, want external", debugRef.Metadata["node_kind"])
+	}
+}
+
+// TestGraphPass_CopyFromDockerHubImage verifies that a Docker Hub user image in
+// COPY --from (e.g. myuser/mytools) gets the docker.io/ prefix.
+func TestGraphPass_CopyFromDockerHubImage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM alpine:3.19 AS runtime
+COPY --from=myuser/mytools:latest /usr/local/bin/tool /usr/local/bin/tool
+CMD ["/app"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	var toolRef *indexer.Reference
+	for i := range extRefs {
+		if strings.Contains(extRefs[i].Target, "mytools") {
+			toolRef = &extRefs[i]
+		}
+	}
+	if toolRef == nil {
+		t.Fatalf("expected external import ref for COPY --from=myuser/mytools, refs: %+v", extRefs)
+	}
+	if toolRef.Target != "docker.io/myuser/mytools:latest" {
+		t.Errorf("Target = %q, want docker.io/myuser/mytools:latest", toolRef.Target)
+	}
+	if toolRef.Metadata["node_kind"] != "external" {
+		t.Errorf("node_kind = %q, want external", toolRef.Metadata["node_kind"])
+	}
+}
+
+// TestGraphPass_CopyFromUnknownStageName verifies that COPY --from=<ref> where ref
+// contains no '/' or ':' and matches no local stage or index is silently dropped
+// (existing behavior preserved — no spurious edges).
+func TestGraphPass_CopyFromUnknownStageName(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM alpine:3.19 AS runtime
+COPY --from=nonexistent /file /file
+CMD ["/app"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 0 {
+		t.Errorf("expected no copy-from edges for unknown bare name, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	// Also no spurious external import edges for the unknown name.
+	for _, r := range doc.Refs {
+		if r.Kind == "import" && strings.Contains(r.Target, "nonexistent") {
+			t.Errorf("unexpected import edge for bare unknown name: %+v", r)
+		}
+	}
+}

@@ -235,7 +235,9 @@ func joinContinuationLines(lines []string) []string {
 // images project to ext:<registry>/<image>:<tag> via import edges with
 // Metadata["node_kind"]="external". Stage-to-stage FROM dependencies use
 // inherits edges with Metadata["relation"]="stage". COPY --from edges use
-// inherits with Metadata["relation"]="copy-from".
+// inherits with Metadata["relation"]="copy-from" when the target is a local
+// stage, or an import edge with Metadata["node_kind"]="external" when the
+// --from ref looks like an external image (contains '/' or ':').
 func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 	lines := strings.Split(raw, "\n")
 
@@ -441,9 +443,24 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 		} else if p, ok := stageByIdx[lowerRef]; ok {
 			targetPath = p
 		}
-		if targetPath == "" || targetPath == c.fromStage {
-			// Skip missing targets and self-loops (e.g. FROM scratch + COPY --from=0
-			// in a single-stage Dockerfile resolves to the stage copying from itself).
+		if targetPath == c.fromStage {
+			// Self-loop: e.g. FROM scratch + COPY --from=0 in a single-stage Dockerfile
+			// resolves to the stage copying from itself — drop it.
+			continue
+		}
+		if targetPath == "" {
+			// Not a local stage or numeric index. If the ref looks like an external
+			// image reference (contains '/' or ':'), emit an external import edge using
+			// the same normalisation used for FROM base images.
+			if strings.ContainsAny(c.toRef, "/:") {
+				extImage := normalizeDockerImage(c.toRef)
+				refs = append(refs, indexer.Reference{
+					Kind:     "import",
+					Source:   c.fromStage,
+					Target:   extImage,
+					Metadata: map[string]any{"node_kind": "external"},
+				})
+			}
 			continue
 		}
 		refs = append(refs, indexer.Reference{
