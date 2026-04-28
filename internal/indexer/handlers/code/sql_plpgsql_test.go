@@ -42,7 +42,7 @@ func hasBodyRef(t *testing.T, refs []indexer.Reference, op, symTarget string) bo
 	return false
 }
 
-// hasMetaBodyRef returns true when refs contains a body_references entry with
+// hasMetaFlag returns true when refs contains a body_references entry with
 // the given metadata flag set to true.
 func hasMetaFlag(t *testing.T, refs []indexer.Reference, flag string) bool {
 	t.Helper()

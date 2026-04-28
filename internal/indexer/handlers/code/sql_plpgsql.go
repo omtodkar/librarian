@@ -304,17 +304,16 @@ func plpgsqlGetExprQuery(stmt map[string]any, fieldName string) string {
 
 // plpgsqlResolveCallTarget tries to extract a canonical "schema.name" procedure
 // path from a CALL expression string. Returns "" on failure.
+//
+// PLpgSQL_stmt_call.expr.query always begins with "CALL " (e.g. "CALL proc(1)").
+// plpgsqlExtractFirstIdent handles that prefix; no additional parsing needed.
 func plpgsqlResolveCallTarget(query, defaultSchema string) string {
-	// PLpgSQL_expr.query for PLpgSQL_stmt_call is the full CALL statement
-	// ("CALL proc(args)"). Strip the keyword, then extract the callee identifier.
-	trimmed := strings.TrimSpace(query)
-	if strings.HasPrefix(strings.ToUpper(trimmed), "CALL ") {
-		trimmed = strings.TrimSpace(trimmed[5:])
-	}
-	return plpgsqlExtractFirstIdent(trimmed, defaultSchema)
+	return plpgsqlExtractFirstIdent(query, defaultSchema)
 }
 
 // plpgsqlFuncCallName extracts "schema.name" from a FuncCall JSON node.
+// ParseToJSON represents FuncCall fields directly (funcname, args, etc.) without
+// a wrapping type-key — unlike ParsePlPgSqlToJSON which wraps with PLpgSQL_* keys.
 func plpgsqlFuncCallName(funccall any, defaultSchema string) string {
 	fc, _ := funccall.(map[string]any)
 	if fc == nil {
@@ -349,9 +348,14 @@ func plpgsqlFuncCallName(funccall any, defaultSchema string) string {
 }
 
 // plpgsqlExtractFirstIdent returns "schema.name" from a "name(..." or
-// "schema.name(..." expression. Best-effort fallback when pg_query parsing fails.
+// "schema.name(..." expression. Handles an optional leading "CALL " keyword
+// (PLpgSQL_stmt_call.expr.query always starts with that keyword).
 func plpgsqlExtractFirstIdent(expr, defaultSchema string) string {
-	name := expr
+	name := strings.TrimSpace(expr)
+	// Strip leading SQL keyword (PLpgSQL_stmt_call.expr.query always starts with "CALL ").
+	if upper := strings.ToUpper(name); strings.HasPrefix(upper, "CALL ") {
+		name = strings.TrimSpace(name[5:])
+	}
 	if i := strings.Index(name, "("); i >= 0 {
 		name = strings.TrimSpace(name[:i])
 	}
@@ -375,6 +379,33 @@ func plpgsqlExtractFirstIdent(expr, defaultSchema string) string {
 // NEW recfields whose dno is in assignedDnos get context="assignment" so that
 // ResolveTriggerNewOld can emit op=write for those refs (lib-uer8).
 func plpgsqlTriggerFieldRefs(datums []any, newVarno, oldVarno int, funcPath string, assignedDnos map[int]bool) []indexer.Reference {
+	// Build a verified map from dno → "NEW"/"OLD" by confirming the PLpgSQL_rec datum
+	// at that dno has refname "new"/"old". This prevents a user-declared RECORD
+	// variable with a coincident dno from producing spurious trigger_special refs.
+	varnoPrefix := make(map[int]string)
+	for _, d := range datums {
+		dmap, _ := d.(map[string]any)
+		if dmap == nil {
+			continue
+		}
+		rec, ok := dmap["PLpgSQL_rec"].(map[string]any)
+		if !ok {
+			continue
+		}
+		refname, _ := rec["refname"].(string)
+		dno := plpgsqlIntField(rec, "dno")
+		switch refname {
+		case "new":
+			if newVarno > 0 && dno == newVarno {
+				varnoPrefix[dno] = "NEW"
+			}
+		case "old":
+			if oldVarno > 0 && dno == oldVarno {
+				varnoPrefix[dno] = "OLD"
+			}
+		}
+	}
+
 	var refs []indexer.Reference
 	for i, d := range datums {
 		dmap, _ := d.(map[string]any)
@@ -390,28 +421,21 @@ func plpgsqlTriggerFieldRefs(datums []any, newVarno, oldVarno int, funcPath stri
 			continue
 		}
 		recparentno := plpgsqlIntField(recfield, "recparentno")
-		dno := i // datum number is the array index; pg_query JSON omits explicit "dno" for recfields
-
-		var target string
-		switch {
-		case newVarno > 0 && recparentno == newVarno:
-			target = "NEW." + fieldname
-		case oldVarno > 0 && recparentno == oldVarno:
-			target = "OLD." + fieldname
-		default:
+		prefix, ok := varnoPrefix[recparentno]
+		if !ok {
 			continue
 		}
 		meta := map[string]any{
 			"op":              "read",
 			"trigger_special": true,
 		}
-		if recparentno == newVarno && assignedDnos[dno] {
+		if prefix == "NEW" && assignedDnos[i] {
 			meta["context"] = "assignment"
 		}
 		refs = append(refs, indexer.Reference{
 			Kind:     store.EdgeKindBodyReferences,
 			Source:   "sym:" + funcPath,
-			Target:   target, // resolved in lib-o5dn.4
+			Target:   prefix + "." + fieldname, // resolved in lib-o5dn.4
 			Metadata: meta,
 		})
 	}
