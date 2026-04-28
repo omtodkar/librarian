@@ -636,6 +636,9 @@ type S struct {
 	if refs[0].Target != "Base" {
 		t.Errorf("Target = %q, want Base", refs[0].Target)
 	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
+	}
 	if refs[0].Metadata["qualified_name"] != "pkg.Base" {
 		t.Errorf("qualified_name = %v, want pkg.Base", refs[0].Metadata["qualified_name"])
 	}
@@ -660,6 +663,9 @@ type S struct {
 	}
 	if refs[0].Target != "Base" {
 		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
 	}
 	if refs[0].Metadata["pointer"] != true {
 		t.Errorf("pointer = %v, want true", refs[0].Metadata["pointer"])
@@ -692,6 +698,106 @@ type S struct {
 	args, _ := refs[0].Metadata["type_args"].([]string)
 	if len(args) != 1 || args[0] != "T" {
 		t.Errorf("type_args = %v, want [T]", args)
+	}
+}
+
+// Qualified+generic embedding: pkg.Base[T] produces Name="Base", qualified_name="pkg.Base", type_args=["T"].
+func TestGoGrammar_StructEmbeddingQualifiedGeneric(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	pkg.Base[T]
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
+	}
+	if refs[0].Metadata["qualified_name"] != "pkg.Base" {
+		t.Errorf("qualified_name = %v, want pkg.Base", refs[0].Metadata["qualified_name"])
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 1 || args[0] != "T" {
+		t.Errorf("type_args = %v, want [T]", args)
+	}
+}
+
+// Pointer+qualified+generic embedding: *pkg.Base[T] produces pointer=true, qualified_name="pkg.Base", type_args=["T"].
+func TestGoGrammar_StructEmbeddingPointerQualifiedGeneric(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	*pkg.Base[T]
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
+	}
+	if refs[0].Metadata["pointer"] != true {
+		t.Errorf("pointer = %v, want true", refs[0].Metadata["pointer"])
+	}
+	if refs[0].Metadata["qualified_name"] != "pkg.Base" {
+		t.Errorf("qualified_name = %v, want pkg.Base", refs[0].Metadata["qualified_name"])
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 1 || args[0] != "T" {
+		t.Errorf("type_args = %v, want [T]", args)
+	}
+}
+
+// Qualified+generic embedding with multiple type params: pkg.Base[K, V] produces
+// Name="Base", qualified_name="pkg.Base", type_args=["K", "V"].
+func TestGoGrammar_StructEmbeddingQualifiedGenericMultiParam(t *testing.T) {
+	src := []byte(`package s
+
+type S struct {
+	pkg.Base[K, V]
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("s.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "s.S")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d (%+v)", len(refs), refs)
+	}
+	if refs[0].Target != "Base" {
+		t.Errorf("Target = %q, want Base", refs[0].Target)
+	}
+	if refs[0].Metadata["relation"] != "embeds" {
+		t.Errorf("relation = %v, want embeds", refs[0].Metadata["relation"])
+	}
+	if refs[0].Metadata["qualified_name"] != "pkg.Base" {
+		t.Errorf("qualified_name = %v, want pkg.Base", refs[0].Metadata["qualified_name"])
+	}
+	args, _ := refs[0].Metadata["type_args"].([]string)
+	if len(args) != 2 || args[0] != "K" || args[1] != "V" {
+		t.Errorf("type_args = %v, want [K V]", args)
 	}
 }
 
@@ -1084,5 +1190,51 @@ func (c *Client) DoLogin() {
 	}
 	if loginRef.Metadata == nil || loginRef.Metadata["confidence"] != "ambiguous" {
 		t.Errorf("expected confidence=ambiguous for ambiguous Login call; got %v", loginRef.Metadata)
+	}
+}
+
+// TestGoGrammar_CallEdges_AmbiguousThreeWayCollision verifies that N=3 same-title
+// symbols (A.Login, B.Login, C.Login) produce confidence="ambiguous" — locking
+// the len(paths) > 1 invariant for N > 2.
+func TestGoGrammar_CallEdges_AmbiguousThreeWayCollision(t *testing.T) {
+	src := []byte(`package svc
+
+type A struct{}
+type B struct{}
+type C struct{}
+
+func (a *A) Login() {}
+func (b *B) Login() {}
+func (c *C) Login() {}
+
+type Client struct{}
+
+func (cl *Client) DoLogin() {
+	cl.Login()
+}
+`)
+	h := code.New(code.NewGoGrammar())
+	doc, err := h.Parse("svc/auth.go", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	refs := callRefsBySource(doc, "svc.Client.DoLogin")
+	if len(refs) == 0 {
+		t.Fatalf("expected call refs from svc.Client.DoLogin, got none")
+	}
+
+	var loginRef *indexer.Reference
+	for i := range refs {
+		if refs[i].Target == "Login" {
+			loginRef = &refs[i]
+			break
+		}
+	}
+	if loginRef == nil {
+		t.Fatalf("expected call ref with Target=\"Login\" for 3-way collision; refs: %+v", refs)
+	}
+	if loginRef.Metadata == nil || loginRef.Metadata["confidence"] != "ambiguous" {
+		t.Errorf("expected confidence=ambiguous for 3-way Login collision; got %v", loginRef.Metadata)
 	}
 }

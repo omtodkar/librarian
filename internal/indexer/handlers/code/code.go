@@ -462,6 +462,10 @@ func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseCon
 // stays as the bare CalleeName to avoid false precision. No match keeps the
 // bare CalleeName and sets confidence="unresolved" so downstream queries can
 // tell precise edges from speculative ones.
+//
+// Note: ambiguous detection is file-scoped — symbols in other files sharing
+// the same title are not considered in this phase. A cross-file same-name call
+// yields "resolved" if a same-file match exists, or "unresolved" if none does.
 func (h *CodeHandler) extractCallRefs(ce callExtractor, root *sitter.Node, source []byte, doc *indexer.ParsedDoc) {
 	// callerMap: full-path and path-without-first-segment → canonical Unit.Path.
 	callerMap := make(map[string]string, len(doc.Units)*2)

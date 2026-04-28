@@ -275,11 +275,13 @@ func goInterfaceEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 // anonymous (embedded) field. Named fields are skipped.
 //
 // Type forms handled:
-//   - type_identifier (Base)     → Name="Base"
-//   - pointer (*Base)            → Name="Base", Metadata["pointer"]=true
-//   - qualified (pkg.Base)       → Name="Base", Metadata["qualified_name"]="pkg.Base"
-//   - pointer+qualified (*pkg.B) → Name="Base", pointer=true, qualified_name="pkg.Base"
-//   - generic (Base[T])          → Name="Base", Metadata["type_args"]=["T"]
+//   - type_identifier (Base)           → Name="Base"
+//   - pointer (*Base)                  → Name="Base", Metadata["pointer"]=true
+//   - qualified (pkg.Base)             → Name="Base", Metadata["qualified_name"]="pkg.Base"
+//   - pointer+qualified (*pkg.Base)    → Name="Base", pointer=true, qualified_name="pkg.Base"
+//   - generic (Base[T])                → Name="Base", Metadata["type_args"]=["T"]
+//   - qualified+generic (pkg.Base[T])  → Name="Base", qualified_name="pkg.Base", type_args=["T"]
+//   - ptr+qual+generic (*pkg.Base[T])  → Name="Base", pointer=true, qualified_name="pkg.Base", type_args=["T"]
 func goStructEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 	var fdl *sitter.Node
 	for i := uint(0); i < n.NamedChildCount(); i++ {
@@ -350,8 +352,18 @@ func goStructEmbeddings(n *sitter.Node, source []byte) []ParentRef {
 			if len(args) > 0 {
 				meta["type_args"] = args
 			}
+			name := strings.TrimSpace(typeNameChild.Utf8Text(source))
+			if typeNameChild.Kind() == "qualified_type" {
+				leafChild := typeNameChild.ChildByFieldName("name")
+				if leafChild != nil {
+					name = strings.TrimSpace(leafChild.Utf8Text(source))
+					meta["qualified_name"] = strings.TrimSpace(typeNameChild.Utf8Text(source))
+				} else {
+					continue
+				}
+			}
 			ref = &ParentRef{
-				Name:     strings.TrimSpace(typeNameChild.Utf8Text(source)),
+				Name:     name,
 				Relation: "embeds",
 				Loc:      loc,
 				Metadata: meta,
