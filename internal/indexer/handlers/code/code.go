@@ -202,6 +202,19 @@ type importResolver interface {
 	ResolveImports(refs []indexer.Reference, path string, ctx indexer.ParseContext) []indexer.Reference
 }
 
+// moduleTitler is an optional interface a Grammar implements to provide the
+// file's module title when PackageName returns "" (no in-file declaration).
+// stem is the file-stem fallback the handler computed; the implementation may
+// return the same stem or a richer name such as a dotted package-qualified
+// path. Python implements this to prefix the stem with the package path from
+// an __init__.py walk so that mypkg/types.py yields title "mypkg.types" rather
+// than "types". code.ParseCtx only calls ModuleTitle in the stem-fallback
+// branch (pkg == ""), so grammars with a real package declaration are
+// unaffected.
+type moduleTitler interface {
+	ModuleTitle(stem, path string, ctx indexer.ParseContext) string
+}
+
 // symbolPathElementResolver is an optional interface a Grammar implements
 // to customise the Unit.Path segment of a just-matched symbol while keeping
 // Unit.Title = the bare name from SymbolName.
@@ -404,7 +417,12 @@ func (h *CodeHandler) ParseCtx(path string, content []byte, ctx indexer.ParseCon
 		// but Unit.Paths for such files will have embedded dots that don't
 		// correspond to package boundaries.
 		base := filepath.Base(path)
-		title = strings.TrimSuffix(base, filepath.Ext(base))
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		if mt, ok := h.grammar.(moduleTitler); ok {
+			title = mt.ModuleTitle(stem, path, ctx)
+		} else {
+			title = stem
+		}
 	}
 
 	doc := &indexer.ParsedDoc{

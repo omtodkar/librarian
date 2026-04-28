@@ -1639,6 +1639,63 @@ func TestIntegration_Graph_PythonCrossModuleTypeVar_IncrementalReindex(t *testin
 	}
 }
 
+// TestIntegration_Graph_PythonCrossModuleTypeVar_RelativeImport pins the
+// relative-import form: `from .types import T`. ResolveImports rewrites
+// .types.T → mypkg.types.T using the __init__.py walk so the post-graph-pass
+// resolver can connect the pending candidate to the sym:mypkg.types.T node.
+//
+// Layout: mypkg/__init__.py (empty), mypkg/types.py declares T, mypkg/repo.py
+// uses from .types import T and class Foo(Generic[T]). After IndexProjectGraph
+// the inherits edge from sym:mypkg.repo.Foo should carry
+// type_args_resolved=["sym:mypkg.types.T"].
+func TestIntegration_Graph_PythonCrossModuleTypeVar_RelativeImport(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"mypkg/__init__.py": "",
+		"mypkg/types.py":    "from typing import TypeVar\nT = TypeVar(\"T\")\n",
+		"mypkg/repo.py":     "from .types import T\nfrom typing import Generic\n\nclass Foo(Generic[T]):\n    pass\n",
+	}
+	for rel, body := range files {
+		abs := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", abs, err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	idx, s := newGraphTestIndexer(t, root)
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	// Find the inherits edge from sym:mypkg.repo.Foo to the Generic symbol.
+	outEdges, err := s.Neighbors("sym:mypkg.repo.Foo", "out", store.EdgeKindInherits)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	var genericEdge *store.Edge
+	for i := range outEdges {
+		if containsJSON(outEdges[i].Metadata, `"type_args"`) {
+			genericEdge = &outEdges[i]
+			break
+		}
+	}
+	if genericEdge == nil {
+		t.Fatalf("expected Generic inherits edge from sym:mypkg.repo.Foo with type_args; edges: %+v", outEdges)
+	}
+
+	// type_args_resolved must be present and point to sym:mypkg.types.T.
+	if !containsJSON(genericEdge.Metadata, `"type_args_resolved":["sym:mypkg.types.T"]`) {
+		t.Errorf("type_args_resolved missing or wrong; edge metadata: %s", genericEdge.Metadata)
+	}
+	// type_args_pending_cross_module should be absent (cleaned up after resolution).
+	if containsJSON(genericEdge.Metadata, `"type_args_pending_cross_module"`) {
+		t.Errorf("type_args_pending_cross_module should be absent after resolution; edge metadata: %s", genericEdge.Metadata)
+	}
+}
+
 // keys returns the sorted key set of a map[string]string for stable
 // failure messages.
 func keys(m map[string]string) []string {

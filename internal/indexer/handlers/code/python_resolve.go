@@ -262,6 +262,46 @@ func cachedContainingPackage(absPath, projectRoot string, srcRoots []string, cac
 	return parts
 }
 
+// ModuleTitle returns the fully-qualified Python module name for the file at
+// path. stem is the file-stem fallback already computed by code.ParseCtx.
+//
+// For files inside a Python package (detected by a configured src_root or an
+// __init__.py ancestor walk), the stem is prefixed with the dotted package
+// path so that mypkg/types.py yields "mypkg.types" rather than "types". This
+// ensures sym node IDs match the fully-qualified import paths produced by
+// ResolveImports when consumers use relative imports (from .types import T).
+//
+// For __init__.py files the package path alone is returned (no trailing
+// .__init__) because __init__.py IS the package module.
+//
+// Files at the project root or in directories without an __init__.py chain
+// return stem unchanged (no virtual-directory fallback — that would produce
+// bogus module names for unpackaged scripts).
+// Parse backward-compat (empty AbsPath) also falls back to stem.
+func (*PythonGrammar) ModuleTitle(stem, path string, ctx indexer.ParseContext) string {
+	if ctx.AbsPath == "" {
+		return stem
+	}
+	// Only use src_roots + __init__.py walk — skip the virtual-directory
+	// fallback from containingPackage, which would prefix bare-script
+	// directories (e.g. src/scripts/foo.py → "src.scripts.foo") even when
+	// they are not Python packages.
+	var parts []string
+	if p, ok := packageFromSrcRoot(ctx.AbsPath, ctx.PythonSrcRoots); ok {
+		parts = p
+	} else {
+		parts = packageFromInitWalk(ctx.AbsPath, nil)
+	}
+	if len(parts) == 0 {
+		return stem
+	}
+	if stem == "__init__" {
+		// __init__.py represents the package itself, not a sub-module.
+		return strings.Join(parts, ".")
+	}
+	return strings.Join(append(parts, stem), ".")
+}
+
 // ResolveImports rewrites relative-form Reference.Target values in refs to
 // absolute dotted paths using the file's location and ctx.PythonSrcRoots. Refs
 // with Kind != "import" or without leading dots pass through unchanged.
