@@ -1,8 +1,9 @@
 package indexer
 
-// plpgsql_resolve_internal_test.go — unit tests for resolveBodyRefTarget,
-// the internal helper that implements column→table fallback and unresolved
-// marking for body_references edges (lib-o5dn.3).
+// plpgsql_resolve_internal_test.go — unit tests for resolveBodyRefTarget and
+// isBodyRefPlaceholder: the internal helpers that implement column→table
+// fallback, unresolved marking, and placeholder detection for body_references
+// edges (lib-o5dn.3, lib-ymwl).
 
 import (
 	"testing"
@@ -109,5 +110,54 @@ func TestResolveBodyRefTarget_NonSymTarget(t *testing.T) {
 	}
 	if v, _ := got.Metadata["unresolved"].(bool); v {
 		t.Errorf("unresolved should not be set for non-sym: target")
+	}
+}
+
+// TestIsBodyRefPlaceholder verifies that isBodyRefPlaceholder correctly
+// distinguishes placeholder nodes (created by UpsertPlaceholderNode with
+// {"unresolved":true} metadata) from real symbol nodes.
+func TestIsBodyRefPlaceholder(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata string
+		want     bool
+	}{
+		{
+			name:     "placeholder with unresolved=true",
+			metadata: `{"unresolved":true}`,
+			want:     true,
+		},
+		{
+			name:     "real symbol with empty metadata",
+			metadata: `{}`,
+			want:     false,
+		},
+		{
+			name:     "real symbol with table metadata",
+			metadata: `{"kind":"table"}`,
+			want:     false,
+		},
+		{
+			name:     "unresolved=false does not match",
+			metadata: `{"unresolved":false}`,
+			want:     false,
+		},
+		{
+			name:     "key named unresolved_reason does not match",
+			metadata: `{"unresolved_reason":"missing"}`,
+			want:     false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &store.Node{
+				ID:       "sym:public.tbl",
+				Kind:     store.NodeKindSymbol,
+				Metadata: tc.metadata,
+			}
+			if got := isBodyRefPlaceholder(n); got != tc.want {
+				t.Errorf("isBodyRefPlaceholder({Metadata:%q}) = %v, want %v", tc.metadata, got, tc.want)
+			}
+		})
 	}
 }

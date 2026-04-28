@@ -356,6 +356,12 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 	// available (lib-udam.3).
 	idx.buildGenericFQNResolutionEdges(result)
 
+	// Body-reference re-resolver: repairs body_references edges that were marked
+	// unresolved=true during per-file processing because the target table was
+	// indexed after the function file. Runs after all per-file projection so
+	// every table symbol node exists in the store (lib-ymwl).
+	idx.buildBodyReferencesResolutionEdges(result)
+
 	// Test-subject linker: emit tests edges from test files to their likely
 	// subject files via path-naming conventions (lib-8bg). Runs after all
 	// per-file projection so every code_file node exists in the store.
@@ -1157,13 +1163,10 @@ func refEdgeSource(ref Reference, defaultNodeID string) string {
 // modified Metadata (after double miss); the original slice element is
 // unchanged (range loop gives a copy).
 //
-// Known limitation (lib-ymwl): resolution runs per-file during the graph pass.
-// When the target table is defined in a separate file that is processed after
-// the function file, the table node does not yet exist in the store, and the
-// edge is incorrectly marked unresolved=true. A post-graph-pass resolver
-// (consistent with buildImplementsRPCEdges) would eliminate this ordering
-// dependency. For tables genuinely not in the project, unresolved=true is
-// correct regardless of ordering.
+// Edges marked unresolved=true due to file-ordering (target table not yet
+// indexed when this runs) are repaired by buildBodyReferencesResolutionEdges
+// after the full graph pass. For tables genuinely not in the project,
+// unresolved=true is correct regardless of ordering.
 func (idx *Indexer) resolveBodyRefTarget(ref Reference) Reference {
 	// pending_execute and trigger_special refs have raw (non-sym:) targets;
 	// graphTargetID will skip them — no store lookup needed.

@@ -102,6 +102,13 @@ $$;
 	if meta["op"] != "write" {
 		t.Errorf("edge op = %v, want write (INSERT emits a write reference)", meta["op"])
 	}
+	// users table is not defined in the fixture — edge must be unresolved.
+	if v, _ := meta["unresolved"].(bool); !v {
+		t.Errorf("expected unresolved=true for edge to undefined table; got metadata: %v", meta)
+	}
+	if meta["target_name"] == nil {
+		t.Errorf("expected target_name in metadata for undefined table; got: %v", meta)
+	}
 }
 
 // TestPlpgsqlBodyRefs_UnresolvedTarget verifies that a reference to a table
@@ -191,13 +198,6 @@ $$;
 // TestPlpgsqlBodyRefs_CrossFileTableFirst verifies that body_references edges
 // are resolved correctly in a two-file project when the table definition file
 // is processed before the function file (alphabetical ordering: "a_" prefix).
-//
-// Note: resolveBodyRefTarget is called per-file during the graph pass. When
-// the function file is processed before the table file (e.g. "a_funcs.sql"
-// before "b_tables.sql"), the table node may not yet exist in the store,
-// causing a false unresolved=true — a known limitation tracked in lib-ymwl.
-// This test uses "a_tables.sql" / "b_funcs.sql" to ensure deterministic
-// table-first ordering with MaxWorkers=1.
 func TestPlpgsqlBodyRefs_CrossFileTableFirst(t *testing.T) {
 	dir := t.TempDir()
 	writeImplementsRPCFixture(t, dir, map[string]string{
@@ -244,6 +244,66 @@ $$;
 	}
 	if v, _ := meta["unresolved"].(bool); v {
 		t.Errorf("edge should not be unresolved when table is indexed before function (table-first ordering)")
+	}
+}
+
+// TestPlpgsqlBodyRefs_CrossFileFuncFirst verifies that body_references edges
+// are resolved correctly when the function file is processed BEFORE the table
+// file (alphabetical ordering: "a_funcs.sql" sorts before "b_tables.sql").
+//
+// resolveBodyRefTarget marks the edge unresolved=true during per-file
+// processing because the table node does not yet exist. The post-graph-pass
+// buildBodyReferencesResolutionEdges resolver must strip the marker once all
+// files have been indexed.
+func TestPlpgsqlBodyRefs_CrossFileFuncFirst(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		// Named "a_" so the function file sorts before the table file.
+		"a_funcs.sql": `
+CREATE FUNCTION public.process_orders() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  SELECT * FROM orders;
+END;
+$$;
+`,
+		"b_tables.sql": `CREATE TABLE public.orders (id SERIAL PRIMARY KEY);`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	funcID := "sym:public.process_orders"
+	tableID := "sym:public.orders"
+	edges, err := s.Neighbors(funcID, "out", store.EdgeKindBodyReferences)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(edges) == 0 {
+		t.Fatalf("expected body_references edge from %s; got none", funcID)
+	}
+
+	var found *store.Edge
+	for i := range edges {
+		if edges[i].To == tableID {
+			found = &edges[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected edge %s → %s after post-pass resolution; edges: %+v", funcID, tableID, edges)
+	}
+
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(found.Metadata), &meta); err != nil {
+		t.Fatalf("unmarshal edge metadata: %v", err)
+	}
+	if v, _ := meta["unresolved"].(bool); v {
+		t.Errorf("edge should not be unresolved after post-graph-pass resolution (function-first ordering)")
+	}
+	if meta["target_name"] != nil {
+		t.Errorf("target_name should be removed after resolution; got: %v", meta["target_name"])
 	}
 }
 
