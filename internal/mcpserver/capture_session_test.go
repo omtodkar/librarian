@@ -103,8 +103,8 @@ func TestCaptureSession_WritesFile(t *testing.T) {
 	for _, want := range []string{
 		"type: decisions",
 		"source: ai-capture",
-		"session_id: sess-123",
-		"author: Alice",
+		`session_id: "sess-123"`,
+		`author: "Alice"`,
 		"date: " + today,
 		"# Auth Flow Deep Dive",
 		"JWT tokens with short expiry",
@@ -288,6 +288,40 @@ func TestCaptureSession_NewlineStripping(t *testing.T) {
 	// Heading must not contain raw line breaks.
 	if strings.Contains(content, "Injected\nTitle") || strings.Contains(content, "Injected\rTitle") {
 		t.Error("title line-break not stripped from heading")
+	}
+}
+
+// TestCaptureSession_SpecialCharsInFrontmatter verifies that '#' in session_id / author
+// is not silently truncated and that flow-map syntax does not break YAML frontmatter.
+func TestCaptureSession_SpecialCharsInFrontmatter(t *testing.T) {
+	st, cfg := setupCaptureEnv(t)
+
+	result := callCaptureTool(t, st, cfg, map[string]any{
+		"title":      "Special Chars Test",
+		"body":       "Body content with enough words to meet the minimum token threshold for indexing.",
+		"session_id": "sess-abc#1",
+		"author":     "{key: val}",
+	})
+
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", toolResultText(t, result))
+	}
+
+	today := time.Now().Format("2006-01-02")
+	expectedPath := filepath.Join(cfg.DocsDir, "sessions", today+"-special-chars-test.md")
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("file not found at %s: %v", expectedPath, err)
+	}
+	content := string(data)
+
+	// The full session_id value must survive — '#' must not truncate it.
+	if !strings.Contains(content, `"sess-abc#1"`) {
+		t.Errorf("session_id value truncated by '#'; content:\n%s", content)
+	}
+	// The author flow-map value must be quoted, not raw.
+	if !strings.Contains(content, `"{key: val}"`) {
+		t.Errorf("author flow-map value not quoted; content:\n%s", content)
 	}
 }
 

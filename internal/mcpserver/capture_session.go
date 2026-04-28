@@ -116,10 +116,10 @@ func registerCaptureSession(s *server.MCPServer, st *store.Store, cfg *config.Co
 		fmt.Fprintf(&fm, "type: %s\n", category)
 		fm.WriteString("source: ai-capture\n")
 		if sessionID != "" {
-			fmt.Fprintf(&fm, "session_id: %s\n", sessionID)
+			fmt.Fprintf(&fm, "session_id: %q\n", sessionID)
 		}
 		if author != "" {
-			fmt.Fprintf(&fm, "author: %s\n", author)
+			fmt.Fprintf(&fm, "author: %q\n", author)
 		}
 		fmt.Fprintf(&fm, "date: %s\n", now.Format("2006-01-02"))
 		fm.WriteString("---\n\n")
