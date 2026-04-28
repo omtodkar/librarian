@@ -1271,3 +1271,163 @@ func TestGraphPass_DigestPinnedBaseImage(t *testing.T) {
 		t.Errorf("node_kind = %q, want external", extRefs[0].Metadata["node_kind"])
 	}
 }
+
+// TestGraphPass_MultiLineCopyFrom_FlagOnContinuation is the primary regression
+// test for the backslash-continuation COPY --from bug: when the --from flag
+// appears on a continuation line (not the COPY line itself), it was silently
+// dropped because fields[0] was "--from=..." rather than "COPY".
+func TestGraphPass_MultiLineCopyFrom_FlagOnContinuation(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN go build -o /server .
+
+FROM alpine:3.19 AS runtime
+COPY \
+  --from=builder \
+  /server /server
+CMD ["/server"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 1 {
+		t.Fatalf("expected 1 copy-from edge for multi-line COPY --from, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	if copyEdges[0].Source != "stage:runtime" {
+		t.Errorf("copy edge Source = %q, want stage:runtime", copyEdges[0].Source)
+	}
+	if copyEdges[0].Target != "stage:builder" {
+		t.Errorf("copy edge Target = %q, want stage:builder", copyEdges[0].Target)
+	}
+}
+
+// TestGraphPass_MultiLineCopyFrom_FlagOnFirstLine verifies that a COPY --from
+// where the flag is already on the COPY line but the paths span continuations
+// still emits the edge (pre-existing behavior, not broken by the fix).
+func TestGraphPass_MultiLineCopyFrom_FlagOnFirstLine(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN go build -o /server .
+
+FROM alpine:3.19 AS runtime
+COPY --from=builder \
+  /server \
+  /server
+CMD ["/server"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 1 {
+		t.Fatalf("expected 1 copy-from edge, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	if copyEdges[0].Source != "stage:runtime" {
+		t.Errorf("copy edge Source = %q, want stage:runtime", copyEdges[0].Source)
+	}
+	if copyEdges[0].Target != "stage:builder" {
+		t.Errorf("copy edge Target = %q, want stage:builder", copyEdges[0].Target)
+	}
+}
+
+// TestGraphPass_MultiLineCopyFrom_MultipleStages verifies that backslash
+// continuation COPY --from lines are correctly resolved across multiple stages
+// and that stage assignment is not confused by the line-merging.
+func TestGraphPass_MultiLineCopyFrom_MultipleStages(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS build
+RUN go build -o /app .
+
+FROM node:20 AS assets
+RUN npm run build
+
+FROM nginx:alpine AS web
+COPY \
+  --from=assets \
+  /app/dist /usr/share/nginx/html
+COPY \
+  --from=build \
+  /app /app
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 2 {
+		t.Fatalf("expected 2 copy-from edges, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	for _, e := range copyEdges {
+		if e.Source != "stage:web" {
+			t.Errorf("copy edge Source = %q, want stage:web", e.Source)
+		}
+	}
+	targets := map[string]bool{}
+	for _, e := range copyEdges {
+		targets[e.Target] = true
+	}
+	if !targets["stage:assets"] {
+		t.Error("expected copy-from edge to stage:assets")
+	}
+	if !targets["stage:build"] {
+		t.Error("expected copy-from edge to stage:build")
+	}
+}
+
+// TestGraphPass_RunContinuation_NoCopyFromEdge verifies that a multi-line RUN
+// instruction (backslash continuation) does not produce any spurious copy-from
+// edges and that stage assignment remains correct for subsequent directives.
+func TestGraphPass_RunContinuation_NoCopyFromEdge(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM ubuntu:22.04 AS base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+EXPOSE 8080
+
+FROM base AS app
+COPY --from=base /etc/ssl /etc/ssl
+CMD ["/app"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// Only one copy-from edge (the explicit COPY --from=base).
+	copyEdges := refsOfKind(doc.Refs, "inherits", "copy-from")
+	if len(copyEdges) != 1 {
+		t.Fatalf("expected 1 copy-from edge, got %d: %+v", len(copyEdges), copyEdges)
+	}
+	if copyEdges[0].Source != "stage:app" {
+		t.Errorf("copy edge Source = %q, want stage:app", copyEdges[0].Source)
+	}
+	if copyEdges[0].Target != "stage:base" {
+		t.Errorf("copy edge Target = %q, want stage:base", copyEdges[0].Target)
+	}
+
+	// EXPOSE 8080 on the base stage must still be captured despite the
+	// multi-line RUN preceding it.
+	stages := stageUnits(doc.Units)
+	var baseStage *indexer.Unit
+	for i := range stages {
+		if stages[i].Path == "stage:base" {
+			baseStage = &stages[i]
+			break
+		}
+	}
+	if baseStage == nil {
+		t.Fatal("stage:base not found in stage units")
+	}
+	expose, _ := baseStage.Metadata["expose"].([]string)
+	if len(expose) == 0 || expose[0] != "8080" {
+		t.Errorf("base stage expose = %v, want [8080]", expose)
+	}
+}

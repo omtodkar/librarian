@@ -185,6 +185,48 @@ func stageTitle(fromLine string, n int) string {
 	return fmt.Sprintf("stage %d", n)
 }
 
+// joinContinuationLines returns a copy of lines where backslash-continued
+// instructions are merged into a single logical line. Consumed continuation
+// lines are replaced with empty strings so that physical line indices (used
+// by stage.lineIdx values from the first pass) remain valid. Comment lines
+// (starting with '#' after trimming) are never treated as continuation sources.
+func joinContinuationLines(lines []string) []string {
+	out := make([]string, len(lines))
+	copy(out, lines)
+	i := 0
+	for i < len(out) {
+		ts := strings.TrimSpace(out[i])
+		if ts == "" || strings.HasPrefix(ts, "#") {
+			i++
+			continue
+		}
+		trailing := strings.TrimRight(out[i], " \t")
+		if !strings.HasSuffix(trailing, "\\") {
+			i++
+			continue
+		}
+		// Start of a continuation sequence: merge subsequent lines.
+		merged := strings.TrimSuffix(trailing, "\\")
+		j := i + 1
+		for j < len(out) {
+			nextTrailing := strings.TrimRight(out[j], " \t")
+			isCont := strings.HasSuffix(nextTrailing, "\\")
+			merged += " " + strings.TrimSpace(out[j])
+			out[j] = "" // blank the consumed physical line
+			j++
+			if !isCont {
+				break
+			}
+			// Strip the trailing backslash from the newly extended merged line
+			// before appending the next continuation.
+			merged = strings.TrimSuffix(strings.TrimRight(merged, " \t"), "\\")
+		}
+		out[i] = strings.TrimSpace(merged)
+		i = j
+	}
+	return out
+}
+
 // parseStageGraph extracts the stage dependency graph from a Dockerfile and
 // returns "stage" Units and References for the graph pass.
 //
@@ -249,8 +291,13 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 	var copyFromEdges []copyFromEdge
 
 	// Second pass: collect EXPOSE/CMD/ENTRYPOINT/COPY per stage.
+	// Use continuation-joined lines so that multi-line COPY --from instructions
+	// (e.g. "COPY \\\n  --from=builder \\\n  /src /dst") are treated as a single
+	// logical line. Physical line indices are preserved so stage.lineIdx matching
+	// still resolves correctly.
+	logicalLines := joinContinuationLines(lines)
 	currentStage := -1
-	for lineIdx, line := range lines {
+	for lineIdx, line := range logicalLines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
