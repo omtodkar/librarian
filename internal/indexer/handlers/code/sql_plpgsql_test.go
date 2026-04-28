@@ -755,9 +755,9 @@ func TestResolve_ExecuteNested(t *testing.T) {
 	}
 }
 
-// TestResolve_TriggerNewColWrite verifies NEW.col without context=assignment is
-// resolved with op=read (condition or expression context).
-func TestResolve_TriggerNewColWrite(t *testing.T) {
+// TestResolve_TriggerNewColNoAssignment verifies NEW.col without context=assignment
+// (i.e. read or condition context) is resolved with op=read.
+func TestResolve_TriggerNewColNoAssignment(t *testing.T) {
 	refs := []indexer.Reference{
 		triggerSpecialRef("sym:public.audit_trigger", "NEW.email"),
 	}
@@ -951,6 +951,32 @@ $$ LANGUAGE plpgsql;`
 
 	if !hasBodyRef(t, refs, "write", "public.my_table.seq") {
 		t.Errorf("expected write ref for NEW.seq assigned inside LOOP; got %v", refs)
+	}
+}
+
+// TestPlpgsql_TriggerNewWriteNestedIfInLoop verifies that NEW.col := expr inside
+// an IF block nested within a LOOP body is detected as a write — exercises the
+// PLpgSQL_stmt_if scan inside PLpgSQL_stmt_loop (lib-uer8).
+func TestPlpgsql_TriggerNewWriteNestedIfInLoop(t *testing.T) {
+	const funcSQL = `CREATE FUNCTION public.trigger_nested_if_loop() RETURNS trigger AS $$
+BEGIN
+  LOOP
+    IF NEW.status = 'pending' THEN
+      NEW.status := 'processed';
+    END IF;
+    EXIT;
+  END LOOP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;`
+
+	refs, ok := plpgsqlParseAndResolve("public.trigger_nested_if_loop", "public", funcSQL, "tasks")
+	if !ok {
+		t.Fatal("parse failed")
+	}
+
+	if !hasBodyRef(t, refs, "write", "public.tasks.status") {
+		t.Errorf("expected write ref for NEW.status assigned inside IF-in-LOOP; got %v", refs)
 	}
 }
 
