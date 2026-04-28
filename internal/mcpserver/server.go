@@ -29,6 +29,9 @@ func Serve(s *store.Store, cfg *config.Config, embedder embedding.Embedder) erro
 	registerUpdateDocs(srv, s, cfg, embedder)
 	registerCaptureSession(srv, s, cfg, embedder)
 	registerTraceRPC(srv, s, cfg)
+	registerGraphNeighbors(srv, s)
+	registerGraphPath(srv, s)
+	registerGraphExplain(srv, s)
 
 	if err := server.ServeStdio(srv,
 		server.WithErrorLogger(log.New(os.Stderr, "[librarian] ", log.LstdFlags)),

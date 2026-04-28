@@ -27,6 +27,9 @@ func TestMCPStableSchema(t *testing.T) {
 	registerUpdateDocs(srv, nil, nil, nil)
 	registerCaptureSession(srv, nil, nil, nil)
 	registerTraceRPC(srv, nil, nil)
+	registerGraphNeighbors(srv, nil)
+	registerGraphPath(srv, nil)
+	registerGraphExplain(srv, nil)
 
 	tools := srv.ListTools()
 
@@ -71,6 +74,19 @@ func TestMCPStableSchema(t *testing.T) {
 		"trace_rpc": {
 			{"rpc", "string"},
 			{"format", "string"},
+		},
+		"graph_neighbors": {
+			{"node_id", "string"},
+			{"direction", "string"},
+			{"edge_kinds", "array"},
+		},
+		"graph_path": {
+			{"from_id", "string"},
+			{"to_id", "string"},
+			{"max_depth", "number"},
+		},
+		"graph_explain": {
+			{"node_id", "string"},
 		},
 	}
 
