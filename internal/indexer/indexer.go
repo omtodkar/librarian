@@ -817,11 +817,19 @@ func (idx *Indexer) indexGraphFileDirect(file WalkResult, result *GraphResult, f
 		if targetID == "" {
 			continue
 		}
+		// Placeholder label/sourcePath should be the bare symbol name, not the
+		// namespaced node ID. For body_references the walker already puts the
+		// "sym:" prefix on ref.Target (unlike other grammars that use bare
+		// paths), so strip it back here to keep placeholder labels consistent.
+		placeholderLabel := ref.Target
+		if ref.Kind == store.EdgeKindBodyReferences {
+			placeholderLabel = strings.TrimPrefix(ref.Target, "sym:")
+		}
 		if err := idx.store.UpsertPlaceholderNode(store.Node{
 			ID:         targetID,
 			Kind:       graphNodeKindFromRef(ref),
-			Label:      ref.Target,
-			SourcePath: ref.Target,
+			Label:      placeholderLabel,
+			SourcePath: placeholderLabel,
 			Metadata:   targetNodeMetadataJSON(ref),
 		}); err != nil {
 			continue
@@ -1149,6 +1157,11 @@ func refEdgeSource(ref Reference, defaultNodeID string) string {
 // modified Metadata (after double miss); the original slice element is
 // unchanged (range loop gives a copy).
 func (idx *Indexer) resolveBodyRefTarget(ref Reference) Reference {
+	// pending_execute and trigger_special refs have raw (non-sym:) targets;
+	// graphTargetID will skip them — no store lookup needed.
+	if !strings.HasPrefix(ref.Target, "sym:") {
+		return ref
+	}
 	existing, _ := idx.store.GetNode(ref.Target)
 	if existing != nil {
 		return ref

@@ -98,9 +98,9 @@ $$;
 		t.Fatalf("unmarshal edge metadata: %v", err)
 	}
 
-	// op must survive the round-trip.
-	if meta["op"] == nil {
-		t.Errorf("edge metadata missing 'op' key; got %v", meta)
+	// op must survive the round-trip with the correct value.
+	if meta["op"] != "write" {
+		t.Errorf("edge op = %v, want write (INSERT emits a write reference)", meta["op"])
 	}
 }
 
