@@ -246,3 +246,73 @@ $$;
 		t.Errorf("edge should not be unresolved when table is indexed before function (table-first ordering)")
 	}
 }
+
+// TestPlpgsqlBodyRefs_PartialOnMalformedBody verifies that when
+// plpgsqlExtractRefs returns ok=false (malformed PL/pgSQL body), the function
+// Unit gets Metadata["partial"]=true on its symbol node and no body_references
+// edges are emitted for it. A well-formed function in the same file should
+// still index cleanly.
+func TestPlpgsqlBodyRefs_PartialOnMalformedBody(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"funcs.sql": `
+CREATE TABLE public.logs (id SERIAL PRIMARY KEY);
+
+-- Well-formed function — should index cleanly.
+CREATE FUNCTION public.good_func() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  SELECT * FROM logs;
+END;
+$$;
+
+-- Malformed PL/pgSQL body: tree-sitter SQL grammar parses this as a valid
+-- function (bare SQL SELECT is accepted), but pg_query.ParsePlPgSqlToJSON
+-- rejects it because SELECT without BEGIN/END is not valid PL/pgSQL syntax.
+-- This is the only reliable way to trigger partial=true in the integration
+-- path since tree-sitter and pg_query agree on most syntactically invalid cases.
+CREATE FUNCTION public.bad_func() RETURNS void LANGUAGE plpgsql AS $$ SELECT 1 $$;
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	// bad_func symbol should exist (the function unit is always emitted).
+	badFuncID := "sym:public.bad_func"
+	node, err := s.GetNode(badFuncID)
+	if err != nil {
+		t.Fatalf("GetNode(%s): %v", badFuncID, err)
+	}
+	if node == nil {
+		t.Fatalf("expected symbol node %s to exist; got nil", badFuncID)
+	}
+
+	var nodeMeta map[string]any
+	if err := json.Unmarshal([]byte(node.Metadata), &nodeMeta); err != nil {
+		t.Fatalf("unmarshal node metadata: %v (%s)", err, node.Metadata)
+	}
+	if v, _ := nodeMeta["partial"].(bool); !v {
+		t.Errorf("expected partial=true on %s node metadata; got: %v", badFuncID, nodeMeta)
+	}
+
+	// No body_references edges should be emitted for bad_func.
+	edges, err := s.Neighbors(badFuncID, "out", store.EdgeKindBodyReferences)
+	if err != nil {
+		t.Fatalf("Neighbors(%s): %v", badFuncID, err)
+	}
+	if len(edges) != 0 {
+		t.Errorf("expected 0 body_references edges for malformed function; got %d: %+v", len(edges), edges)
+	}
+
+	// good_func should still have a body_references edge to logs.
+	goodFuncID := "sym:public.good_func"
+	goodEdges, err := s.Neighbors(goodFuncID, "out", store.EdgeKindBodyReferences)
+	if err != nil {
+		t.Fatalf("Neighbors(%s): %v", goodFuncID, err)
+	}
+	if len(goodEdges) == 0 {
+		t.Errorf("expected body_references edges for good_func; got none")
+	}
+}

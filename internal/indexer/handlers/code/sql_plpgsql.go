@@ -15,8 +15,10 @@ package code
 //   - On parse error: returns (nil, false); caller sets unit.Metadata["partial"]=true.
 //   - EXECUTE nodes captured as-is with pending_execute=true.
 //   - NEW/OLD trigger row fields captured with trigger_special=true.
-//   - No edges emitted to the store (graphTargetID returns "" for
-//     "body_references", so they are silently skipped).
+//   - Edges are emitted to the store by the graph pass in indexer.go via
+//     resolveBodyRefTarget + graphTargetID (lib-o5dn.3). pending_execute and
+//     trigger_special refs (non-sym: targets) are skipped by graphTargetID and
+//     deferred to lib-o5dn.4.
 
 import (
 	"encoding/json"
