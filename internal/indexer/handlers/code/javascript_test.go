@@ -811,6 +811,32 @@ func TestJavaScriptGrammar_MixinMemberExpressionCallee(t *testing.T) {
 	}
 }
 
+// Mixin-application with no arguments: class Foo extends Mixin() {} emits
+// exactly 1 ref — the callee only — with dynamic=true and mixin_chain=["Mixin"].
+func TestJavaScriptGrammar_MixinNoArg(t *testing.T) {
+	src := `class Foo extends Mixin() {}`
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("m.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/m.js", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref (callee only), got %d (%+v)", len(refs), refs)
+	}
+	r := refs[0]
+	if r.Target != "Mixin" {
+		t.Errorf("Target = %q, want Mixin", r.Target)
+	}
+	if v, _ := r.Metadata["dynamic"].(bool); !v {
+		t.Errorf("expected dynamic=true; got %+v", r.Metadata)
+	}
+	chain, _ := r.Metadata["mixin_chain"].([]string)
+	if len(chain) != 1 || chain[0] != "Mixin" {
+		t.Errorf("mixin_chain = %v, want [Mixin]", chain)
+	}
+}
+
 func TestJavaScriptGrammar_MemberExpressionExtendsLeftAlone(t *testing.T) {
 	// JS `class X extends pkg.Base` — dotted identifier; resolver skips it
 	// (dotted Target is considered already-qualified).
