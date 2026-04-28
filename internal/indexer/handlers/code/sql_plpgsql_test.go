@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"librarian/internal/indexer"
+	"librarian/internal/store"
 )
 
 const plTestFuncPath = "public.testfunc"
@@ -34,7 +35,7 @@ func hasBodyRef(t *testing.T, refs []indexer.Reference, op, symTarget string) bo
 	t.Helper()
 	target := "sym:" + symTarget
 	for _, r := range refs {
-		if r.Kind == edgeKindBodyReferences && r.Metadata["op"] == op && r.Target == target {
+		if r.Kind == store.EdgeKindBodyReferences && r.Metadata["op"] == op && r.Target == target {
 			return true
 		}
 	}
@@ -46,7 +47,7 @@ func hasBodyRef(t *testing.T, refs []indexer.Reference, op, symTarget string) bo
 func hasMetaFlag(t *testing.T, refs []indexer.Reference, flag string) bool {
 	t.Helper()
 	for _, r := range refs {
-		if r.Kind == edgeKindBodyReferences {
+		if r.Kind == store.EdgeKindBodyReferences {
 			if v, ok := r.Metadata[flag].(bool); ok && v {
 				return true
 			}
@@ -412,7 +413,7 @@ END`))
 	// Literal EXECUTE → via_execute=true ref to public.audit.
 	foundViaExecute := false
 	for _, r := range refs {
-		if r.Kind == edgeKindBodyReferences {
+		if r.Kind == store.EdgeKindBodyReferences {
 			if v, ok := r.Metadata["via_execute"].(bool); ok && v {
 				foundViaExecute = true
 			}
@@ -472,7 +473,7 @@ func TestPlpgsql_EmptyBody(t *testing.T) {
 	}
 	bodyRefs := 0
 	for _, r := range refs {
-		if r.Kind == edgeKindBodyReferences {
+		if r.Kind == store.EdgeKindBodyReferences {
 			bodyRefs++
 		}
 	}
@@ -497,7 +498,7 @@ END`))
 	}
 	// cnt is a variable, not a table — no write ref expected.
 	for _, r := range refs {
-		if r.Kind == edgeKindBodyReferences && r.Metadata["op"] == "write" {
+		if r.Kind == store.EdgeKindBodyReferences && r.Metadata["op"] == "write" {
 			t.Errorf("unexpected write ref for SELECT INTO: %v", r)
 		}
 	}
@@ -514,7 +515,7 @@ END`))
 		t.Fatal("parse failed")
 	}
 	for _, r := range refs {
-		if r.Kind != edgeKindBodyReferences {
+		if r.Kind != store.EdgeKindBodyReferences {
 			continue
 		}
 		wantSource := "sym:myschema.myfunc(int)"
@@ -601,7 +602,7 @@ $$ LANGUAGE plpgsql;`,
 
 func pendingExecuteRef(source, expr string) indexer.Reference {
 	return indexer.Reference{
-		Kind:   edgeKindBodyReferences,
+		Kind:   store.EdgeKindBodyReferences,
 		Source: source,
 		Target: expr,
 		Metadata: map[string]any{
@@ -613,7 +614,7 @@ func pendingExecuteRef(source, expr string) indexer.Reference {
 
 func triggerSpecialRef(source, target string) indexer.Reference {
 	return indexer.Reference{
-		Kind:   edgeKindBodyReferences,
+		Kind:   store.EdgeKindBodyReferences,
 		Source: source,
 		Target: target,
 		Metadata: map[string]any{
@@ -641,7 +642,7 @@ func TestResolve_ExecuteLiteral(t *testing.T) {
 	// Should have a via_execute=true ref to public.audit.
 	found := false
 	for _, r := range out {
-		if r.Kind == edgeKindBodyReferences && r.Target == "sym:public.audit" {
+		if r.Kind == store.EdgeKindBodyReferences && r.Target == "sym:public.audit" {
 			if v, _ := r.Metadata["via_execute"].(bool); v {
 				found = true
 			}
@@ -678,7 +679,7 @@ func TestResolve_ExecuteVariable(t *testing.T) {
 
 	// Must not emit a sym: body_references edge for this EXECUTE.
 	for _, r := range out {
-		if r.Kind == edgeKindBodyReferences && strings.HasPrefix(r.Target, "sym:") {
+		if r.Kind == store.EdgeKindBodyReferences && strings.HasPrefix(r.Target, "sym:") {
 			t.Errorf("unexpected sym: ref for variable EXECUTE: %v", r)
 		}
 	}
@@ -791,7 +792,7 @@ func TestResolve_TriggerSelectNewStar(t *testing.T) {
 	// Table-level ref to the trigger target.
 	found := false
 	for _, r := range out {
-		if r.Kind == edgeKindBodyReferences && r.Target == "sym:public.users" {
+		if r.Kind == store.EdgeKindBodyReferences && r.Target == "sym:public.users" {
 			if r.Metadata["op"] == "read" {
 				found = true
 			}
@@ -820,7 +821,7 @@ func TestResolve_ExecuteDollarQuote(t *testing.T) {
 	// Should have a via_execute=true ref to public.logs.
 	found := false
 	for _, r := range out {
-		if r.Kind == edgeKindBodyReferences && r.Target == "sym:public.logs" {
+		if r.Kind == store.EdgeKindBodyReferences && r.Target == "sym:public.logs" {
 			if v, _ := r.Metadata["via_execute"].(bool); v {
 				found = true
 			}

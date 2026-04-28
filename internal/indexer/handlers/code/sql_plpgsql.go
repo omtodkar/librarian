@@ -28,9 +28,8 @@ import (
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
 	"librarian/internal/indexer"
+	"librarian/internal/store"
 )
-
-const edgeKindBodyReferences = "body_references"
 
 // plpgsqlExtractRefs parses a PL/pgSQL function body and extracts in-memory
 // body reference records. fullFuncSQL must be the complete CREATE FUNCTION ...
@@ -183,7 +182,7 @@ func plpgsqlWalkDynExecute(stmt map[string]any, funcPath string) []indexer.Refer
 		expr = "<dynamic>"
 	}
 	return []indexer.Reference{{
-		Kind:   edgeKindBodyReferences,
+		Kind:   store.EdgeKindBodyReferences,
 		Source: "sym:" + funcPath,
 		Target: expr, // raw EXECUTE expression — not a sym: path; resolved in lib-o5dn.4
 		Metadata: map[string]any{
@@ -398,7 +397,7 @@ func plpgsqlTriggerFieldRefs(datums []any, newVarno, oldVarno int, funcPath stri
 			continue
 		}
 		refs = append(refs, indexer.Reference{
-			Kind:   edgeKindBodyReferences,
+			Kind:   store.EdgeKindBodyReferences,
 			Source: "sym:" + funcPath,
 			Target: target, // resolved in lib-o5dn.4
 			Metadata: map[string]any{
@@ -420,7 +419,7 @@ func plpgsqlBodyRef(funcPath, targetPath, op string, triggerSpecial, pendingExec
 		meta["pending_execute"] = true
 	}
 	return indexer.Reference{
-		Kind:     edgeKindBodyReferences,
+		Kind:     store.EdgeKindBodyReferences,
 		Source:   "sym:" + funcPath,
 		Target:   "sym:" + targetPath,
 		Metadata: meta,

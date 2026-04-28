@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"librarian/internal/indexer"
+	"librarian/internal/store"
 )
 
 // ResolveDynamicExecute resolves body_references refs that carry
@@ -29,7 +30,7 @@ func ResolveDynamicExecute(refs []indexer.Reference, declaredVars map[string]boo
 	var out []indexer.Reference
 
 	for _, r := range refs {
-		if r.Kind != edgeKindBodyReferences {
+		if r.Kind != store.EdgeKindBodyReferences {
 			out = append(out, r)
 			continue
 		}
@@ -86,7 +87,7 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 	var out []indexer.Reference
 
 	for _, r := range refs {
-		if r.Kind != edgeKindBodyReferences {
+		if r.Kind != store.EdgeKindBodyReferences {
 			out = append(out, r)
 			continue
 		}
@@ -116,7 +117,7 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 		case target == "NEW.*":
 			tableTarget := "sym:" + schema + "." + triggerTarget
 			out = append(out, indexer.Reference{
-				Kind:     edgeKindBodyReferences,
+				Kind:     store.EdgeKindBodyReferences,
 				Source:   r.Source,
 				Target:   tableTarget,
 				Metadata: map[string]any{"op": "read"},
@@ -126,7 +127,7 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 			col := strings.TrimPrefix(target, "NEW.")
 			symTarget := "sym:" + schema + "." + triggerTarget + "." + col
 			out = append(out, indexer.Reference{
-				Kind:     edgeKindBodyReferences,
+				Kind:     store.EdgeKindBodyReferences,
 				Source:   r.Source,
 				Target:   symTarget,
 				Metadata: map[string]any{"op": op},
@@ -136,7 +137,7 @@ func ResolveTriggerNewOld(refs []indexer.Reference, triggerTarget, schema string
 			col := strings.TrimPrefix(target, "OLD.")
 			symTarget := "sym:" + schema + "." + triggerTarget + "." + col
 			out = append(out, indexer.Reference{
-				Kind:     edgeKindBodyReferences,
+				Kind:     store.EdgeKindBodyReferences,
 				Source:   r.Source,
 				Target:   symTarget,
 				Metadata: map[string]any{"op": "read"},
@@ -213,7 +214,7 @@ func defaultSchemaFromFuncPath(funcPath string) string {
 // prefix ensures graphTargetID drops the edge (no "sym:" prefix).
 func markerRef(source, funcPath, flag string) indexer.Reference {
 	return indexer.Reference{
-		Kind:   edgeKindBodyReferences,
+		Kind:   store.EdgeKindBodyReferences,
 		Source: source,
 		Target: "dyn:" + funcPath,
 		Metadata: map[string]any{

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"librarian/internal/indexer"
+	"librarian/internal/store"
 )
 
 type plpgsqlEdge struct {
@@ -28,15 +29,25 @@ type plpgsqlEdge struct {
 	sym string // without "sym:" prefix
 }
 
+// plpgsqlEdgeFlag asserts that the body_references edge (op, sym:sym) has the
+// given metadata flag set to true. Used to tie via_execute/uses_dynamic_sql/
+// nested_execute flags to a specific edge rather than any edge.
+type plpgsqlEdgeFlag struct {
+	op   string
+	sym  string
+	flag string
+}
+
 type plpgsqlCase struct {
-	name      string
-	file      string
-	funcPath  string
-	schema    string
-	wantOK    bool
-	edges     []plpgsqlEdge
-	metaFlags []string // metadata flag keys that must be true on at least one edge
-	noEdges   bool     // expect zero body_references edges after resolution
+	name       string
+	file       string
+	funcPath   string
+	schema     string
+	wantOK     bool
+	edges      []plpgsqlEdge
+	edgeFlags  []plpgsqlEdgeFlag // metadata flag required on a specific edge
+	metaFlags  []string          // metadata flag keys that must be true on at least one edge
+	noEdges    bool              // expect zero body_references sym: edges after resolution
 }
 
 // TestPlpgsqlMatrix exercises every construct in the fixture matrix.
@@ -124,41 +135,44 @@ func TestPlpgsqlMatrix(t *testing.T) {
 			edges:    []plpgsqlEdge{{"write", "public.t"}, {"write", "public.dup_log"}},
 		},
 		{
-			// Literal EXECUTE — resolver emits via_execute=true edge to audit.
+			// Literal EXECUTE — resolver emits a write edge to audit with via_execute=true.
 			name:      "execute_literal",
 			file:      "execute_literal.sql",
 			funcPath:  "public.execute_literal",
 			schema:    "public",
 			wantOK:    true,
 			edges:     []plpgsqlEdge{{"write", "public.audit"}},
-			metaFlags: []string{"via_execute"},
+			edgeFlags: []plpgsqlEdgeFlag{{"write", "public.audit", "via_execute"}},
 		},
 		{
-			// Variable EXECUTE — resolver emits uses_dynamic_sql=true marker, no sym: edge.
+			// Variable EXECUTE — resolver emits uses_dynamic_sql=true marker; no sym: edges.
 			name:      "execute_variable",
 			file:      "execute_variable.sql",
 			funcPath:  "public.execute_variable",
 			schema:    "public",
 			wantOK:    true,
 			metaFlags: []string{"uses_dynamic_sql"},
+			noEdges:   true,
 		},
 		{
-			// Mixed literal+variable concat — still treated as variable (Case B).
+			// Mixed literal+variable concat — Case B (variable); no sym: edges.
 			name:      "execute_concat_mixed",
 			file:      "execute_concat_mixed.sql",
 			funcPath:  "public.execute_concat_mixed",
 			schema:    "public",
 			wantOK:    true,
 			metaFlags: []string{"uses_dynamic_sql"},
+			noEdges:   true,
 		},
 		{
-			// Literal whose content starts with EXECUTE — nested_execute=true marker, no recursion.
+			// Literal whose content starts with EXECUTE — nested_execute=true; no sym: edges.
 			name:      "execute_nested",
 			file:      "execute_nested.sql",
 			funcPath:  "public.execute_nested",
 			schema:    "public",
 			wantOK:    true,
 			metaFlags: []string{"nested_execute"},
+			noEdges:   true,
 		},
 		{
 			// Trigger reading NEW.email: INSERT into audit survives; trigger_special refs dropped
@@ -246,7 +260,14 @@ func TestPlpgsqlMatrix(t *testing.T) {
 				}
 			}
 
-			// Assert required metadata flags.
+			// Assert per-edge metadata flags (flag must be true on the specific edge).
+			for _, ef := range tc.edgeFlags {
+				if !hasBodyRefWithFlag(t, refs, ef.op, ef.sym, ef.flag) {
+					t.Errorf("edge op=%s sym=%s missing flag %q; got %v", ef.op, ef.sym, ef.flag, refs)
+				}
+			}
+
+			// Assert required metadata flags on any edge.
 			for _, flag := range tc.metaFlags {
 				if !hasMetaFlag(t, refs, flag) {
 					t.Errorf("missing metadata flag %q; got %v", flag, refs)
@@ -259,6 +280,21 @@ func TestPlpgsqlMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hasBodyRefWithFlag returns true when refs contains a body_references entry with
+// the given op, sym:-prefixed target, and metadata flag set to true.
+func hasBodyRefWithFlag(t *testing.T, refs []indexer.Reference, op, symTarget, flag string) bool {
+	t.Helper()
+	target := "sym:" + symTarget
+	for _, r := range refs {
+		if r.Kind == store.EdgeKindBodyReferences && r.Metadata["op"] == op && r.Target == target {
+			if v, _ := r.Metadata[flag].(bool); v {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // assertNoPendingFlags verifies that no resolver-internal flags (pending_execute,
@@ -281,7 +317,7 @@ func assertNoPendingFlags(t *testing.T, refs []indexer.Reference) {
 func assertNoBodyRefEdges(t *testing.T, refs []indexer.Reference) {
 	t.Helper()
 	for _, r := range refs {
-		if r.Kind == edgeKindBodyReferences && strings.HasPrefix(r.Target, "sym:") {
+		if r.Kind == store.EdgeKindBodyReferences && strings.HasPrefix(r.Target, "sym:") {
 			t.Errorf("expected no body_references sym: edges; got %v", r)
 		}
 	}
