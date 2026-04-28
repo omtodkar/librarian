@@ -187,3 +187,62 @@ $$;
 		t.Errorf("expected exactly 1 body_references edge %s → %s; got %d", funcID, tableID, count)
 	}
 }
+
+// TestPlpgsqlBodyRefs_CrossFileTableFirst verifies that body_references edges
+// are resolved correctly in a two-file project when the table definition file
+// is processed before the function file (alphabetical ordering: "a_" prefix).
+//
+// Note: resolveBodyRefTarget is called per-file during the graph pass. When
+// the function file is processed before the table file (e.g. "a_funcs.sql"
+// before "b_tables.sql"), the table node may not yet exist in the store,
+// causing a false unresolved=true — a known limitation tracked in lib-ymwl.
+// This test uses "a_tables.sql" / "b_funcs.sql" to ensure deterministic
+// table-first ordering with MaxWorkers=1.
+func TestPlpgsqlBodyRefs_CrossFileTableFirst(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		// Named "a_" so it sorts before "b_" and is indexed first.
+		"a_tables.sql": `CREATE TABLE public.events (id SERIAL PRIMARY KEY);`,
+		"b_funcs.sql": `
+CREATE FUNCTION public.process_events() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  SELECT * FROM events;
+END;
+$$;
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	funcID := "sym:public.process_events"
+	tableID := "sym:public.events"
+	edges, err := s.Neighbors(funcID, "out", store.EdgeKindBodyReferences)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(edges) == 0 {
+		t.Fatalf("expected body_references edge from %s; got none", funcID)
+	}
+
+	var found *store.Edge
+	for i := range edges {
+		if edges[i].To == tableID {
+			found = &edges[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected edge %s → %s; edges: %+v", funcID, tableID, edges)
+	}
+
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(found.Metadata), &meta); err != nil {
+		t.Fatalf("unmarshal edge metadata: %v", err)
+	}
+	if v, _ := meta["unresolved"].(bool); v {
+		t.Errorf("edge should not be unresolved when table is indexed before function (table-first ordering)")
+	}
+}

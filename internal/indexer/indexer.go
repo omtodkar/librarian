@@ -1156,6 +1156,14 @@ func refEdgeSource(ref Reference, defaultNodeID string) string {
 // The returned Reference may have a modified Target (after fallback) or
 // modified Metadata (after double miss); the original slice element is
 // unchanged (range loop gives a copy).
+//
+// Known limitation (lib-ymwl): resolution runs per-file during the graph pass.
+// When the target table is defined in a separate file that is processed after
+// the function file, the table node does not yet exist in the store, and the
+// edge is incorrectly marked unresolved=true. A post-graph-pass resolver
+// (consistent with buildImplementsRPCEdges) would eliminate this ordering
+// dependency. For tables genuinely not in the project, unresolved=true is
+// correct regardless of ordering.
 func (idx *Indexer) resolveBodyRefTarget(ref Reference) Reference {
 	// pending_execute and trigger_special refs have raw (non-sym:) targets;
 	// graphTargetID will skip them — no store lookup needed.
