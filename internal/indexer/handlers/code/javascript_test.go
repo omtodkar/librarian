@@ -669,30 +669,108 @@ func TestTypeScriptGrammar_AbstractClassInheritance(t *testing.T) {
 	}
 }
 
-// Mixin-application: the parent is a call_expression; we fall back to the
-// callee identifier with unresolved_expression=true. Full handling lives
-// in lib-ap8.
-func TestJavaScriptGrammar_MixinCallFallback(t *testing.T) {
+// Mixin-application (simple): class Foo extends Mixin(Base) emits two refs —
+// one for the callee (Mixin) and one for the final argument (Base), both
+// annotated with dynamic=true and mixin_chain.
+func TestJavaScriptGrammar_MixinSimple(t *testing.T) {
 	src := `class Foo extends Mixin(Base) {}`
 	h := code.New(code.NewJavaScriptGrammar())
 	doc, err := h.ParseCtx("m.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/m.js", ProjectRoot: "/tmp"})
 	if err != nil {
 		t.Fatalf("ParseCtx: %v", err)
 	}
-	refs := inheritsRefsBySource(doc,"m.Foo")
-	if len(refs) != 1 {
-		t.Fatalf("expected 1 fallback ref, got %d (%+v)", len(refs), refs)
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs (callee + base), got %d (%+v)", len(refs), refs)
 	}
-	if refs[0].Target != "Mixin" {
-		t.Errorf("Target = %q, want Mixin (callee fallback)", refs[0].Target)
+	targets := map[string]bool{}
+	for _, r := range refs {
+		targets[r.Target] = true
+		if v, _ := r.Metadata["dynamic"].(bool); !v {
+			t.Errorf("ref %q: expected dynamic=true; got %+v", r.Target, r.Metadata)
+		}
+		chain, _ := r.Metadata["mixin_chain"].([]string)
+		if len(chain) != 2 || chain[0] != "Mixin" || chain[1] != "Base" {
+			t.Errorf("ref %q: mixin_chain = %v, want [Mixin Base]", r.Target, chain)
+		}
+		if v, _ := r.Metadata["unresolved_expression"].(bool); v {
+			t.Errorf("ref %q: must not carry unresolved_expression=true", r.Target)
+		}
 	}
-	if v, _ := refs[0].Metadata["unresolved_expression"].(bool); !v {
-		t.Errorf("expected unresolved_expression=true; got %+v", refs[0].Metadata)
+	if !targets["Mixin"] {
+		t.Errorf("expected a ref with Target=Mixin; got %+v", refs)
 	}
-	// And the full-name "unresolved" flag must NOT be set — that's reserved
-	// for identifier bases that couldn't match any import.
-	if v, _ := refs[0].Metadata["unresolved"].(bool); v {
-		t.Errorf("call-base should not carry unresolved=true: %+v", refs[0].Metadata)
+	if !targets["Base"] {
+		t.Errorf("expected a ref with Target=Base; got %+v", refs)
+	}
+}
+
+// Mixin-application (nested): class Foo extends Mixin1(Mixin2(Base)) emits two
+// refs — one for the outermost callee (Mixin1) and one for the final base (Base),
+// both with mixin_chain=["Mixin1","Mixin2","Base"].
+func TestJavaScriptGrammar_MixinNested(t *testing.T) {
+	src := `class Foo extends Mixin1(Mixin2(Base)) {}`
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("m.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/m.js", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs (outermost callee + final base), got %d (%+v)", len(refs), refs)
+	}
+	targets := map[string]bool{}
+	for _, r := range refs {
+		targets[r.Target] = true
+		if v, _ := r.Metadata["dynamic"].(bool); !v {
+			t.Errorf("ref %q: expected dynamic=true; got %+v", r.Target, r.Metadata)
+		}
+		chain, _ := r.Metadata["mixin_chain"].([]string)
+		wantChain := []string{"Mixin1", "Mixin2", "Base"}
+		if len(chain) != 3 || chain[0] != wantChain[0] || chain[1] != wantChain[1] || chain[2] != wantChain[2] {
+			t.Errorf("ref %q: mixin_chain = %v, want %v", r.Target, chain, wantChain)
+		}
+	}
+	if !targets["Mixin1"] {
+		t.Errorf("expected a ref with Target=Mixin1; got %+v", refs)
+	}
+	if !targets["Base"] {
+		t.Errorf("expected a ref with Target=Base; got %+v", refs)
+	}
+	// Mixin2 is an intermediate callee — not emitted as a standalone ref
+	if targets["Mixin2"] {
+		t.Errorf("Mixin2 should not be emitted as a standalone ref; got %+v", refs)
+	}
+}
+
+// Mixin-application with a non-class (string literal) argument: two refs are
+// emitted — one for the callee (Mixin) and one whose Target is the literal text
+// of the argument (including quotes). Both carry dynamic=true and mixin_chain.
+func TestJavaScriptGrammar_MixinNonClassArg(t *testing.T) {
+	src := `class Foo extends Mixin("not-a-class") {}`
+	h := code.New(code.NewJavaScriptGrammar())
+	doc, err := h.ParseCtx("m.js", []byte(src), indexer.ParseContext{AbsPath: "/tmp/m.js", ProjectRoot: "/tmp"})
+	if err != nil {
+		t.Fatalf("ParseCtx: %v", err)
+	}
+	refs := inheritsRefsBySource(doc, "m.Foo")
+	// callee ref + literal-text ref
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs (callee + literal arg), got %d (%+v)", len(refs), refs)
+	}
+	targets := map[string]bool{}
+	for _, r := range refs {
+		targets[r.Target] = true
+		if v, _ := r.Metadata["dynamic"].(bool); !v {
+			t.Errorf("ref %q: expected dynamic=true; got %+v", r.Target, r.Metadata)
+		}
+		chain, _ := r.Metadata["mixin_chain"].([]string)
+		if len(chain) != 2 {
+			t.Errorf("ref %q: mixin_chain = %v, want 2-element chain", r.Target, chain)
+		}
+	}
+	if !targets["Mixin"] {
+		t.Errorf("expected a ref with Target=Mixin; got %+v", refs)
 	}
 }
 

@@ -317,9 +317,8 @@ func extractJSImports(n *sitter.Node, source []byte) []ImportRef {
 // In JS, `class_heritage` wraps a single _expression child — the parent can
 // be an identifier, a member_expression (`pkg.Foo`), a call_expression
 // (mixin-application like `Mixin(Base)`), or a generic_type instantiation in
-// TS. The helper jsExtractParent handles each shape, falling back to the
-// callee identifier with unresolved_expression=true when the parent is a
-// call (full mixin handling is deferred to lib-ap8).
+// TS. jsMakeParents handles each shape; for call_expression it delegates to
+// jsMakeMixinParents which emits two refs (callee + base) with mixin metadata.
 func (g *jsLikeGrammar) SymbolParents(n *sitter.Node, source []byte) []ParentRef {
 	switch n.Kind() {
 	case "class_declaration", "abstract_class_declaration":
@@ -362,23 +361,17 @@ func jsClassParents(n *sitter.Node, source []byte) []ParentRef {
 				switch inner.Kind() {
 				case "extends_clause":
 					for k := uint(0); k < inner.NamedChildCount(); k++ {
-						if p := jsMakeParent(inner.NamedChild(k), "extends", source); p != nil {
-							out = append(out, *p)
-						}
+						out = append(out, jsMakeParents(inner.NamedChild(k), "extends", source)...)
 					}
 				case "implements_clause":
 					for k := uint(0); k < inner.NamedChildCount(); k++ {
-						if p := jsMakeParent(inner.NamedChild(k), "implements", source); p != nil {
-							out = append(out, *p)
-						}
+						out = append(out, jsMakeParents(inner.NamedChild(k), "implements", source)...)
 					}
 				default:
 					// JS: class_heritage's named child is the extends
 					// expression directly (identifier / member_expression /
 					// call_expression).
-					if p := jsMakeParent(inner, "extends", source); p != nil {
-						out = append(out, *p)
-					}
+					out = append(out, jsMakeParents(inner, "extends", source)...)
 				}
 			}
 		case "implements_clause":
@@ -386,9 +379,7 @@ func jsClassParents(n *sitter.Node, source []byte) []ParentRef {
 			// a sibling of class_heritage rather than a child. Handling both
 			// shapes keeps us robust across tree-sitter-typescript versions.
 			for j := uint(0); j < c.NamedChildCount(); j++ {
-				if p := jsMakeParent(c.NamedChild(j), "implements", source); p != nil {
-					out = append(out, *p)
-				}
+				out = append(out, jsMakeParents(c.NamedChild(j), "implements", source)...)
 			}
 		}
 	}
@@ -409,9 +400,7 @@ func jsInterfaceParents(n *sitter.Node, source []byte) []ParentRef {
 			continue
 		}
 		for j := uint(0); j < c.NamedChildCount(); j++ {
-			if p := jsMakeParent(c.NamedChild(j), "extends", source); p != nil {
-				out = append(out, *p)
-			}
+			out = append(out, jsMakeParents(c.NamedChild(j), "extends", source)...)
 		}
 	}
 	return out
@@ -446,8 +435,9 @@ func jsMakeParent(c *sitter.Node, relation string, source []byte) *ParentRef {
 // jsExtractParent teases a JS/TS parent-type node into (name, typeArgs,
 // unresolvedExpr). Recognises identifier / member_expression for JS class
 // extends; type_identifier / nested_type_identifier / generic_type for TS
-// implements / interface-extends clauses; and call_expression for the
-// mixin-application fallback.
+// implements / interface-extends clauses.
+// call_expression nodes (mixin-application) are pre-intercepted by jsMakeParents
+// and never reach this function.
 func jsExtractParent(n *sitter.Node, source []byte) (string, []string, bool) {
 	switch n.Kind() {
 	case "identifier", "type_identifier", "nested_type_identifier":
@@ -492,17 +482,87 @@ func jsExtractParent(n *sitter.Node, source []byte) (string, []string, bool) {
 			}
 		}
 		return name, args, false
-	case "call_expression":
-		// Mixin-application pattern: `class Foo extends Mixin(Base)`. Full
-		// handling lives in lib-ap8; here we fall back to the callee
-		// identifier so SOMETHING lands in the graph with a clear marker.
-		fn := n.ChildByFieldName("function")
-		if fn == nil {
-			return "", nil, true
-		}
-		return strings.TrimSpace(fn.Utf8Text(source)), nil, true
 	}
 	return "", nil, false
+}
+
+// jsMakeParents generalises jsMakeParent to return multiple ParentRefs.
+// For call_expression nodes (mixin-application pattern) it delegates to
+// jsMakeMixinParents, which emits two refs (outermost callee + final base).
+// All other node kinds produce at most one ref via jsMakeParent.
+func jsMakeParents(c *sitter.Node, relation string, source []byte) []ParentRef {
+	if c == nil {
+		return nil
+	}
+	if c.Kind() == "call_expression" {
+		return jsMakeMixinParents(c, relation, source)
+	}
+	if p := jsMakeParent(c, relation, source); p != nil {
+		return []ParentRef{*p}
+	}
+	return nil
+}
+
+// jsMakeMixinParents handles a call_expression in extends position.
+// It emits a ParentRef for the outermost callee identifier (the mixin factory)
+// and a ParentRef for the final non-call argument (the real base class), both
+// carrying metadata.dynamic=true and metadata.mixin_chain listing the full chain.
+//
+//	class Foo extends Mixin(Base)           → chain ["Mixin", "Base"]
+//	class Foo extends Mixin1(Mixin2(Base))  → chain ["Mixin1", "Mixin2", "Base"]
+func jsMakeMixinParents(n *sitter.Node, relation string, source []byte) []ParentRef {
+	chain := jsMixinChain(n, source)
+	if len(chain) == 0 {
+		return nil
+	}
+	loc := indexer.Location{
+		Line:       int(n.StartPosition().Row) + 1,
+		Column:     int(n.StartPosition().Column) + 1,
+		ByteOffset: int(n.StartByte()),
+	}
+	meta := map[string]any{
+		"dynamic":     true,
+		"mixin_chain": chain,
+	}
+	refs := []ParentRef{{Name: chain[0], Relation: relation, Loc: loc, Metadata: meta}}
+	if len(chain) >= 2 && chain[len(chain)-1] != chain[0] {
+		refs = append(refs, ParentRef{Name: chain[len(chain)-1], Relation: relation, Loc: loc, Metadata: meta})
+	}
+	return refs
+}
+
+// jsMixinChain walks a call_expression node and returns the ordered chain of
+// names: the callee at each nesting level followed by the final non-call argument.
+//
+//	Mixin(Base)           → ["Mixin", "Base"]
+//	Mixin1(Mixin2(Base))  → ["Mixin1", "Mixin2", "Base"]
+func jsMixinChain(n *sitter.Node, source []byte) []string {
+	fn := n.ChildByFieldName("function")
+	if fn == nil {
+		return nil
+	}
+	callee := strings.TrimSpace(fn.Utf8Text(source))
+	if callee == "" {
+		return nil
+	}
+	argsNode := n.ChildByFieldName("arguments")
+	if argsNode == nil {
+		return []string{callee}
+	}
+	var firstArg *sitter.Node
+	for i := uint(0); i < argsNode.NamedChildCount(); i++ {
+		if a := argsNode.NamedChild(i); a != nil {
+			firstArg = a
+			break
+		}
+	}
+	if firstArg == nil {
+		return []string{callee}
+	}
+	if firstArg.Kind() == "call_expression" {
+		return append([]string{callee}, jsMixinChain(firstArg, source)...)
+	}
+	return []string{callee, strings.TrimSpace(firstArg.Utf8Text(source))}
 }
 
 // ResolveParents implements inheritanceResolver for JS/TS. Mirrors the Java
