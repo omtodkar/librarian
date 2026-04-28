@@ -1162,6 +1162,87 @@ func TestGraphPass_DigestPinnedLocalStage(t *testing.T) {
 	}
 }
 
+// TestGraphPass_SpaceSeparatedPlatformFlag verifies that FROM --platform linux/amd64
+// ubuntu:22.04 (space-separated flag, two tokens) correctly resolves ubuntu:22.04 as
+// the base image rather than linux/amd64.
+func TestGraphPass_SpaceSeparatedPlatformFlag(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM --platform linux/amd64 ubuntu:22.04\nRUN echo hello\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+	if stages[0].Metadata["base_image"] != "ubuntu:22.04" {
+		t.Errorf("base_image = %q, want ubuntu:22.04 (linux/amd64 is the flag value, not the image)",
+			stages[0].Metadata["base_image"])
+	}
+
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	if len(extRefs) != 1 {
+		t.Fatalf("expected 1 external import ref, got %d: %+v", len(extRefs), extRefs)
+	}
+	if extRefs[0].Target != "docker.io/library/ubuntu:22.04" {
+		t.Errorf("Target = %q, want docker.io/library/ubuntu:22.04", extRefs[0].Target)
+	}
+}
+
+// TestGraphPass_SpaceSeparatedPlatformFlagWithAS verifies that FROM --platform linux/amd64
+// ubuntu:22.04 AS myapp correctly extracts both the base image and the stage name.
+func TestGraphPass_SpaceSeparatedPlatformFlagWithAS(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM --platform linux/amd64 ubuntu:22.04 AS myapp\nRUN echo hello\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+	if stages[0].Path != "stage:myapp" {
+		t.Errorf("stage path = %q, want stage:myapp", stages[0].Path)
+	}
+	if stages[0].Metadata["base_image"] != "ubuntu:22.04" {
+		t.Errorf("base_image = %q, want ubuntu:22.04", stages[0].Metadata["base_image"])
+	}
+}
+
+// TestGraphPass_MixedFlagForms verifies that a Dockerfile mixing --key=value and
+// --key value flag forms across stages parses all base images correctly.
+func TestGraphPass_MixedFlagForms(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM --platform=linux/amd64 golang:1.22 AS builder
+RUN go build -o /app .
+
+FROM --platform linux/arm64 alpine:3.19 AS runner
+COPY --from=builder /app /app
+CMD ["/app"]
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stage Units, got %d", len(stages))
+	}
+	if stages[0].Metadata["base_image"] != "golang:1.22" {
+		t.Errorf("stages[0] base_image = %q, want golang:1.22", stages[0].Metadata["base_image"])
+	}
+	if stages[1].Metadata["base_image"] != "alpine:3.19" {
+		t.Errorf("stages[1] base_image = %q, want alpine:3.19", stages[1].Metadata["base_image"])
+	}
+}
+
 // TestGraphPass_DigestPinnedBaseImage verifies that FROM ubuntu@sha256:abc123 emits
 // an external import edge and that the digest ref is correctly normalized.
 func TestGraphPass_DigestPinnedBaseImage(t *testing.T) {

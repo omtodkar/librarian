@@ -427,8 +427,13 @@ func parseFromLine(line string) (baseImage, stageName string) {
 	fields = fields[1:]
 
 	// Skip --flags (--platform, --network, etc.).
+	// Flags come in two forms: --key=value (single token) or --key value (two tokens).
 	for len(fields) > 0 && strings.HasPrefix(fields[0], "--") {
-		fields = fields[1:]
+		if !strings.Contains(fields[0], "=") && len(fields) > 1 {
+			fields = fields[2:] // space-separated: skip flag name and its value
+		} else {
+			fields = fields[1:] // --key=value or bare flag with no value
+		}
 	}
 
 	if len(fields) == 0 {
