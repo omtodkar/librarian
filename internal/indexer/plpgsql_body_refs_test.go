@@ -316,3 +316,33 @@ CREATE FUNCTION public.bad_func() RETURNS void LANGUAGE plpgsql AS $$ SELECT 1 $
 		t.Errorf("expected body_references edges for good_func; got none")
 	}
 }
+
+// TestPlpgsqlBodyRefs_LanguageSQLNoBodyRefs verifies that a LANGUAGE sql
+// function (not plpgsql) never produces body_references edges. The PL/pgSQL
+// walker must only be invoked for LANGUAGE plpgsql.
+func TestPlpgsqlBodyRefs_LanguageSQLNoBodyRefs(t *testing.T) {
+	dir := t.TempDir()
+	writeImplementsRPCFixture(t, dir, map[string]string{
+		"schema.sql": `
+CREATE TABLE public.users (id SERIAL PRIMARY KEY, name TEXT);
+
+CREATE FUNCTION public.get_user_count() RETURNS bigint LANGUAGE sql AS $$
+  SELECT count(*) FROM users;
+$$;
+`,
+	})
+
+	idx, s := openImplementsRPCStore(t, dir)
+	if _, err := idx.IndexProjectGraph(dir, true); err != nil {
+		t.Fatalf("IndexProjectGraph: %v", err)
+	}
+
+	funcID := "sym:public.get_user_count"
+	edges, err := s.Neighbors(funcID, "out", store.EdgeKindBodyReferences)
+	if err != nil {
+		t.Fatalf("Neighbors(%s): %v", funcID, err)
+	}
+	if len(edges) != 0 {
+		t.Errorf("expected 0 body_references edges for LANGUAGE sql function; got %d: %+v", len(edges), edges)
+	}
+}
