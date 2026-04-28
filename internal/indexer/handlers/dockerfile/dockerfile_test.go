@@ -1119,6 +1119,49 @@ func TestGraphPass_ARGBasedBaseImage(t *testing.T) {
 	}
 }
 
+// TestGraphPass_DigestPinnedLocalStage verifies that a stage-to-stage reference that
+// includes a digest pin (e.g. FROM base@sha256:abc123 AS runtime) still resolves to a
+// stage inherits edge rather than an external import edge.
+//
+// This is the key regression for the lib-mcog bug: strings.Index(lowerBase, ':') used
+// to find the colon inside 'sha256:abc' before the tag separator, producing
+// baseNameOnly='base@sha256' instead of 'base'. The fix strips '@<digest>' first so
+// the lookup correctly resolves to the local stage name.
+func TestGraphPass_DigestPinnedLocalStage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := "FROM ubuntu:22.04 AS base\nRUN echo setup\n\nFROM base@sha256:abc123def456 AS runtime\nRUN echo run\n"
+
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stage Units, got %d", len(stages))
+	}
+
+	// Stage-to-stage inherits edge: runtime → base (not an external import).
+	stageEdges := refsOfKind(doc.Refs, "inherits", "stage")
+	if len(stageEdges) != 1 {
+		t.Fatalf("expected 1 stage inherits edge for digest-pinned local stage ref, got %d: %+v", len(stageEdges), doc.Refs)
+	}
+	if stageEdges[0].Source != "stage:runtime" {
+		t.Errorf("edge Source = %q, want stage:runtime", stageEdges[0].Source)
+	}
+	if stageEdges[0].Target != "stage:base" {
+		t.Errorf("edge Target = %q, want stage:base", stageEdges[0].Target)
+	}
+
+	// No external import ref should be emitted for the runtime stage.
+	extRefs := refsOfKind(doc.Refs, "import", "")
+	for _, r := range extRefs {
+		if r.Source == "stage:runtime" {
+			t.Errorf("unexpected external import ref for digest-pinned local stage: %+v", r)
+		}
+	}
+}
+
 // TestGraphPass_DigestPinnedBaseImage verifies that FROM ubuntu@sha256:abc123 emits
 // an external import edge and that the digest ref is correctly normalized.
 func TestGraphPass_DigestPinnedBaseImage(t *testing.T) {
