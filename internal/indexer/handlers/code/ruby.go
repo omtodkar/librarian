@@ -410,8 +410,6 @@ func rubySymbolText(n *sitter.Node, source []byte) string {
 }
 
 // rubyConstantName returns the fully-qualified constant name from an AST node.
-// Handles simple constants ("Animal") and scoped constants ("Mod::Animal").
-// rubyConstantName returns the fully-qualified constant name from an AST node.
 // Handles:
 //   - "constant"       → bare name ("Animal")
 //   - "scope_resolution" → qualified name ("Pets::Dog")

@@ -140,6 +140,7 @@ The heavy retrieval tool: a comprehensive briefing combining vector search with 
 |---|---|---|---|---|---|
 | `query` | string | yes | — | **STABLE** | Topic to brief |
 | `limit` | number | no | 5 | **STABLE** | Initial search results; min 1, max 10 |
+| `budget` | number | no | 0 | **STABLE** | Token budget: chunks are included in rank order until the next chunk would exceed this value; 0 = disabled. Approximate — uses whitespace-split heuristic (words/0.75). |
 
 **Output:** Structured markdown with five sections (headings are **STABLE**):
 
