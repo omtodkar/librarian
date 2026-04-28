@@ -810,6 +810,19 @@ func sqlExtractFunction(n *sitter.Node, source []byte, doc *indexer.ParsedDoc, m
 		meta["migration_tool"] = migTool
 	}
 
+	// For PL/pgSQL functions, extract body references (lib-o5dn.3).
+	// plpgsqlExtractRefs needs the full CREATE FUNCTION statement text.
+	// On parse failure, mark the function unit as partially parsed so
+	// callers know the body_references set is incomplete.
+	if strings.EqualFold(language, "plpgsql") {
+		bodyRefs, ok := plpgsqlExtractRefs(funcPath, schema, n.Utf8Text(source))
+		if !ok {
+			meta["partial"] = true
+		} else {
+			doc.Refs = append(doc.Refs, bodyRefs...)
+		}
+	}
+
 	doc.Units = append(doc.Units, indexer.Unit{
 		Kind:     "function",
 		Title:    funcName,

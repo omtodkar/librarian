@@ -26,7 +26,8 @@ const (
 	EdgeKindCall          = "call"      // symbol → symbol (function/method call; Metadata["confidence"]="resolved"|"unresolved"|"ambiguous")
 	EdgeKindCallRPC       = "call_rpc"  // symbol → symbol (call site in hand-written code → proto rpc declaration; runtime invocation, not codegen derivation — kept distinct from implements_rpc so derivation and invocation queries stay clean)
 	EdgeKindTests         = "tests"     // code_file → code_file (test file → subject file; path-convention heuristic, additive signal)
-	EdgeKindReferences    = "references" // symbol → symbol (SQL FK: child column/table → parent column/table; distinct from inherits to keep class-parent queries clean)
+	EdgeKindReferences    = "references"      // symbol → symbol (SQL FK: child column/table → parent column/table; distinct from inherits to keep class-parent queries clean)
+	EdgeKindBodyReferences = "body_references" // symbol → symbol (PL/pgSQL function body read/write of a table or column; Metadata["op"]∈{read,write,both,procedure_call})
 )
 
 // Graph node kinds. Additional kinds will land as new handlers emit richer

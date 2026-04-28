@@ -807,6 +807,12 @@ func (idx *Indexer) indexGraphFileDirect(file WalkResult, result *GraphResult, f
 	// a Reference.Metadata with unresolved=true can't poison a resolved
 	// node's metadata downstream.
 	for _, ref := range allRefs {
+		// body_references: resolve target with column→table fallback and
+		// unresolved marking before the generic projection path below.
+		if ref.Kind == store.EdgeKindBodyReferences {
+			ref = idx.resolveBodyRefTarget(ref)
+		}
+
 		targetID := graphTargetID(ref)
 		if targetID == "" {
 			continue
@@ -1120,9 +1126,54 @@ func (idx *Indexer) resolveSummaries(chunks []Chunk, result *IndexResult) []stri
 // behaviour end-to-end.
 func refEdgeSource(ref Reference, defaultNodeID string) string {
 	if ref.Source != "" {
+		// The PL/pgSQL walker (and any future grammar that emits fully-qualified
+		// node IDs) sets Source to the ready-to-use node ID (e.g. "sym:schema.f()").
+		// Other grammars set Source to the bare symbol path and rely on the
+		// SymbolNodeID prefix. Detect the already-prefixed case to avoid
+		// producing "sym:sym:schema.f()".
+		if strings.ContainsRune(ref.Source, ':') {
+			return ref.Source
+		}
 		return store.SymbolNodeID(ref.Source)
 	}
 	return defaultNodeID
+}
+
+// resolveBodyRefTarget implements the target-node lookup for body_references
+// edges. It looks for the target in the store and, on miss, tries a
+// column→table fallback (sym:schema.table.col → sym:schema.table). On double
+// miss it adds unresolved=true and target_name to the Reference's Metadata so
+// downstream queries can distinguish genuine placeholders from missing symbols.
+//
+// The returned Reference may have a modified Target (after fallback) or
+// modified Metadata (after double miss); the original slice element is
+// unchanged (range loop gives a copy).
+func (idx *Indexer) resolveBodyRefTarget(ref Reference) Reference {
+	existing, _ := idx.store.GetNode(ref.Target)
+	if existing != nil {
+		return ref
+	}
+
+	// Column-level fallback: sym:schema.table.column → sym:schema.table.
+	bare := strings.TrimPrefix(ref.Target, "sym:")
+	parts := strings.Split(bare, ".")
+	if len(parts) >= 3 {
+		tableID := "sym:" + strings.Join(parts[:len(parts)-1], ".")
+		if tbl, _ := idx.store.GetNode(tableID); tbl != nil {
+			ref.Target = tableID
+			return ref
+		}
+	}
+
+	// Double miss: emit edge with unresolved marker so consumers can filter.
+	meta := make(map[string]any, len(ref.Metadata)+2)
+	for k, v := range ref.Metadata {
+		meta[k] = v
+	}
+	meta["unresolved"] = true
+	meta["target_name"] = bare
+	ref.Metadata = meta
+	return ref
 }
 
 // refMetadataJSON serialises Reference.Metadata to a JSON string suitable for
@@ -1312,6 +1363,14 @@ func graphTargetID(ref Reference) string {
 		return store.SymbolNodeID(ref.Target)
 	case store.EdgeKindContains:
 		return store.SymbolNodeID(ref.Target)
+	case store.EdgeKindBodyReferences:
+		// The PL/pgSQL walker emits fully-namespaced "sym:schema.table" targets.
+		// trigger_special / pending_execute refs use raw expressions (no "sym:" prefix)
+		// and are resolved in lib-o5dn.4; skip them here.
+		if !strings.HasPrefix(ref.Target, "sym:") {
+			return ""
+		}
+		return ref.Target
 	case "part":
 		return store.CodeFileNodeID(ref.Target)
 	case "config-key":
@@ -1337,6 +1396,8 @@ func graphNodeKindFromRef(ref Reference) string {
 		}
 		return store.NodeKindSymbol
 	case store.EdgeKindContains:
+		return store.NodeKindSymbol
+	case store.EdgeKindBodyReferences:
 		return store.NodeKindSymbol
 	case "part":
 		return store.NodeKindCodeFile
