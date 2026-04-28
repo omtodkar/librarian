@@ -391,9 +391,10 @@ END`))
 	}
 }
 
-// TestPlpgsql_ExecutePendingFlag verifies EXECUTE nodes are captured with
-// pending_execute=true and not resolved.
-func TestPlpgsql_ExecutePendingFlag(t *testing.T) {
+// TestPlpgsql_ExecuteResolved verifies EXECUTE nodes are resolved by lib-o5dn.4:
+//   - literal EXECUTE → body_references edge with via_execute=true
+//   - variable/concat EXECUTE → uses_dynamic_sql=true marker, no body_references edge
+func TestPlpgsql_ExecuteResolved(t *testing.T) {
 	refs, ok := plpgsqlExtractRefs(plTestFuncPath, plTestSchema, wrapSig("(tname text)", `
 BEGIN
   EXECUTE 'DELETE FROM ' || tname;
@@ -402,25 +403,34 @@ END`))
 	if !ok {
 		t.Fatal("parse failed")
 	}
-	if !hasMetaFlag(t, refs, "pending_execute") {
-		t.Errorf("expected pending_execute=true on at least one ref; got %v", refs)
+	// No pending_execute refs should remain after the resolver.
+	for _, r := range refs {
+		if v, ok := r.Metadata["pending_execute"].(bool); ok && v {
+			t.Errorf("pending_execute should be cleared by resolver; got %v", r)
+		}
 	}
-	executeCount := 0
+	// Literal EXECUTE → via_execute=true ref to public.audit.
+	foundViaExecute := false
 	for _, r := range refs {
 		if r.Kind == edgeKindBodyReferences {
-			if v, ok := r.Metadata["pending_execute"].(bool); ok && v {
-				executeCount++
+			if v, ok := r.Metadata["via_execute"].(bool); ok && v {
+				foundViaExecute = true
 			}
 		}
 	}
-	if executeCount != 2 {
-		t.Errorf("expected 2 EXECUTE refs with pending_execute=true, got %d", executeCount)
+	if !foundViaExecute {
+		t.Errorf("expected a via_execute=true ref from literal EXECUTE; got %v", refs)
+	}
+	// Variable EXECUTE → uses_dynamic_sql=true marker.
+	if !hasMetaFlag(t, refs, "uses_dynamic_sql") {
+		t.Errorf("expected uses_dynamic_sql=true from variable EXECUTE; got %v", refs)
 	}
 }
 
-// TestPlpgsql_TriggerNewOldFlag verifies trigger bodies produce refs with
-// trigger_special=true for NEW/OLD field accesses.
-func TestPlpgsql_TriggerNewOldFlag(t *testing.T) {
+// TestPlpgsql_TriggerResolved verifies that after lib-o5dn.4 resolves trigger
+// bodies: trigger_special refs are cleared (dropped when triggerTarget is empty),
+// and the inline SQL ref to public.audit is preserved.
+func TestPlpgsql_TriggerResolved(t *testing.T) {
 	refs, ok := plpgsqlExtractRefs("public.audit_trigger", plTestSchema,
 		`CREATE FUNCTION audit_trigger() RETURNS trigger AS $$
 BEGIN
@@ -431,11 +441,15 @@ $$ LANGUAGE plpgsql;`)
 	if !ok {
 		t.Fatal("parse failed")
 	}
+	// INSERT INTO audit → write ref must survive.
 	if !hasBodyRef(t, refs, "write", "public.audit") {
 		t.Errorf("missing write ref to public.audit; got %v", refs)
 	}
-	if !hasMetaFlag(t, refs, "trigger_special") {
-		t.Errorf("expected trigger_special=true on at least one ref; got %v", refs)
+	// trigger_special refs are dropped when triggerTarget is unknown.
+	for _, r := range refs {
+		if v, ok := r.Metadata["trigger_special"].(bool); ok && v {
+			t.Errorf("trigger_special should be cleared by resolver; got %v", r)
+		}
 	}
 }
 
@@ -580,5 +594,208 @@ $$ LANGUAGE plpgsql;`,
 				t.Errorf("fixture %s: parse failed", fix.name)
 			}
 		})
+	}
+}
+
+// ─── lib-o5dn.4 resolver unit tests ─────────────────────────────────────────
+
+func pendingExecuteRef(source, expr string) indexer.Reference {
+	return indexer.Reference{
+		Kind:   edgeKindBodyReferences,
+		Source: source,
+		Target: expr,
+		Metadata: map[string]any{
+			"op":              "write",
+			"pending_execute": true,
+		},
+	}
+}
+
+func triggerSpecialRef(source, target string) indexer.Reference {
+	return indexer.Reference{
+		Kind:   edgeKindBodyReferences,
+		Source: source,
+		Target: target,
+		Metadata: map[string]any{
+			"op":              "read",
+			"trigger_special": true,
+		},
+	}
+}
+
+// TestResolve_ExecuteLiteral verifies that a string-literal EXECUTE argument
+// is parsed and emits a via_execute=true body_references edge.
+func TestResolve_ExecuteLiteral(t *testing.T) {
+	refs := []indexer.Reference{
+		pendingExecuteRef("sym:public.testfunc", "'INSERT INTO audit VALUES (1)'"),
+	}
+	out := ResolveDynamicExecute(refs, nil)
+
+	// No pending_execute should remain.
+	for _, r := range out {
+		if v, _ := r.Metadata["pending_execute"].(bool); v {
+			t.Errorf("pending_execute not cleared: %v", r)
+		}
+	}
+
+	// Should have a via_execute=true ref to public.audit.
+	found := false
+	for _, r := range out {
+		if r.Kind == edgeKindBodyReferences && r.Target == "sym:public.audit" {
+			if v, _ := r.Metadata["via_execute"].(bool); v {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected via_execute=true ref to sym:public.audit; got %v", out)
+	}
+}
+
+// TestResolve_ExecuteVariable verifies that a variable EXECUTE argument sets
+// uses_dynamic_sql=true and emits no table body_references.
+func TestResolve_ExecuteVariable(t *testing.T) {
+	refs := []indexer.Reference{
+		pendingExecuteRef("sym:public.testfunc", "'DELETE FROM ' || tname"),
+	}
+	out := ResolveDynamicExecute(refs, nil)
+
+	for _, r := range out {
+		if v, _ := r.Metadata["pending_execute"].(bool); v {
+			t.Errorf("pending_execute not cleared: %v", r)
+		}
+	}
+
+	found := false
+	for _, r := range out {
+		if v, _ := r.Metadata["uses_dynamic_sql"].(bool); v {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected uses_dynamic_sql=true; got %v", out)
+	}
+
+	// Must not emit a sym: body_references edge for this EXECUTE.
+	for _, r := range out {
+		if r.Kind == edgeKindBodyReferences && strings.HasPrefix(r.Target, "sym:") {
+			t.Errorf("unexpected sym: ref for variable EXECUTE: %v", r)
+		}
+	}
+}
+
+// TestResolve_ExecuteConcat verifies that a mixed literal+variable EXECUTE
+// (Case B) is treated as a variable — uses_dynamic_sql=true.
+func TestResolve_ExecuteConcat(t *testing.T) {
+	refs := []indexer.Reference{
+		pendingExecuteRef("sym:public.testfunc", "'SELECT * FROM ' || tname || ' WHERE id=1'"),
+	}
+	out := ResolveDynamicExecute(refs, nil)
+
+	found := false
+	for _, r := range out {
+		if v, _ := r.Metadata["uses_dynamic_sql"].(bool); v {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected uses_dynamic_sql=true for concat EXECUTE; got %v", out)
+	}
+}
+
+// TestResolve_ExecuteNested verifies that a literal EXECUTE whose content
+// contains another EXECUTE emits nested_execute=true and no further parsing.
+func TestResolve_ExecuteNested(t *testing.T) {
+	refs := []indexer.Reference{
+		pendingExecuteRef("sym:public.testfunc", "'EXECUTE ''SELECT 1'''"),
+	}
+	out := ResolveDynamicExecute(refs, nil)
+
+	found := false
+	for _, r := range out {
+		if v, _ := r.Metadata["nested_execute"].(bool); v {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected nested_execute=true; got %v", out)
+	}
+}
+
+// TestResolve_TriggerNewColWrite verifies NEW.col is rewritten to a sym: path
+// with op=write.
+func TestResolve_TriggerNewColWrite(t *testing.T) {
+	refs := []indexer.Reference{
+		triggerSpecialRef("sym:public.audit_trigger", "NEW.email"),
+	}
+	out := ResolveTriggerNewOld(refs, "users", "public")
+
+	for _, r := range out {
+		if v, _ := r.Metadata["trigger_special"].(bool); v {
+			t.Errorf("trigger_special not cleared: %v", r)
+		}
+	}
+
+	if !hasBodyRef(t, out, "write", "public.users.email") {
+		t.Errorf("expected write ref to sym:public.users.email; got %v", out)
+	}
+}
+
+// TestResolve_TriggerOldColRead verifies OLD.col is rewritten with op=read.
+func TestResolve_TriggerOldColRead(t *testing.T) {
+	refs := []indexer.Reference{
+		triggerSpecialRef("sym:public.audit_trigger", "OLD.email"),
+	}
+	out := ResolveTriggerNewOld(refs, "users", "public")
+
+	if !hasBodyRef(t, out, "read", "public.users.email") {
+		t.Errorf("expected read ref to sym:public.users.email; got %v", out)
+	}
+}
+
+// TestResolve_TriggerReturnNew verifies RETURN NEW produces no body_references
+// ref (the walker never emits a trigger_special ref for bare RETURN NEW).
+func TestResolve_TriggerReturnNew(t *testing.T) {
+	// RETURN NEW does not produce a PLpgSQL_recfield datum, so
+	// plpgsqlTriggerFieldRefs never emits a ref for it.  Verify that the
+	// trigger body with RETURN NEW has no extra refs after resolution.
+	refs, ok := plpgsqlExtractRefs("public.audit_trigger", plTestSchema,
+		`CREATE FUNCTION audit_trigger() RETURNS trigger AS $$
+BEGIN
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;`)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	for _, r := range refs {
+		if v, _ := r.Metadata["trigger_special"].(bool); v {
+			t.Errorf("unexpected trigger_special ref for RETURN NEW: %v", r)
+		}
+	}
+	if len(refs) != 0 {
+		t.Errorf("expected no refs for RETURN-only trigger body; got %v", refs)
+	}
+}
+
+// TestResolve_TriggerSelectNewStar verifies that a NEW.* wildcard ref is
+// resolved to a table-level ref (op=read) against the trigger target.
+func TestResolve_TriggerSelectNewStar(t *testing.T) {
+	refs := []indexer.Reference{
+		triggerSpecialRef("sym:public.audit_trigger", "NEW.*"),
+	}
+	out := ResolveTriggerNewOld(refs, "users", "public")
+
+	// Table-level ref to the trigger target.
+	found := false
+	for _, r := range out {
+		if r.Kind == edgeKindBodyReferences && r.Target == "sym:public.users" {
+			if r.Metadata["op"] == "read" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected read ref to sym:public.users for NEW.*; got %v", out)
 	}
 }

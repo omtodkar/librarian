@@ -76,6 +76,13 @@ func plpgsqlExtractRefs(funcPath, defaultSchema, fullFuncSQL string) ([]indexer.
 		refs = append(refs, plpgsqlTriggerFieldRefs(datums, newVarno, oldVarno, funcPath)...)
 	}
 
+	// lib-o5dn.4: resolve pending_execute and trigger_special refs.
+	// triggerTarget is not available at function-parse time (it lives on the
+	// CREATE TRIGGER unit); pass "" so ResolveTriggerNewOld drops unresolvable
+	// trigger_special refs rather than producing malformed sym: paths.
+	refs = ResolveDynamicExecute(refs, nil)
+	refs = ResolveTriggerNewOld(refs, "", defaultSchema)
+
 	return refs, true
 }
 
