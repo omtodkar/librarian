@@ -1580,3 +1580,267 @@ CMD ["/app"]
 		}
 	}
 }
+
+// ── BuildKit RUN --mount tests (lib-li3p) ───────────────────────────────────
+
+// runMounts extracts the run_mounts metadata slice from a stage Unit.
+func runMounts(u indexer.Unit) []map[string]string {
+	v, _ := u.Metadata["run_mounts"].([]map[string]string)
+	return v
+}
+
+// TestGraphPass_RunMount_CacheMount verifies that RUN --mount=type=cache,target=...
+// captures mount metadata on the stage node.
+func TestGraphPass_RunMount_CacheMount(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN --mount=type=cache,target=/root/.cache/go go build ./...
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	mounts := runMounts(stages[0])
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 run_mount, got %d: %v", len(mounts), mounts)
+	}
+	if mounts[0]["type"] != "cache" {
+		t.Errorf("mount type = %q, want cache", mounts[0]["type"])
+	}
+	if mounts[0]["target"] != "/root/.cache/go" {
+		t.Errorf("mount target = %q, want /root/.cache/go", mounts[0]["target"])
+	}
+}
+
+// TestGraphPass_RunMount_MultipleTypesInOneRun verifies that multiple --mount flags
+// on a single RUN instruction all appear in run_mounts.
+func TestGraphPass_RunMount_MultipleTypesInOneRun(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM ubuntu:22.04 AS app
+RUN --mount=type=cache,target=/cache --mount=type=secret,id=mysecret,target=/run/secrets/token cat /run/secrets/token
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	mounts := runMounts(stages[0])
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 run_mounts, got %d: %v", len(mounts), mounts)
+	}
+
+	types := map[string]bool{}
+	for _, m := range mounts {
+		types[m["type"]] = true
+	}
+	if !types["cache"] {
+		t.Error("expected a cache mount")
+	}
+	if !types["secret"] {
+		t.Error("expected a secret mount")
+	}
+}
+
+// TestGraphPass_RunMount_MultipleRunInstructions verifies that mounts from multiple
+// RUN instructions in the same stage are all accumulated.
+func TestGraphPass_RunMount_MultipleRunInstructions(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN --mount=type=cache,target=/root/.cache/go go mod download
+RUN --mount=type=cache,target=/root/.cache/go go build -o /app ./cmd/app
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	mounts := runMounts(stages[0])
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 run_mounts (one per RUN), got %d: %v", len(mounts), mounts)
+	}
+	for i, m := range mounts {
+		if m["type"] != "cache" {
+			t.Errorf("mounts[%d] type = %q, want cache", i, m["type"])
+		}
+		if m["target"] != "/root/.cache/go" {
+			t.Errorf("mounts[%d] target = %q, want /root/.cache/go", i, m["target"])
+		}
+	}
+}
+
+// TestGraphPass_RunMount_NoMountsProducesNoMetadata verifies that a RUN instruction
+// without any --mount flags does not produce a run_mounts metadata key.
+func TestGraphPass_RunMount_NoMountsProducesNoMetadata(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM alpine:3.19 AS app
+RUN echo hello
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	if _, ok := stages[0].Metadata["run_mounts"]; ok {
+		t.Error("expected no run_mounts metadata for a RUN without --mount flags")
+	}
+}
+
+// TestGraphPass_RunMount_TargetAliases verifies that --mount=type=bind,dst=/src and
+// --mount=type=bind,destination=/src are both normalised so the metadata key is "target".
+func TestGraphPass_RunMount_TargetAliases(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN --mount=type=bind,dst=/workspace go build .
+RUN --mount=type=bind,destination=/src go vet ./...
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	mounts := runMounts(stages[0])
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 run_mounts, got %d: %v", len(mounts), mounts)
+	}
+	for i, m := range mounts {
+		if _, hasDst := m["dst"]; hasDst {
+			t.Errorf("mounts[%d] should not have 'dst' key (should be normalised to 'target')", i)
+		}
+		if _, hasDest := m["destination"]; hasDest {
+			t.Errorf("mounts[%d] should not have 'destination' key (should be normalised to 'target')", i)
+		}
+		if m["target"] == "" {
+			t.Errorf("mounts[%d] missing 'target' key after alias normalisation: %v", i, m)
+		}
+	}
+}
+
+// TestGraphPass_RunMount_DefaultTypeBind verifies that --mount= without a type= key
+// defaults to type=bind per the BuildKit spec.
+func TestGraphPass_RunMount_DefaultTypeBind(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN --mount=target=/workspace go build .
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	mounts := runMounts(stages[0])
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 run_mount, got %d: %v", len(mounts), mounts)
+	}
+	if mounts[0]["type"] != "bind" {
+		t.Errorf("mount type = %q, want bind (default)", mounts[0]["type"])
+	}
+}
+
+// TestGraphPass_RunMount_MountsPerStage verifies that mounts are attributed to the
+// correct stage in a multi-stage Dockerfile.
+func TestGraphPass_RunMount_MountsPerStage(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN --mount=type=cache,target=/root/.cache/go go build ./...
+
+FROM alpine:3.19 AS runtime
+RUN echo no mounts here
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stage Units, got %d", len(stages))
+	}
+
+	// Find builder and runtime stages by path.
+	var builderStage, runtimeStage *indexer.Unit
+	for i := range stages {
+		switch stages[i].Path {
+		case "stage:builder":
+			builderStage = &stages[i]
+		case "stage:runtime":
+			runtimeStage = &stages[i]
+		}
+	}
+	if builderStage == nil {
+		t.Fatal("stage:builder not found")
+	}
+	if runtimeStage == nil {
+		t.Fatal("stage:runtime not found")
+	}
+
+	builderMounts := runMounts(*builderStage)
+	if len(builderMounts) != 1 || builderMounts[0]["type"] != "cache" {
+		t.Errorf("builder stage: expected 1 cache mount, got %v", builderMounts)
+	}
+
+	if _, ok := runtimeStage.Metadata["run_mounts"]; ok {
+		t.Error("runtime stage: expected no run_mounts metadata")
+	}
+}
+
+// TestGraphPass_RunMount_MultiLineMountFlag verifies that a backslash-continued RUN
+// instruction with --mount on a continuation line is handled correctly.
+func TestGraphPass_RunMount_MultiLineMountFlag(t *testing.T) {
+	h := dockerfilehandler.New()
+	src := `FROM golang:1.22 AS builder
+RUN --mount=type=cache,target=/root/.cache/go \
+    go build \
+    ./...
+`
+	doc, err := h.Parse("Dockerfile", []byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	stages := stageUnits(doc.Units)
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage Unit, got %d", len(stages))
+	}
+
+	mounts := runMounts(stages[0])
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 run_mount for multi-line RUN, got %d: %v", len(mounts), mounts)
+	}
+	if mounts[0]["type"] != "cache" {
+		t.Errorf("mount type = %q, want cache", mounts[0]["type"])
+	}
+	if mounts[0]["target"] != "/root/.cache/go" {
+		t.Errorf("mount target = %q, want /root/.cache/go", mounts[0]["target"])
+	}
+}

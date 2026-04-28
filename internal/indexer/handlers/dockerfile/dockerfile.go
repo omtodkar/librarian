@@ -242,13 +242,14 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 	lines := strings.Split(raw, "\n")
 
 	type stageInfo struct {
-		name       string   // full path: "stage:<rawName>"
-		rawName    string   // bare stage name or "stage-N" for unnamed
-		baseImage  string   // raw image ref from FROM line
-		lineIdx    int      // 0-indexed line number of the FROM directive
-		expose     []string // ports from EXPOSE directives
-		cmd        []string // CMD directive bodies
-		entrypoint []string // ENTRYPOINT directive bodies
+		name       string              // full path: "stage:<rawName>"
+		rawName    string              // bare stage name or "stage-N" for unnamed
+		baseImage  string              // raw image ref from FROM line
+		lineIdx    int                 // 0-indexed line number of the FROM directive
+		expose     []string            // ports from EXPOSE directives
+		cmd        []string            // CMD directive bodies
+		entrypoint []string            // ENTRYPOINT directive bodies
+		runMounts  []map[string]string // BuildKit --mount parameters from RUN instructions
 	}
 
 	// First pass: collect FROM lines.
@@ -351,6 +352,21 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 					}
 				}
 			}
+		case "RUN":
+			// Extract BuildKit --mount=... flags. Flags precede the command, so
+			// stop at the first token that is not a flag (doesn't start with "--").
+			for _, f := range fields[1:] {
+				lf := strings.ToLower(f)
+				if !strings.HasPrefix(lf, "--") {
+					break
+				}
+				if !strings.HasPrefix(lf, "--mount=") {
+					continue
+				}
+				if m := parseMountFlag(f[len("--mount="):]); m != nil {
+					stages[currentStage].runMounts = append(stages[currentStage].runMounts, m)
+				}
+			}
 		}
 	}
 
@@ -370,6 +386,9 @@ func parseStageGraph(raw string) ([]indexer.Unit, []indexer.Reference) {
 		}
 		if len(s.entrypoint) > 0 {
 			meta["entrypoint"] = s.entrypoint
+		}
+		if len(s.runMounts) > 0 {
+			meta["run_mounts"] = s.runMounts
 		}
 
 		units = append(units, indexer.Unit{
@@ -513,6 +532,43 @@ func parseFromLine(line string) (baseImage, stageName string) {
 	}
 
 	return baseImage, stageName
+}
+
+// parseMountFlag parses the comma-separated key=value string from a BuildKit
+// --mount= flag (e.g. "type=cache,target=/root/.cache/go"). The aliases dst
+// and destination are normalised to "target". If type is absent it defaults to
+// "bind" per the BuildKit spec. Returns nil if the string contains no key=value
+// pairs at all.
+func parseMountFlag(s string) map[string]string {
+	parts := strings.Split(s, ",")
+	kv := make(map[string]string, len(parts))
+	for _, p := range parts {
+		eq := strings.IndexByte(p, '=')
+		if eq < 0 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(p[:eq]))
+		v := strings.TrimSpace(p[eq+1:])
+		if k != "" {
+			kv[k] = v
+		}
+	}
+	if len(kv) == 0 {
+		return nil
+	}
+	// Normalise target aliases.
+	for _, alias := range []string{"dst", "destination"} {
+		if v, ok := kv[alias]; ok {
+			if _, hasTarget := kv["target"]; !hasTarget {
+				kv["target"] = v
+			}
+			delete(kv, alias)
+		}
+	}
+	if _, ok := kv["type"]; !ok {
+		kv["type"] = "bind"
+	}
+	return kv
 }
 
 // normalizeDockerImage normalizes a Docker image reference to include a registry
