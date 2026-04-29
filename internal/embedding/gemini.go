@@ -58,10 +58,13 @@ type GeminiEmbedder struct {
 // maxParallelBatches controls wave concurrency (<=1 = serial).
 func NewGeminiEmbedder(apiKey, model string, batchSize, maxRetries, maxParallelBatches int) (*GeminiEmbedder, error) {
 	if apiKey == "" {
+		apiKey = os.Getenv("LIBRARIAN_EMBEDDING_API_KEY")
+	}
+	if apiKey == "" {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("Gemini API key is required: set embedding.api_key in .librarian/config.yaml or GEMINI_API_KEY env var")
+		return nil, fmt.Errorf("Gemini API key is required: set embedding.api_key in .librarian/config.yaml or LIBRARIAN_EMBEDDING_API_KEY env var")
 	}
 	if model == "" {
 		model = defaultGeminiModel
