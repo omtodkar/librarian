@@ -1,21 +1,26 @@
 package config
 
-import "github.com/spf13/viper"
+import (
+	"time"
+
+	"github.com/spf13/viper"
+)
 
 type Config struct {
-	DocsDir          string               `mapstructure:"docs_dir"`
-	DBPath           string               `mapstructure:"db_path"`
-	Embedding        EmbeddingConfig      `mapstructure:"embedding"`
-	Rerank           RerankConfig         `mapstructure:"rerank"`
-	Summarization    SummarizationConfig  `mapstructure:"summarization"`
-	Chunking         ChunkingConfig       `mapstructure:"chunking"`
-	Office           OfficeConfig         `mapstructure:"office"`
-	PDF              PDFConfig            `mapstructure:"pdf"`
-	Graph            GraphConfig          `mapstructure:"graph"`
-	Search           SearchConfig         `mapstructure:"search"`
-	Python           PythonConfig         `mapstructure:"python"`
-	CodeFilePatterns []string             `mapstructure:"code_file_patterns"`
-	ExcludePatterns  []string             `mapstructure:"exclude_patterns"`
+	DocsDir          string              `mapstructure:"docs_dir"`
+	DBPath           string              `mapstructure:"db_path"`
+	Embedding        EmbeddingConfig     `mapstructure:"embedding"`
+	Rerank           RerankConfig        `mapstructure:"rerank"`
+	Summarization    SummarizationConfig `mapstructure:"summarization"`
+	Chunking         ChunkingConfig      `mapstructure:"chunking"`
+	Office           OfficeConfig        `mapstructure:"office"`
+	PDF              PDFConfig           `mapstructure:"pdf"`
+	Graph            GraphConfig         `mapstructure:"graph"`
+	Search           SearchConfig        `mapstructure:"search"`
+	Python           PythonConfig        `mapstructure:"python"`
+	Analytics        AnalyticsConfig     `mapstructure:"analytics"`
+	CodeFilePatterns []string            `mapstructure:"code_file_patterns"`
+	ExcludePatterns  []string            `mapstructure:"exclude_patterns"`
 
 	// ProjectRoot is the absolute path of the workspace root (the directory
 	// containing .librarian/). Populated by cmd/root.go after workspace.Find()
@@ -158,6 +163,17 @@ type SearchConfig struct {
 	HybridSearch bool `mapstructure:"hybrid_search"`
 }
 
+// AnalyticsConfig controls the analytics pass that powers GRAPH_REPORT.md.
+type AnalyticsConfig struct {
+	// CommunityTimeout bounds the Louvain modularity-optimisation pass.
+	// On timeout the communities section of the report is skipped (with a
+	// logged warning); god-node analytics, which power the load-bearing
+	// sections of GRAPH_REPORT.md, run independently and are unaffected.
+	// Default 60s. Set to 0 (or any non-positive value) to disable the bound
+	// (legacy unbounded behaviour).
+	CommunityTimeout time.Duration `mapstructure:"community_timeout"`
+}
+
 // PythonConfig controls Python-specific indexing behaviour. Today only the
 // relative-import resolver consumes it; future Python-specific knobs land here.
 type PythonConfig struct {
@@ -210,6 +226,9 @@ func Load() *Config {
 		Search: SearchConfig{
 			HybridSearch: true,
 		},
+		Analytics: AnalyticsConfig{
+			CommunityTimeout: 60 * time.Second,
+		},
 		CodeFilePatterns: []string{"*.go", "*.ts", "*.py", "*.rs", "*.java", "*.rb"},
 		ExcludePatterns:  []string{"node_modules/**", ".git/**", "vendor/**", ".claude/worktrees/**", ".claude/agents/**", ".claude/skills/**"},
 	}
@@ -238,6 +257,14 @@ func Load() *Config {
 	}
 	if !viper.IsSet("embedding.max_parallel_batches") {
 		cfg.Embedding.MaxParallelBatches = 1
+	}
+	// Restore duration default for AnalyticsConfig after Unmarshal. If the
+	// user's config.yaml has an `analytics:` section that omits this key,
+	// mapstructure decodes the absent value as 0 and clobbers the default
+	// we set above. The IsSet check reinstates the default when the user
+	// didn't express an opinion (0 is a valid explicit "disabled" value).
+	if !viper.IsSet("analytics.community_timeout") {
+		cfg.Analytics.CommunityTimeout = 60 * time.Second
 	}
 
 	// Always-on Claude Code ephemera patterns. These accumulate transient files

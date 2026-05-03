@@ -17,6 +17,7 @@ package analytics
 
 import (
 	"fmt"
+	"time"
 
 	"librarian/internal/store"
 )
@@ -52,6 +53,13 @@ type Report struct {
 	// any downstream report.
 	TotalNodes int
 	TotalEdges int
+
+	// CommunitiesSkippedReason records why community detection was skipped
+	// (typically a Louvain timeout on a large graph). Empty string means the
+	// communities section is authoritative; non-empty means downstream
+	// renderers should surface the reason instead of the (empty) Communities
+	// list. See cfg.Analytics.CommunityTimeout for the bound.
+	CommunitiesSkippedReason string
 }
 
 // Community is a cluster of graph nodes produced by community detection.
@@ -105,11 +113,27 @@ type Result struct {
 	Edges []store.Edge
 }
 
+// Options bundles tunables for Analyze. Zero values are safe defaults
+// (community detection runs unbounded — legacy behaviour). Callers in cmd/
+// populate this from cfg.Analytics; tests typically pass a zero value or
+// a small timeout to exercise the timeout path.
+type Options struct {
+	// CommunityTimeout bounds the Louvain modularity-optimisation pass.
+	// On timeout the communities section is skipped and Report.CommunitiesSkippedReason
+	// is set; god-node analytics run independently and are unaffected.
+	// Zero means "no bound" (legacy behaviour).
+	CommunityTimeout time.Duration
+}
+
 // Analyze runs every analysis pass against the current graph store and
 // returns a Result. Returns a Result with an empty-but-non-nil Report for
 // an empty graph so downstream code can render "nothing to show" without
 // nil-checking.
-func Analyze(s *store.Store) (*Result, error) {
+//
+// Options.CommunityTimeout bounds the Louvain pass — on timeout
+// Report.Communities stays nil and Report.CommunitiesSkippedReason explains
+// why so downstream renderers can surface a friendly message.
+func Analyze(s *store.Store, opts Options) (*Result, error) {
 	nodes, err := s.ListNodes()
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -137,7 +161,9 @@ func Analyze(s *store.Store) (*Result, error) {
 	degree := BuildDegree(edges)
 
 	g := buildGonumGraph(nodes, edges)
-	report.Communities = detectCommunities(g, nodes, labels, degree)
+	comms, skipReason := detectCommunities(g, nodes, labels, degree, opts.CommunityTimeout)
+	report.Communities = comms
+	report.CommunitiesSkippedReason = skipReason
 
 	nodeToCommunity := make(map[string]int, len(nodes))
 	for _, c := range report.Communities {

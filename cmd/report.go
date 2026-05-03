@@ -65,7 +65,9 @@ func runReport(cmd *cobra.Command, args []string) error {
 	// Single Analyze call — no separate ListNodes/ListEdges round trip,
 	// eliminating both the extra SQL and the WAL-snapshot consistency
 	// hazard of reading the graph twice.
-	result, err := analytics.Analyze(s)
+	result, err := analytics.Analyze(s, analytics.Options{
+		CommunityTimeout: cfg.Analytics.CommunityTimeout,
+	})
 	if err != nil {
 		return fmt.Errorf("analysing: %w", err)
 	}
@@ -103,14 +105,18 @@ func runReport(cmd *cobra.Command, args []string) error {
 					"bytes": len(o.data),
 				}
 			}
-			out, _ := json.MarshalIndent(map[string]any{
+			summary := map[string]any{
 				"dry_run":     true,
 				"output_dir":  ws.OutDir(),
 				"outputs":     entries,
 				"nodes":       result.TotalNodes,
 				"edges":       result.TotalEdges,
 				"communities": len(result.Communities),
-			}, "", "  ")
+			}
+			if result.CommunitiesSkippedReason != "" {
+				summary["communities_skipped_reason"] = result.CommunitiesSkippedReason
+			}
+			out, _ := json.MarshalIndent(summary, "", "  ")
 			fmt.Println(string(out))
 			return nil
 		}
@@ -139,13 +145,17 @@ func runReport(cmd *cobra.Command, args []string) error {
 	}
 
 	if reportJSON {
-		out, _ := json.MarshalIndent(map[string]any{
+		summary := map[string]any{
 			"output_dir":  ws.OutDir(),
 			"files":       written,
 			"nodes":       result.TotalNodes,
 			"edges":       result.TotalEdges,
 			"communities": len(result.Communities),
-		}, "", "  ")
+		}
+		if result.CommunitiesSkippedReason != "" {
+			summary["communities_skipped_reason"] = result.CommunitiesSkippedReason
+		}
+		out, _ := json.MarshalIndent(summary, "", "  ")
 		fmt.Println(string(out))
 		return nil
 	}

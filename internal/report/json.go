@@ -72,10 +72,11 @@ type jsonCommunityNode struct {
 }
 
 type jsonAnalytics struct {
-	Communities           []jsonCommunity                  `json:"communities"`
-	GodNodes              []analytics.GodNode              `json:"god_nodes"`
-	SurprisingConnections []analytics.SurprisingConnection `json:"surprising_connections"`
-	SuggestedQuestions    []analytics.SuggestedQuestion    `json:"suggested_questions"`
+	Communities              []jsonCommunity                  `json:"communities"`
+	CommunitiesSkippedReason string                           `json:"communities_skipped_reason,omitempty"`
+	GodNodes                 []analytics.GodNode              `json:"god_nodes"`
+	SurprisingConnections    []analytics.SurprisingConnection `json:"surprising_connections"`
+	SuggestedQuestions       []analytics.SuggestedQuestion    `json:"suggested_questions"`
 }
 
 // RenderJSON produces graph.json content. Fully deterministic given
@@ -102,10 +103,11 @@ func RenderJSON(in *Input) ([]byte, error) {
 		Nodes: make([]jsonNode, 0, len(in.Nodes)),
 		Edges: make([]jsonEdge, 0, len(in.Edges)),
 		Analytics: jsonAnalytics{
-			Communities:           enrichCommunities(r.Communities, labels, kinds),
-			GodNodes:              r.GodNodes,
-			SurprisingConnections: r.SurprisingConnections,
-			SuggestedQuestions:    r.SuggestedQuestions,
+			Communities:              enrichCommunities(r.Communities, labels, kinds),
+			CommunitiesSkippedReason: r.CommunitiesSkippedReason,
+			GodNodes:                 r.GodNodes,
+			SurprisingConnections:    r.SurprisingConnections,
+			SuggestedQuestions:       r.SuggestedQuestions,
 		},
 	}
 	for _, n := range in.Nodes {

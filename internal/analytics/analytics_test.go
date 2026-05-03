@@ -59,7 +59,7 @@ func seedTwoClusters(t *testing.T, s *store.Store) {
 
 func TestAnalyze_EmptyGraph(t *testing.T) {
 	s := newTestStore(t)
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestAnalyze_TwoClustersFindsTwoCommunities(t *testing.T) {
 	s := newTestStore(t)
 	seedTwoClusters(t, s)
 
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestAnalyze_TwoClustersFindsTwoCommunities(t *testing.T) {
 func TestAnalyze_CommunityLabelsStripNamespacePrefix(t *testing.T) {
 	s := newTestStore(t)
 	seedTwoClusters(t, s)
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestAnalyze_CommunityLabelsStripNamespacePrefix(t *testing.T) {
 func TestAnalyze_GodNodesRankedByDegree(t *testing.T) {
 	s := newTestStore(t)
 	seedTwoClusters(t, s)
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestAnalyze_GodNodesRankedByDegree(t *testing.T) {
 func TestAnalyze_SurprisingConnectionsAreCrossCommunity(t *testing.T) {
 	s := newTestStore(t)
 	seedTwoClusters(t, s)
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestAnalyze_SurprisingConnectionsAreCrossCommunity(t *testing.T) {
 func TestAnalyze_RenderSurprisingWhy(t *testing.T) {
 	s := newTestStore(t)
 	seedTwoClusters(t, s)
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestAnalyze_RenderSurprisingWhy(t *testing.T) {
 func TestAnalyze_SuggestedQuestionsStructured(t *testing.T) {
 	s := newTestStore(t)
 	seedTwoClusters(t, s)
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestAnalyze_SingleGodNodeStar(t *testing.T) {
 	s.UpsertEdge(store.Edge{From: "doc:hub", To: "doc:leaf1", Kind: "mentions"})
 	s.UpsertEdge(store.Edge{From: "doc:hub", To: "doc:leaf2", Kind: "mentions"})
 
-	r, err := analytics.Analyze(s)
+	r, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -283,11 +283,11 @@ func TestAnalyze_Deterministic(t *testing.T) {
 	s := newTestStore(t)
 	seedTwoClusters(t, s)
 
-	first, err := analytics.Analyze(s)
+	first, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze 1: %v", err)
 	}
-	second, err := analytics.Analyze(s)
+	second, err := analytics.Analyze(s, analytics.Options{})
 	if err != nil {
 		t.Fatalf("Analyze 2: %v", err)
 	}

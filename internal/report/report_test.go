@@ -113,6 +113,33 @@ func TestRenderMarkdown_EmptyReport(t *testing.T) {
 	}
 }
 
+// TestRenderMarkdown_CommunitiesSkippedReason verifies the Communities
+// section surfaces the skip reason instead of a misleading "No communities
+// detected" fallback when Louvain timed out (lib-7gyz M1).
+func TestRenderMarkdown_CommunitiesSkippedReason(t *testing.T) {
+	in := &report.Input{
+		Analytics: &analytics.Report{
+			TotalNodes:               18452,
+			TotalEdges:               201734,
+			CommunitiesSkippedReason: "louvain exceeded timeout of 60s on 18452 nodes / 201734 edges",
+		},
+		GeneratedAt: time.Date(2026, 4, 23, 17, 30, 0, 0, time.UTC),
+	}
+	out := string(report.RenderMarkdown(in))
+	if !strings.Contains(out, "Community detection skipped") {
+		t.Errorf("expected skip-reason banner in markdown; got:\n%s", out)
+	}
+	if !strings.Contains(out, "louvain exceeded timeout of 60s") {
+		t.Errorf("expected the underlying reason text; got:\n%s", out)
+	}
+	if strings.Contains(out, "No communities detected") {
+		t.Error("misleading 'No communities detected' fallback should NOT appear when skip-reason is set")
+	}
+	if !strings.Contains(out, "analytics.community_timeout") {
+		t.Error("expected guidance pointing at the config knob")
+	}
+}
+
 func TestRenderMarkdown_Deterministic(t *testing.T) {
 	in := sampleInput()
 	a := report.RenderMarkdown(in)
@@ -191,6 +218,50 @@ func TestRenderJSON_Parseable(t *testing.T) {
 	if _, ok := m0["kind"]; !ok {
 		t.Errorf("community member missing 'kind' field: %+v", m0)
 	}
+}
+
+// TestRenderJSON_CommunitiesSkippedReason mirrors
+// TestRenderMarkdown_CommunitiesSkippedReason for the JSON path (lib-7gyz M1).
+// When CommunitiesSkippedReason is set the field must appear in analytics with
+// the right value; when it is empty the field must be absent (omitempty).
+func TestRenderJSON_CommunitiesSkippedReason(t *testing.T) {
+	t.Run("reason set", func(t *testing.T) {
+		in := &report.Input{
+			Analytics: &analytics.Report{
+				TotalNodes:               18452,
+				TotalEdges:               201734,
+				CommunitiesSkippedReason: "louvain exceeded timeout of 60s on 18452 nodes / 201734 edges",
+			},
+			GeneratedAt: time.Date(2026, 4, 23, 17, 30, 0, 0, time.UTC),
+		}
+		out, err := report.RenderJSON(in)
+		if err != nil {
+			t.Fatalf("RenderJSON: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("RenderJSON output isn't valid JSON: %v", err)
+		}
+		analyticsObj, _ := got["analytics"].(map[string]any)
+		reason, ok := analyticsObj["communities_skipped_reason"].(string)
+		if !ok {
+			t.Fatalf("expected communities_skipped_reason in analytics; got: %v", analyticsObj)
+		}
+		if reason != "louvain exceeded timeout of 60s on 18452 nodes / 201734 edges" {
+			t.Errorf("communities_skipped_reason = %q, want the louvain timeout string", reason)
+		}
+	})
+
+	t.Run("reason empty — field absent", func(t *testing.T) {
+		in := sampleInput() // CommunitiesSkippedReason is empty
+		out, err := report.RenderJSON(in)
+		if err != nil {
+			t.Fatalf("RenderJSON: %v", err)
+		}
+		if strings.Contains(string(out), "communities_skipped_reason") {
+			t.Errorf("communities_skipped_reason must be absent when reason is empty; got:\n%s", out)
+		}
+	})
 }
 
 func TestRenderJSON_Deterministic(t *testing.T) {

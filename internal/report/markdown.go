@@ -53,6 +53,15 @@ func writeGodNodes(b *strings.Builder, r *analytics.Report) {
 
 func writeCommunities(b *strings.Builder, r *analytics.Report) {
 	fmt.Fprintf(b, "## Communities\n\n")
+	if r.CommunitiesSkippedReason != "" {
+		// Louvain hit the configured timeout; god-node analytics above are
+		// still authoritative. Surface the reason so the reader knows the
+		// section is missing on purpose, not because the graph is empty.
+		fmt.Fprintf(b, "Community detection skipped: %s.\n", r.CommunitiesSkippedReason)
+		fmt.Fprintln(b, "Raise `analytics.community_timeout` in `.librarian/config.yaml` (or set to `0` to disable the bound) and re-run `librarian report` to populate this section.")
+		fmt.Fprintln(b)
+		return
+	}
 	if len(r.Communities) == 0 {
 		fmt.Fprintln(b, "No communities detected.")
 		fmt.Fprintln(b)
