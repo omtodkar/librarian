@@ -169,6 +169,9 @@ exclude_patterns:
   - ".git/**"
   - "vendor/**"
   - ".librarian/**"
+  - ".claude/worktrees/**"
+  - ".claude/agents/**"
+  - ".claude/skills/**"
 `
 
 const defaultIgnoreFile = `# Files librarian should skip during indexing (gitignore-style patterns, one per line).

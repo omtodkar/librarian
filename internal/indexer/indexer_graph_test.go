@@ -1724,3 +1724,264 @@ func indexerTestContains(s, sub string) bool {
 	}
 	return false
 }
+
+// TestIntegration_Graph_TopLevelExcludePatternsHonoredByGraphPass is the
+// regression test for lib-kqgg: a pattern placed ONLY in cfg.ExcludePatterns
+// (top-level, NOT cfg.Graph.ExcludePatterns) must be honoured by the graph
+// walker so users don't have to duplicate excludes across both knobs.
+func TestIntegration_Graph_TopLevelExcludePatternsHonoredByGraphPass(t *testing.T) {
+	// Four Go files: one excluded via top-level only, one via graph-level only,
+	// two indexed normally. Used by both sub-tests below.
+	files := map[string]string{
+		"cmd/main.go":        "package main\nfunc Run() {}\n",
+		"internal/svc.go":    "package internal\nfunc Svc() {}\n",
+		"generated/gen.go":   "package generated\nfunc Gen() {}\n",
+		"internal/impl.go":   "package internal\nfunc Impl() {}\n",
+	}
+
+	t.Run("top-level only", func(t *testing.T) {
+		root := t.TempDir()
+		for rel, body := range files {
+			abs := filepath.Join(root, rel)
+			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", abs, err)
+			}
+			if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+				t.Fatalf("write %s: %v", abs, err)
+			}
+		}
+
+		dbPath := filepath.Join(root, ".librarian", "test.db")
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		s, err := store.Open(dbPath, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+
+		cfg := &config.Config{
+			DocsDir:         filepath.Join(root, "docs"),
+			DBPath:          dbPath,
+			ProjectRoot:     root,
+			// Top-level exclude pattern only — NOT in cfg.Graph.ExcludePatterns.
+			ExcludePatterns: []string{"generated/**"},
+			Chunking:        config.ChunkingConfig{MaxTokens: 512, MinTokens: 1},
+			Graph: config.GraphConfig{
+				HonorGitignore:  false,
+				DetectGenerated: true,
+				// Intentionally empty so the fix merges from top-level.
+				ExcludePatterns: nil,
+			},
+		}
+		idx := indexer.New(s, cfg, fakeEmbedder{dim: 4})
+		res, err := idx.IndexProjectGraph(root, true)
+		if err != nil {
+			t.Fatalf("IndexProjectGraph: %v", err)
+		}
+
+		// generated/gen.go must not have been walked; the three others must be.
+		if res.FilesScanned != 3 {
+			t.Errorf("FilesScanned = %d; want 3 (cmd/main.go + internal/svc.go + internal/impl.go only)", res.FilesScanned)
+		}
+
+		nodes, err := s.ListNodes()
+		if err != nil {
+			t.Fatalf("ListNodes: %v", err)
+		}
+		for _, n := range nodes {
+			if strings.HasPrefix(filepath.ToSlash(n.SourcePath), "generated/") {
+				t.Errorf("top-level ExcludePatterns not honored: found node %+v", n)
+			}
+		}
+	})
+
+	t.Run("both knobs populated", func(t *testing.T) {
+		// Pins the "additively honored" guarantee: top-level has "generated/**"
+		// and graph-level has "internal/**"; both directories must be absent from
+		// the walk result.
+		root := t.TempDir()
+		for rel, body := range files {
+			abs := filepath.Join(root, rel)
+			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", abs, err)
+			}
+			if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
+				t.Fatalf("write %s: %v", abs, err)
+			}
+		}
+
+		dbPath := filepath.Join(root, ".librarian", "test.db")
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		s, err := store.Open(dbPath, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+
+		cfg := &config.Config{
+			DocsDir:         filepath.Join(root, "docs"),
+			DBPath:          dbPath,
+			ProjectRoot:     root,
+			ExcludePatterns: []string{"generated/**"}, // top-level knob
+			Chunking:        config.ChunkingConfig{MaxTokens: 512, MinTokens: 1},
+			Graph: config.GraphConfig{
+				HonorGitignore:  false,
+				DetectGenerated: true,
+				ExcludePatterns: []string{"internal/**"}, // graph-level knob
+			},
+		}
+		idx := indexer.New(s, cfg, fakeEmbedder{dim: 4})
+		res, err := idx.IndexProjectGraph(root, true)
+		if err != nil {
+			t.Fatalf("IndexProjectGraph: %v", err)
+		}
+
+		// Only cmd/main.go should survive — both generated/ and internal/ excluded.
+		if res.FilesScanned != 1 {
+			t.Errorf("FilesScanned = %d; want 1 (cmd/main.go only)", res.FilesScanned)
+		}
+
+		nodes, err := s.ListNodes()
+		if err != nil {
+			t.Fatalf("ListNodes: %v", err)
+		}
+		for _, n := range nodes {
+			path := filepath.ToSlash(n.SourcePath)
+			if strings.HasPrefix(path, "generated/") {
+				t.Errorf("top-level ExcludePatterns not honored: found node %+v", n)
+			}
+			if strings.HasPrefix(path, "internal/") {
+				t.Errorf("graph-level ExcludePatterns not honored: found node %+v", n)
+			}
+		}
+	})
+}
+
+// TestIntegration_Graph_ReconstitutionDeletesStaleCodeFilesOnNotExist is the
+// regression test for lib-get2: when a file that was previously indexed (and
+// held cross-file edges to another file's symbols) is deleted from disk, the
+// reconstitution post-pass must delete its code_files row and file: graph_node
+// rather than leaving them as ghosts.
+//
+// Fixture: base.py declares class Base; child.py inherits from it, producing a
+// symbol→symbol inherits edge (sym:child.Child → sym:base.Base).
+// AffectedSourcePathsForFile only queries symbol-kind edges, so the inheritance
+// pattern (not a file-level module import) is required to surface child.py when
+// base.py is reindexed.
+//
+// Scenario:
+//  1. First index: both files indexed; inherits edge established.
+//  2. Delete child.py from disk (it holds the outgoing edge into base's symbols).
+//  3. Modify base.py to change its hash, forcing reindex.
+//  4. Second index: base.py is reindexed → AffectedSourcePathsForFile("base.py")
+//     returns ["child.py"] → reconstitute loop calls indexGraphFileDirect("child.py")
+//     → ReadFile fails with ENOENT → fix path deletes child.py's code_files row
+//     and file:child.py graph_node.
+func TestIntegration_Graph_ReconstitutionDeletesStaleCodeFilesOnNotExist(t *testing.T) {
+	root := t.TempDir()
+
+	basePath := filepath.Join(root, "base.py")
+	childPath := filepath.Join(root, "child.py")
+
+	if err := os.WriteFile(basePath, []byte("class Base:\n    pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(childPath, []byte("from base import Base\nclass Child(Base):\n    pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	idx, st := newGraphTestIndexer(t, root)
+
+	// First pass: index both files; establishes inherits edge child.Child → base.Base.
+	if _, err := idx.IndexProjectGraph(root, true); err != nil {
+		t.Fatalf("first IndexProjectGraph: %v", err)
+	}
+
+	// Sanity precheck: confirm the inherits edge exists after the first index.
+	edges, err := st.ListEdges()
+	if err != nil {
+		t.Fatalf("ListEdges after first index: %v", err)
+	}
+	var foundEdge bool
+	for _, e := range edges {
+		if e.Kind == store.EdgeKindInherits && e.From == "sym:child.Child" && e.To == "sym:base.Base" {
+			foundEdge = true
+		}
+	}
+	if !foundEdge {
+		var syms []string
+		nodes, _ := st.ListNodes()
+		for _, n := range nodes {
+			if n.Kind == "symbol" {
+				syms = append(syms, n.ID)
+			}
+		}
+		t.Fatalf("fixture bug: inherits edge sym:child.Child → sym:base.Base missing after first index; symbols=%v edges=%+v", syms, edges)
+	}
+
+	// Confirm child.py was indexed.
+	if cf, _ := st.GetCodeFileByPath("child.py"); cf == nil {
+		t.Fatal("fixture bug: child.py not indexed on first pass")
+	}
+
+	// Delete child.py from disk — it holds the outgoing inherits edge into
+	// base.py's symbols, so it will surface via AffectedSourcePathsForFile when
+	// base.py is reindexed next run.
+	if err := os.Remove(childPath); err != nil {
+		t.Fatalf("remove child.py: %v", err)
+	}
+
+	// Modify base.py so its hash changes, forcing it to be reindexed.
+	// This triggers AffectedSourcePathsForFile("base.py") → returns child.py →
+	// reconstitution loop picks up the deleted child.py.
+	if err := os.WriteFile(basePath, []byte("class Base:\n    \"\"\"Upstream base class.\"\"\"\n    pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := idx.IndexProjectGraph(root, false)
+	if err != nil {
+		t.Fatalf("second IndexProjectGraph: %v", err)
+	}
+
+	// No errors should be reported for the deleted file.
+	for _, e := range res.Errors {
+		if strings.Contains(e, "child.py") {
+			t.Errorf("unexpected error for deleted file: %s", e)
+		}
+	}
+
+	// child.py's code_files row must be gone.
+	if cf, _ := st.GetCodeFileByPath("child.py"); cf != nil {
+		t.Errorf("stale code_files row for deleted child.py still present: %+v", cf)
+	}
+
+	// child.py's file: graph_node must be gone.
+	if n, _ := st.GetNode("file:child.py"); n != nil {
+		t.Errorf("stale graph_node file:child.py still present: %+v", n)
+	}
+
+	// No symbol nodes with source_path == "child.py" must survive. Without the
+	// transactional DeleteGeneratedFile helper these would be left as orphans with
+	// dangling source_paths.
+	allNodes, err := st.ListNodes()
+	if err != nil {
+		t.Fatalf("ListNodes after second index: %v", err)
+	}
+	for _, n := range allNodes {
+		if n.Kind == store.NodeKindSymbol && n.SourcePath == "child.py" {
+			t.Errorf("orphaned symbol node for deleted child.py still present: %+v", n)
+		}
+	}
+
+	// base.py's rows must be intact (it was re-indexed, not deleted).
+	if cf, _ := st.GetCodeFileByPath("base.py"); cf == nil {
+		t.Error("base.py code_files row unexpectedly removed")
+	}
+	if n, _ := st.GetNode("file:base.py"); n == nil {
+		t.Error("base.py graph_node unexpectedly removed")
+	}
+}

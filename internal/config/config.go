@@ -211,7 +211,7 @@ func Load() *Config {
 			HybridSearch: true,
 		},
 		CodeFilePatterns: []string{"*.go", "*.ts", "*.py", "*.rs", "*.java", "*.rb"},
-		ExcludePatterns:  []string{"node_modules/**", ".git/**", "vendor/**"},
+		ExcludePatterns:  []string{"node_modules/**", ".git/**", "vendor/**", ".claude/worktrees/**", ".claude/agents/**", ".claude/skills/**"},
 	}
 
 	viper.Unmarshal(cfg)
@@ -238,6 +238,25 @@ func Load() *Config {
 	}
 	if !viper.IsSet("embedding.max_parallel_batches") {
 		cfg.Embedding.MaxParallelBatches = 1
+	}
+
+	// Always-on Claude Code ephemera patterns. These accumulate transient files
+	// (agent worktrees, generated agent specs, vendored skills) that would pollute
+	// the index regardless of how the user has set exclude_patterns. Merge them
+	// in even when the user config explicitly overrides the slice.
+	claudeAlwaysExcludes := []string{
+		".claude/worktrees/**",
+		".claude/agents/**",
+		".claude/skills/**",
+	}
+	present := make(map[string]bool, len(cfg.ExcludePatterns))
+	for _, p := range cfg.ExcludePatterns {
+		present[p] = true
+	}
+	for _, p := range claudeAlwaysExcludes {
+		if !present[p] {
+			cfg.ExcludePatterns = append(cfg.ExcludePatterns, p)
+		}
 	}
 
 	if dbPath := viper.GetString("db_path"); dbPath != "" {

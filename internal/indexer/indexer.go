@@ -3,7 +3,9 @@ package indexer
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -264,9 +266,11 @@ func (idx *Indexer) IndexProjectGraph(rootDir string, force bool) (*GraphResult,
 
 	idx.resetPythonPackageCache()
 
+	merged := append([]string(nil), idx.cfg.ExcludePatterns...)
+	merged = append(merged, idx.cfg.Graph.ExcludePatterns...)
 	walkCfg := GraphWalkConfig{
 		HonorGitignore:  idx.cfg.Graph.HonorGitignore,
-		ExcludePatterns: idx.cfg.Graph.ExcludePatterns,
+		ExcludePatterns: merged,
 		Roots:           idx.cfg.Graph.Roots,
 		SkipFormats:     docsPassFormats,
 	}
@@ -585,6 +589,21 @@ func (idx *Indexer) runGraphWorkers(files []WalkResult, shared *GraphResult, for
 		}
 		dummy := &GraphResult{}
 		if err := idx.indexGraphFileDirect(affFile, dummy, true); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// The file is authoritatively gone. Reuse DeleteGeneratedFile to remove
+				// the full graph footprint (symbols + file: node + code_files row) in
+				// one transaction; the method's name reflects an earlier use case but
+				// its body is the canonical "purge a file's graph state" helper.
+				//
+				// This is the inline opportunistic variant: it only fires when the deleted
+				// file shows up in another reindexed file's affected-paths set. Files deleted
+				// in isolation (no neighbor reindex to discover them) are handled by the
+				// future --prune-missing sweep.
+				if derr := idx.store.DeleteGeneratedFile(affPath); derr != nil {
+					shared.Errors = append(shared.Errors, fmt.Sprintf("delete stale %s: %s", affPath, derr))
+				}
+				return true
+			}
 			shared.Errors = append(shared.Errors, fmt.Sprintf("reconstitute %s: %s", affPath, err))
 		}
 		// Reconstitution is a correctness repair pass, not a first-class indexing
