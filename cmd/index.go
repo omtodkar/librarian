@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -16,14 +17,15 @@ import (
 )
 
 var (
-	indexForce     bool
-	indexDryRun    bool
-	indexJSON      bool
-	indexSkipDocs  bool
-	indexSkipGraph bool
-	indexWorkers   int
-	indexQuiet     bool
-	indexVerbose   bool
+	indexForce        bool
+	indexDryRun       bool
+	indexJSON         bool
+	indexSkipDocs     bool
+	indexSkipGraph    bool
+	indexWorkers      int
+	indexQuiet        bool
+	indexVerbose      bool
+	indexPruneMissing bool
 )
 
 var indexCmd = &cobra.Command{
@@ -42,12 +44,14 @@ func init() {
 	indexCmd.Flags().IntVar(&indexWorkers, "workers", -1, "Graph-pass worker count. -1 (default) = respect config/auto; 0 = auto; 1 = serial; N>1 = fixed pool")
 	indexCmd.Flags().BoolVar(&indexQuiet, "quiet", false, "Force quiet progress mode (heartbeat every 100 files, no per-file output)")
 	indexCmd.Flags().BoolVar(&indexVerbose, "verbose", false, "Force verbose progress mode (one line per file)")
+	indexCmd.Flags().BoolVar(&indexPruneMissing, "prune-missing", false,
+		"Sweep code_files and documents tables for rows whose paths no longer exist on disk; safe to re-run after interruption. If docs_dir was changed since last indexing, run a full librarian index first.")
 	rootCmd.AddCommand(indexCmd)
 }
 
 func runIndex(cmd *cobra.Command, args []string) error {
-	if indexSkipDocs && indexSkipGraph {
-		return fmt.Errorf("--skip-docs and --skip-graph cannot both be set")
+	if indexSkipDocs && indexSkipGraph && !indexPruneMissing {
+		return fmt.Errorf("--skip-docs and --skip-graph cannot both be set (unless --prune-missing is set, in which case only the sweep runs)")
 	}
 	if indexSkipDocs && len(args) > 0 {
 		return fmt.Errorf("[docs-dir] argument is incompatible with --skip-docs")
@@ -130,6 +134,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	var (
 		docsRes  *indexer.IndexResult
 		graphRes *indexer.GraphResult
+		pruneRes *indexer.PruneResult
 	)
 
 	if !indexSkipDocs {
@@ -171,6 +176,31 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Prune-missing sweep: walk every row in code_files and documents,
+	// stat each path on disk, and drop rows for files that no longer exist.
+	// Complements lib-get2's inline reconstitution path — that handles files
+	// deleted alongside neighbors that get reindexed; this catches files
+	// deleted in isolation that nothing else surfaces. Opt-in (--prune-missing)
+	// because it costs one stat per indexed file and most users won't need it
+	// outside recovery scenarios.
+	//
+	// Runs against ProjectRoot when set; falls back to CWD otherwise so the
+	// sweep still works in the rare case nobody has a workspace root yet.
+	if indexPruneMissing {
+		pruneRoot := cfg.ProjectRoot
+		if pruneRoot == "" {
+			cwd, werr := os.Getwd()
+			if werr != nil {
+				return fmt.Errorf("resolving prune root: %w", werr)
+			}
+			pruneRoot = cwd
+		}
+		pruneRes, err = idx.PruneMissingFiles(pruneRoot)
+		if err != nil {
+			return fmt.Errorf("prune-missing sweep: %w", err)
+		}
+	}
+
 	if indexJSON {
 		payload := map[string]any{
 			"docs":  docsRes,
@@ -181,6 +211,9 @@ func runIndex(cmd *cobra.Command, args []string) error {
 				"count": len(orphanSwept),
 				"ids":   orphanSwept,
 			}
+		}
+		if pruneRes != nil {
+			payload["prune_missing"] = pruneRes
 		}
 		out, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Println(string(out))
@@ -218,6 +251,17 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		}
 		if orphanSwept != nil {
 			fmt.Printf("  Orphans swept:     %d (kind: %s)\n", len(orphanSwept), store.NodeKindSymbol)
+		}
+		if pruneRes != nil {
+			total := pruneRes.CodeFilesDeleted + pruneRes.DocumentsDeleted
+			fmt.Printf("Pruned %d missing files (%d code_files, %d documents).\n",
+				total, pruneRes.CodeFilesDeleted, pruneRes.DocumentsDeleted)
+			if len(pruneRes.Errors) > 0 {
+				fmt.Printf("  Prune errors:      %d\n", len(pruneRes.Errors))
+				for _, e := range pruneRes.Errors {
+					fmt.Printf("    - %s\n", e)
+				}
+			}
 		}
 	}
 

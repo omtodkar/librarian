@@ -76,6 +76,29 @@ func (s *Store) DeleteCodeFile(filePath string) error {
 	return nil
 }
 
+// ListCodeFiles returns every row in code_files. Used by index --prune-missing
+// to sweep for files that no longer exist on disk; mirrors ListDocuments so the
+// two sweep loops have identical shape.
+func (s *Store) ListCodeFiles() ([]CodeFile, error) {
+	rows, err := s.db.Query(`
+		SELECT id, file_path, language, ref_type, content_hash, last_referenced_at
+		FROM code_files ORDER BY file_path`)
+	if err != nil {
+		return nil, fmt.Errorf("list_code_files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []CodeFile
+	for rows.Next() {
+		var cf CodeFile
+		if err := rows.Scan(&cf.ID, &cf.FilePath, &cf.Language, &cf.RefType, &cf.ContentHash, &cf.LastReferencedAt); err != nil {
+			return nil, fmt.Errorf("list_code_files scan: %w", err)
+		}
+		files = append(files, cf)
+	}
+	return files, rows.Err()
+}
+
 // GetCodeFileByPath looks up a code_files row by path. Returns (nil, nil)
 // when no row exists — matches GetNode's convention (graph.go) so callers
 // can distinguish "not found" from "DB error" without errors.Is checks.
