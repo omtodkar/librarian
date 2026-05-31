@@ -117,6 +117,11 @@ pdf:
 # Separate from docs_dir because the knowledge base (search_docs / get_context)
 # stays curated prose; the graph covers the whole codebase.
 graph:
+  # Run the code-graph pass. Set to false for a docs-only workspace:
+  # search_docs / get_context still work, but neighbors / path / explain /
+  # report will have no data. Equivalent to passing --skip-graph on every
+  # 'librarian index', without having to remember the flag.
+  enabled: true
   # Honor .gitignore (root + nested) — each sub-project's own gitignore
   # already excludes its build outputs, so this covers most cases.
   honor_gitignore: true

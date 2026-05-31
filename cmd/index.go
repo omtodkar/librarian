@@ -147,7 +147,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if !indexSkipGraph && cfg.ProjectRoot != "" {
+	if !indexSkipGraph && cfg.Graph.Enabled && cfg.ProjectRoot != "" {
 		if !indexJSON {
 			fmt.Printf("Indexing code graph from %s...\n", cfg.ProjectRoot)
 		}

@@ -33,6 +33,13 @@ type Config struct {
 // graph can cover every source file in the project while search_docs / the
 // knowledge base stays scoped to docs_dir.
 type GraphConfig struct {
+	// Enabled controls whether the code-graph pass runs at all. Default true.
+	// Set to false for a docs-only workspace (search_docs / get_context still
+	// work; neighbors / path / explain / report have no data). Honored at
+	// index time alongside the per-run --skip-graph flag — either one
+	// suppresses the graph pass.
+	Enabled bool `mapstructure:"enabled"`
+
 	// HonorGitignore skips files matched by .gitignore (root + nested, git
 	// layered semantics). Default true; each sub-project's own .gitignore
 	// covers its build outputs for free.
@@ -219,6 +226,7 @@ func Load() *Config {
 			MaxPages: 0,
 		},
 		Graph: GraphConfig{
+			Enabled:         true,
 			HonorGitignore:  true,
 			DetectGenerated: true,
 			TestEdges:       TestEdgesConfig{Enabled: true},
@@ -240,6 +248,9 @@ func Load() *Config {
 	// decodes the absent value as `false` and clobbers the `true` default
 	// we set above. Each IsSet check reinstates the default when the user
 	// didn't express an opinion.
+	if !viper.IsSet("graph.enabled") {
+		cfg.Graph.Enabled = true
+	}
 	if !viper.IsSet("graph.honor_gitignore") {
 		cfg.Graph.HonorGitignore = true
 	}
