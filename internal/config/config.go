@@ -1,13 +1,28 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	DocsDir          string              `mapstructure:"docs_dir"`
+	// DocsDir is the legacy single-directory alias. DEPRECATED: prefer DocDirs.
+	// Kept for backward compatibility — existing configs with `docs_dir: docs`
+	// continue working unchanged. When DocDirs is non-empty, DocsDir is ignored.
+	// Use ResolvedDocDirs() for all read paths instead of accessing this field
+	// directly.
+	DocsDir string `mapstructure:"docs_dir"`
+
+	// DocDirs is the canonical multi-directory list of docs trees to index.
+	// Supersedes DocsDir when non-empty. Entries are relative to ProjectRoot
+	// (or CWD if ProjectRoot is empty). Use ResolvedDocDirs() to get the
+	// cleaned, de-duplicated list with fallback logic applied.
+	DocDirs          []string            `mapstructure:"doc_dirs"`
 	DBPath           string              `mapstructure:"db_path"`
 	Embedding        EmbeddingConfig     `mapstructure:"embedding"`
 	Rerank           RerankConfig        `mapstructure:"rerank"`
@@ -206,6 +221,148 @@ type PythonConfig struct {
 	// under an immediate child of the listed directory are resolved by this
 	// rule.
 	SrcRoots []string `mapstructure:"src_roots"`
+}
+
+// ResolvedDocDirs returns the canonical, cleaned, de-duplicated list of docs
+// directories. Precedence:
+//   - DocDirs non-empty → use it (DocsDir is ignored).
+//   - DocDirs empty, DocsDir non-empty → [DocsDir].
+//   - Both empty → ["docs"] (preserves the historic default).
+//
+// Each entry is passed through filepath.Clean; empty or whitespace-only strings
+// are dropped; exact duplicates (post-clean) are removed preserving first-seen
+// order.
+//
+// This method is intentionally PURE — it does NOT reference ProjectRoot (which
+// is empty during Load()) and performs no filesystem I/O. Overlap and
+// containment validation (which need a root anchor) live in ValidateDocDirs.
+func (c *Config) ResolvedDocDirs() []string {
+	var raw []string
+
+	if len(c.DocDirs) > 0 {
+		raw = c.DocDirs
+	} else if c.DocsDir != "" {
+		raw = []string{c.DocsDir}
+	} else {
+		return []string{"docs"}
+	}
+
+	// Clean, drop blank entries, and de-duplicate preserving first-seen order.
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		cleaned := filepath.Clean(entry)
+		if seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		out = append(out, cleaned)
+	}
+
+	if len(out) == 0 {
+		return []string{"docs"}
+	}
+	return out
+}
+
+// ValidateDocDirs validates the resolved doc_dirs for structural correctness.
+// It operates on ResolvedDocDirs() and performs two checks:
+//
+//  1. Overlap rejection — rejects configurations where one dir is a
+//     path-ancestor of another (e.g. ["docs", "docs/api"]). Such a pair
+//     produces stored file_path collisions because WalkDocs uses the dir
+//     name as the path prefix. The check is segment-aware (uses filepath.Rel)
+//     so sibling names like "docs" and "docs-api" are correctly treated as
+//     independent (NOT flagged).
+//
+//  2. Containment check — when projectRoot is non-empty, each entry is
+//     resolved as filepath.Join(projectRoot, entry) and the resulting absolute
+//     path is confirmed to lie within projectRoot via filepath.Rel. An entry
+//     that starts with ".." or is an absolute path outside projectRoot is
+//     rejected. When projectRoot is "" (standalone/test flows) this check is
+//     skipped — the overlap check still runs.
+//
+// Non-existent directories are NOT rejected here; callers may warn+skip them
+// during indexing. This function performs no filesystem I/O (no os.Stat).
+//
+// Returns a descriptive error listing all offending pairs/dirs, or nil.
+func (c *Config) ValidateDocDirs(projectRoot string) error {
+	if projectRoot != "" {
+		projectRoot = filepath.Clean(projectRoot)
+	}
+	dirs := c.ResolvedDocDirs()
+	var errs []string
+
+	// --- Overlap check (segment-aware) ---
+	// For every pair (i, j), check whether j is a descendant of i or vice
+	// versa. filepath.Rel(a, b) returns a path starting with ".." when b is
+	// NOT under a, so we can use that as the discriminator. The check must be
+	// symmetric: also test Rel(b, a).
+	for i := 0; i < len(dirs); i++ {
+		for j := i + 1; j < len(dirs); j++ {
+			a, b := dirs[i], dirs[j]
+			if isAncestor(a, b) {
+				errs = append(errs, fmt.Sprintf(
+					"doc_dirs overlap: %q is an ancestor of %q — use non-overlapping directories to avoid file_path collisions",
+					a, b,
+				))
+			} else if isAncestor(b, a) {
+				errs = append(errs, fmt.Sprintf(
+					"doc_dirs overlap: %q is an ancestor of %q — use non-overlapping directories to avoid file_path collisions",
+					b, a,
+				))
+			}
+		}
+	}
+
+	// --- Containment check (only when projectRoot is known) ---
+	if projectRoot != "" {
+		absRoot := filepath.Clean(projectRoot)
+		for _, dir := range dirs {
+			// If dir is already absolute, use it as-is; otherwise join under
+			// the workspace root. filepath.Join silently drops preceding
+			// components when a later element is absolute, which would let an
+			// absolute path bypass the rel check — so we detect that case
+			// explicitly here.
+			var absDir string
+			if filepath.IsAbs(dir) {
+				absDir = filepath.Clean(dir)
+			} else {
+				absDir = filepath.Join(absRoot, dir)
+			}
+			rel, err := filepath.Rel(absRoot, absDir)
+			if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+				errs = append(errs, fmt.Sprintf(
+					"doc_dirs entry %q resolves outside the workspace root %q — only paths within the workspace are allowed",
+					dir, projectRoot,
+				))
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// isAncestor reports whether candidate is a strict path ancestor of target.
+// It uses filepath.Rel so that "docs" is an ancestor of "docs/api" but
+// "docs-api" is NOT an ancestor of "docs-api/sub" relative to "docs".
+// Both inputs must already be filepath.Clean'd.
+func isAncestor(candidate, target string) bool {
+	rel, err := filepath.Rel(candidate, target)
+	if err != nil {
+		return false
+	}
+	// Rel returns "." when candidate == target (handled by de-dup already),
+	// starts with ".." when target is not under candidate, or a clean
+	// relative sub-path when it IS under candidate.
+	return rel != "." && !strings.HasPrefix(rel, "..")
 }
 
 func Load() *Config {
