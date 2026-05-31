@@ -277,10 +277,16 @@ Infinity's `/rerank` auto-detects any model declaring `AutoModelForSequenceClass
 
 | Model | Params | Context | License | Notes |
 |---|---|---|---|---|
-| `Alibaba-NLP/gte-reranker-modernbert-base` (default) | 149M | 8K | Apache 2.0 | ModernBERT, strongest code retrieval per size, English only |
-| `BAAI/bge-reranker-v2-m3` | 568M | 8K | Apache 2.0 | Multilingual (100+ languages), safer on non-English corpora |
-| `mixedbread-ai/mxbai-rerank-base-v2` | ~280M | 8K | Apache 2.0 | Strong general reranker, competitive with BGE |
-| `jinaai/jina-reranker-v2-base-multilingual` | 278M | 1K | CC-BY-NC-4.0 | Non-commercial license — avoid for work use |
+| `Alibaba-NLP/gte-reranker-modernbert-base` (default) | 149M | 8K | Apache 2.0 | ModernBERT, native seq-classification head; only candidate with a verified strong code score (COIR avg 79.99 / 20 tasks) **and** a permissive license **and** native Infinity servability. English only |
+| `BAAI/bge-reranker-v2-m3` | 568M | 8K | Apache 2.0 | Multilingual (100+ languages), safer on non-English corpora; native cross-encoder |
+| `michaelfeil/mxbai-rerank-base-v2-seq` | 0.5B | 8K | Apache 2.0 | Seq-classification conversion of mxbai-rerank-v2 (109 langs + code). The original `mixedbread-ai/mxbai-rerank-v2` is a Qwen-2.5 **causal-LM** that Infinity's `/rerank` **refuses** — use this `-seq` build, and note it commonly needs a classify→rerank proxy (`qdrddr/infinity-mxbai-rerank-seq-v2`) |
+| `cross-encoder/ettin-reranker-150m-v1` | 150M | 8K | Apache 2.0 | 2026 ModernBERT-family; beats the default on *English* MTEB retrieval and faster on paper, but **no code benchmarks published**, speed edge likely doesn't transfer to Infinity's serving path, and exact servable head unconfirmed — evaluate before adopting |
+| `jinaai/jina-reranker-v2-base-multilingual` | 278M | 1K | CC-BY-NC-4.0 | Strong code retrieval (CodeSearchNet MRR@10 71.36), native cross-encoder — but **non-commercial license, avoid for work use** |
+
+> Comparison basis and caveats (benchmarks aren't on a common scale; figures are
+> time-sensitive): see the research spike
+> [`research-spikes/2026-05-31-local-rerankers/`](research-spikes/2026-05-31-local-rerankers/)
+> and the [spike register](research-spikes.md).
 
 Override via env var:
 

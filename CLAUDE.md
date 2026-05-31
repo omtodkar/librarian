@@ -98,6 +98,15 @@ Short version:
 - **New embedding provider**: implement `Embedder` in `internal/embedding/`, add a case to `NewEmbedder()` in `provider.go`.
 - **New MCP tool**: create a file in `internal/mcpserver/`, register in `Serve()` in `server.go`.
 
+## Research Spikes
+
+Open questions the codebase can't settle on its own — model choices, third-party tradeoffs, ecosystem shifts — are answered with **deep-research spikes** and recorded under `docs/`. Before opening such a question (or proposing a model/dependency swap), check whether a recent spike already answers it.
+
+- **Register**: `docs/research-spikes.md` is the index — one short, dated entry per spike (question, headline findings, decision, bead link). Newest first.
+- **Full output**: each spike's synthesized report + cited sources live in a per-spike folder `docs/research-spikes/YYYY-MM-DD-<slug>/` (`report.md`, `sources.md`, plus any raw artifacts).
+- **Running one**: invoke the `deep-research` skill (it scopes the question first) or `Workflow({ name: "deep-research", args: "<refined question>" })`. When it finishes, save the output folder, add the index entry, and **date-stamp it with timezone** — findings expire as the landscape moves, so the timestamp is the staleness signal.
+- Keep index entries short; put detail in the folder so the register stays scannable. See the "How to add an entry" template in `docs/research-spikes.md`.
+
 ## Multi-worker review default
 
 If this Claude Code session was spawned by the perles orchestrator and assigned a reviewer role (signaled by a task-thread message from `coordinator` of the form `Review of task <id>`, an `assign_task_review` assignment, or any review-phase instruction), the first action of the review MUST be to invoke `Skill(feature-dev)` and drive the review through its code-reviewer agent. This applies to every review dimension — correctness, tests, architecture, dead code, gap analysis, acceptance. Only call `report_review_verdict` after synthesizing the skill's output into the verdict. If `feature-dev` is unavailable on the worker, report that fact in the verdict rather than silently falling back to an ad-hoc review. This default applies whether or not the assignment message explicitly mentions the skill.
