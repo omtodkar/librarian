@@ -112,7 +112,7 @@ func TestDeduplicateByContent_SingletonPassthrough(t *testing.T) {
 }
 
 // TestDeduplicateByContent_HybridSearch verifies deduplication also works
-// via HybridSearch (which goes through hybridRerankWithSignals).
+// via HybridSearch (which goes through hybridRankToK).
 func TestDeduplicateByContent_HybridSearch(t *testing.T) {
 	s := newTestStore(t)
 	const model = "test-model"

@@ -140,7 +140,7 @@ func TestHybridSearch_DeterministicOrderOnRRFTie(t *testing.T) {
 	// lists simultaneously, which is impossible with two distinct rowids. The
 	// rankLess id-tiebreak exists as the last-resort guard for any residual
 	// float equality after signal boosting; the test below exercises it directly
-	// by calling hybridRerankWithSignals with pre-built equal-score candidates.
+	// via HybridSearch (which goes through hybridRankToK) with equal-score candidates.
 	queryVec := []float64{1, 0, 0, 0}
 	c1, err := s.AddChunk(AddChunkInput{
 		Vector: queryVec, Content: "xyztoken alpha content here",

@@ -171,6 +171,14 @@ func (s *Store) SearchChunks(query string, vector []float64, limit int) ([]DocCh
 	}
 
 	// Cross-encoder path: signal-rerank to topK, then cross-encoder rerank.
+	signalTop := signalRankToK(candidates, s.rerankTopKFor(limit))
+	return s.crossEncoderRerank(query, signalTop, limit), nil
+}
+
+// rerankTopKFor returns the number of pre-ranked candidates to feed the
+// cross-encoder: the configured top_k (default rerankDefaultTopK), never fewer
+// than the caller's limit.
+func (s *Store) rerankTopKFor(limit int) int {
 	topK := s.rerankTopK
 	if topK <= 0 {
 		topK = rerankDefaultTopK
@@ -178,41 +186,45 @@ func (s *Store) SearchChunks(query string, vector []float64, limit int) ([]DocCh
 	if topK < limit {
 		topK = limit
 	}
+	return topK
+}
 
-	signalTop := signalRankToK(candidates, topK)
-
-	docs := make([]string, len(signalTop))
-	for i, sc := range signalTop {
+// crossEncoderRerank scores a pre-ranked candidate set with the configured
+// cross-encoder and returns the top-limit chunks by relevance. On any reranker
+// error or a score-count mismatch it falls back to the incoming pre-ranked
+// order (truncated to limit) — reranking never fails the caller. Shared by the
+// vector (SearchChunks) and hybrid (HybridSearch) paths.
+func (s *Store) crossEncoderRerank(query string, ranked []scoredChunk, limit int) []DocChunk {
+	docs := make([]string, len(ranked))
+	for i, sc := range ranked {
 		docs[i] = sc.chunk.Content
 	}
 
-	scores, rerankErr := s.reranker.Rerank(query, docs)
-	if rerankErr != nil {
-		slog.Debug("reranker fallback", "error", rerankErr)
-		if len(signalTop) > limit {
-			signalTop = signalTop[:limit]
-		}
-		return toDocChunks(signalTop), nil
+	scores, err := s.reranker.Rerank(query, docs)
+	if err != nil {
+		slog.Debug("reranker fallback", "error", err)
+		return truncateToDocChunks(ranked, limit)
 	}
-	if len(scores) != len(signalTop) {
-		slog.Debug("reranker score count mismatch, falling back", "want", len(signalTop), "got", len(scores))
-		if len(signalTop) > limit {
-			signalTop = signalTop[:limit]
-		}
-		return toDocChunks(signalTop), nil
+	if len(scores) != len(ranked) {
+		slog.Debug("reranker score count mismatch, falling back", "want", len(ranked), "got", len(scores))
+		return truncateToDocChunks(ranked, limit)
 	}
 
-	// Apply cross-encoder scores, re-sort descending, truncate to limit.
-	for i := range signalTop {
-		signalTop[i].finalScore = scores[i]
+	for i := range ranked {
+		ranked[i].finalScore = scores[i]
 	}
-	sort.Slice(signalTop, func(i, j int) bool {
-		return signalTop[i].finalScore > signalTop[j].finalScore
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].finalScore > ranked[j].finalScore
 	})
-	if len(signalTop) > limit {
-		signalTop = signalTop[:limit]
+	return truncateToDocChunks(ranked, limit)
+}
+
+// truncateToDocChunks caps a scored slice to limit and projects to DocChunks.
+func truncateToDocChunks(candidates []scoredChunk, limit int) []DocChunk {
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
 	}
-	return toDocChunks(signalTop), nil
+	return toDocChunks(candidates)
 }
 
 // HybridSearch combines vector KNN and FTS5 BM25 results via Reciprocal Rank
@@ -240,7 +252,16 @@ func (s *Store) HybridSearch(vector []float64, queryText string, limit int) ([]D
 	}
 
 	merged := mergeRRF(vecCandidates, ftsCandidates)
-	return hybridRerankWithSignals(merged, limit), nil
+
+	if s.reranker == nil {
+		return toDocChunks(hybridRankToK(merged, limit)), nil
+	}
+
+	// Cross-encoder path: signal-boost the RRF-merged set, take topK, then
+	// rerank. Mirrors SearchChunks so rerank.provider applies under the
+	// default hybrid_search=true config too (lib-y7vr).
+	hybridTop := hybridRankToK(merged, s.rerankTopKFor(limit))
+	return s.crossEncoderRerank(queryText, hybridTop, limit), nil
 }
 
 // mergeRRF applies Reciprocal Rank Fusion over two ranked lists, returning a
@@ -275,10 +296,12 @@ func mergeRRF(vecResults, ftsResults []scoredChunk) []scoredChunk {
 	return result
 }
 
-// hybridRerankWithSignals applies signal boosting on top of pre-computed RRF
-// scores and returns the top-limit chunks. Analogous to rerankWithSignals but
-// treats finalScore as the base (RRF output) rather than recomputing from distance.
-func hybridRerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
+// hybridRankToK applies signal boosting on top of pre-computed RRF scores,
+// sorts, deduplicates, and truncates to the top-k candidates, returning
+// []scoredChunk so callers that rerank further (cross-encoder) can reuse the
+// scores. Analogous to signalRankToK but treats finalScore as the base (RRF
+// output) rather than recomputing it from vector distance.
+func hybridRankToK(candidates []scoredChunk, k int) []scoredChunk {
 	for i := range candidates {
 		boost := computeMetadataBoost(candidates[i].chunk.SignalMeta)
 		candidates[i].finalScore = 0.90*candidates[i].finalScore + 0.10*boost
@@ -290,15 +313,10 @@ func hybridRerankWithSignals(candidates []scoredChunk, limit int) []DocChunk {
 
 	candidates = deduplicateByContent(candidates)
 
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
+	if len(candidates) > k {
+		candidates = candidates[:k]
 	}
-
-	chunks := make([]DocChunk, len(candidates))
-	for i, sc := range candidates {
-		chunks[i] = sc.chunk
-	}
-	return chunks
+	return candidates
 }
 
 // signalRankToK applies signal-weighted scoring, sorts, deduplicates, and
