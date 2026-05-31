@@ -223,7 +223,7 @@ func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, er
 		return nil, err
 	}
 
-	files, err := WalkDocs(docsDir, idx.cfg.ExcludePatterns, idx.registry)
+	files, err := WalkDocs(docsDir, idx.cfg.ExcludePatterns, idx.registry, idx.cfg.ProjectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("walking docs directory: %w", err)
 	}
@@ -249,6 +249,63 @@ func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, er
 	idx.buildGraphEdges(files)
 
 	return result, nil
+}
+
+// IndexDocs indexes each directory in docsDirs in turn and returns a single
+// aggregated IndexResult. It is a thin orchestrator over IndexDirectory — each
+// directory is walked independently so their stored file_paths are namespaced
+// by the directory prefix (e.g. "proto/docs/DOCTRINE.md" vs
+// "astro-engine/docs/DOCTRINE.md") and there are no UNIQUE-constraint
+// collisions.
+//
+// Errors from individual directories are collected rather than aborting: all
+// directories are attempted even if one fails. A per-directory walk error is
+// surfaced via the Errors slice. Callers (CLI / MCP) should switch to this
+// method in Phase 3; IndexDirectory remains available for single-dir use.
+//
+// Cross-dir shared_code_ref edges: IndexDirectory emits buildGraphEdges for
+// its own dir's files, but that pass only sees files within that dir, so two
+// docs in *different* doc_dirs that reference the same code file never get a
+// shared_code_ref edge from the per-dir call alone. After all per-dir passes
+// complete, IndexDocs runs a single union buildGraphEdges over the combined
+// WalkResult set so cross-dir edges materialize. The linked dedup map inside
+// buildGraphEdges makes this re-run idempotent — per-dir edges already built
+// are not double-inserted.
+func (idx *Indexer) IndexDocs(docsDirs []string, force bool) (*IndexResult, error) {
+	aggregate := &IndexResult{}
+	var unionFiles []WalkResult
+
+	for _, dir := range docsDirs {
+		res, err := idx.IndexDirectory(dir, force)
+		if err != nil {
+			aggregate.Errors = append(aggregate.Errors, fmt.Sprintf("%s: %s", dir, err))
+			continue
+		}
+		aggregate.DocumentsIndexed += res.DocumentsIndexed
+		aggregate.ChunksCreated += res.ChunksCreated
+		aggregate.CodeFilesFound += res.CodeFilesFound
+		aggregate.Skipped += res.Skipped
+		aggregate.Errors = append(aggregate.Errors, res.Errors...)
+
+		// Collect this dir's walk results for the cross-dir shared_code_ref pass.
+		walked, walkErr := WalkDocs(dir, idx.cfg.ExcludePatterns, idx.registry, idx.cfg.ProjectRoot)
+		if walkErr == nil {
+			unionFiles = append(unionFiles, walked...)
+		}
+		// Walk errors here are non-fatal (IndexDirectory already succeeded);
+		// the union pass simply misses this dir's files, which is acceptable —
+		// per-dir edges were already built by IndexDirectory.
+	}
+
+	// Single cross-dir pass: emits shared_code_ref edges between docs in
+	// different dirs that reference the same code file. Per-dir edges emitted
+	// by IndexDirectory are skipped via the linked dedup map inside
+	// buildGraphEdges, so this call is safe to repeat.
+	if len(unionFiles) > 1 {
+		idx.buildGraphEdges(unionFiles)
+	}
+
+	return aggregate, nil
 }
 
 // IndexProjectGraph runs the code-graph pass over rootDir, projecting code

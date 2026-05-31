@@ -36,7 +36,7 @@ func TestWalkDocs_EmptyRegistryYieldsEmptyWalk(t *testing.T) {
 	writeTestFiles(t, dir, "a.md", "b.markdown", "c.txt", "d.yaml")
 
 	reg := NewRegistry()
-	files, err := WalkDocs(dir, nil, reg)
+	files, err := WalkDocs(dir, nil, reg, "")
 	if err != nil {
 		t.Fatalf("WalkDocs: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestWalkDocs_FilterByRegisteredExtensions(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(fakeHandler{name: "mdfake", exts: []string{".md", ".markdown"}})
 
-	files, err := WalkDocs(dir, nil, reg)
+	files, err := WalkDocs(dir, nil, reg, "")
 	if err != nil {
 		t.Fatalf("WalkDocs: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestWalkDocs_ExcludePatternsStillApply(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(fakeHandler{name: "mdfake", exts: []string{".md"}})
 
-	files, err := WalkDocs(dir, []string{"skip.md"}, reg)
+	files, err := WalkDocs(dir, []string{"skip.md"}, reg, "")
 	if err != nil {
 		t.Fatalf("WalkDocs: %v", err)
 	}

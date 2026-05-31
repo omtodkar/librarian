@@ -269,7 +269,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 }
 
 func runDryIndex(docsDir, absDir string) error {
-	files, err := indexer.WalkDocs(docsDir, cfg.ExcludePatterns, indexer.DefaultRegistry())
+	files, err := indexer.WalkDocs(docsDir, cfg.ExcludePatterns, indexer.DefaultRegistry(), cfg.ProjectRoot)
 	if err != nil {
 		return fmt.Errorf("walking docs directory: %w", err)
 	}

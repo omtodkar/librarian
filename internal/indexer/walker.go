@@ -272,7 +272,15 @@ func WalkGraph(rootDir string, cfg GraphWalkConfig, reg *Registry) ([]WalkResult
 // WalkDocs walks docsDir and returns files whose extensions have a registered handler
 // in reg. Exclude patterns skip matching paths. reg must be non-nil; a registry with no
 // handlers yields an empty result.
-func WalkDocs(docsDir string, excludePatterns []string, reg *Registry) ([]WalkResult, error) {
+//
+// projectRoot controls how WalkResult.FilePath is computed:
+//   - Non-empty: FilePath is the slash-normalized path of the file relative to
+//     projectRoot (e.g. "proto/docs/DOCTRINE.md"). This makes stored paths
+//     workspace-root-relative and invocation-independent — the key invariant for
+//     multi-dir indexing.
+//   - Empty: FilePath falls back to the legacy filepath.Join(docsDir, relPath)
+//     behaviour so that tests and workspace-less runs are unaffected.
+func WalkDocs(docsDir string, excludePatterns []string, reg *Registry, projectRoot string) ([]WalkResult, error) {
 	var results []WalkResult
 
 	absDocsDir, err := filepath.Abs(docsDir)
@@ -316,8 +324,39 @@ func WalkDocs(docsDir string, excludePatterns []string, reg *Registry) ([]WalkRe
 			}
 		}
 
+		// Compute the stored FilePath. When projectRoot is set, use a
+		// slash-normalized path relative to the workspace root so that stored
+		// keys are stable regardless of the invoker's CWD. Fall back to the
+		// legacy Join(docsDir, rel) form for workspace-less / test flows.
+		//
+		// We canonicalize BOTH sides via filepath.EvalSymlinks before calling
+		// filepath.Rel. Without this, macOS /tmp → /private/tmp (and any
+		// real-world symlinked checkout) would produce a projectRoot from one
+		// symlink form and an absPath from another, causing Rel to yield a
+		// ../../../../private/tmp/... path that prune's resolveAndGuard rejects
+		// as a ..‑escaping key. Graceful fallback to the raw value on error
+		// (non-existent or inaccessible paths) so edge cases don't panic.
+		var filePath string
+		if projectRoot != "" {
+			canonRoot := projectRoot
+			if r, evalErr := filepath.EvalSymlinks(projectRoot); evalErr == nil {
+				canonRoot = r
+			}
+			canonPath := path
+			if p, evalErr := filepath.EvalSymlinks(path); evalErr == nil {
+				canonPath = p
+			}
+			rel, relErr := filepath.Rel(canonRoot, canonPath)
+			if relErr != nil {
+				return relErr
+			}
+			filePath = filepath.ToSlash(rel)
+		} else {
+			filePath = filepath.Join(docsDir, relPath)
+		}
+
 		results = append(results, WalkResult{
-			FilePath: filepath.Join(docsDir, relPath),
+			FilePath: filePath,
 			AbsPath:  path,
 		})
 
