@@ -52,7 +52,10 @@ Creates `.librarian/` in the current directory with default templates: `config.y
 
 ```sh
 librarian init
+librarian init --with-reranker   # also download the in-process ONNX reranker
 ```
+
+`--with-reranker` downloads the default ONNX reranker (~300 MB model + ONNX runtime) into the shared models cache after the workspace is created. A download failure is a warning, not fatal — the workspace is still initialized and you can retry with `librarian models pull`.
 
 After init, edit `.librarian/config.yaml`, set `LIBRARIAN_EMBEDDING_API_KEY` in your environment, then run `librarian index`.
 
@@ -300,6 +303,36 @@ librarian mcp serve
 ```
 
 Intended for platforms that consume MCP (Claude Code, Cursor, Codex, etc.). The subcommand layout (not a bare `librarian serve`) leaves room for future MCP-related tooling under the `mcp` group.
+
+## Model commands
+
+Manage the model artifacts used by the in-process `onnx` rerank provider (see [Configuration → rerank](configuration.md#rerank)). Artifacts live in a shared, cross-workspace cache (`$XDG_DATA_HOME/librarian/models`, or `~/.local/share/librarian/models`; override with `LIBRARIAN_MODELS_DIR`), so one pull serves every project. These commands work without a workspace.
+
+### `librarian models pull [model-id]`
+
+Download a reranker model and the matching ONNX Runtime library into the shared cache, verifying each file's SHA-256. Idempotent — already-cached artifacts are skipped unless `--force`. With no argument, pulls the configured onnx rerank model, else the registry default (`gte-reranker-modernbert-base`).
+
+```sh
+librarian models pull                    # default reranker
+librarian models pull --force            # re-download even if cached
+librarian models pull --json             # machine-readable result
+```
+
+### `librarian models list`
+
+List known models and whether each is pulled.
+
+```sh
+librarian models list
+```
+
+### `librarian models path [model-id]`
+
+Print the resolved cache paths (model dir + ONNX Runtime library) for a model — useful for debugging or pointing `rerank.model_path` at a custom location.
+
+```sh
+librarian models path
+```
 
 ## Output formats
 

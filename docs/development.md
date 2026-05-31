@@ -231,6 +231,17 @@ func TestRealInfinityEmbed(t *testing.T) {
 
 Note: Infinity uses `/embeddings` (no `/v1` prefix). Set `baseURL` to the bare host/port — the client appends `/embeddings` automatically.
 
+### In-process ONNX reranker test (tag-gated)
+
+The `OnnxReranker` integration tests are guarded by `//go:build onnx` and skip when the model isn't present in the shared cache, so CI never downloads hundreds of MB. To run them locally, pull the model first, then build/test with both tags:
+
+```sh
+go run -tags fts5 . models pull          # or: librarian models pull
+go test -tags 'fts5 onnx' ./internal/embedding -run TestOnnx
+```
+
+The hermetic `internal/models` tests (download/sha256/extract via `httptest`) run in normal CI with no tags or network. `make build` is unaffected by the onnx reranker — the ONNX Runtime is dlopened at runtime, not linked at compile time, and `onnx`-tagged files are excluded from the default build.
+
 ## Beads issue tracker
 
 The project uses **bd (beads)** for work tracking. `bd prime` in a fresh session prints the full command reference. Issues live in `.beads/issues.jsonl` (committed). Any new work should have a matching bd issue so the backlog stays navigable.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"librarian/internal/config"
+	"librarian/internal/models"
 )
 
 // NewEmbedder creates an Embedder based on the provider in the config.
@@ -38,7 +39,13 @@ func NewReranker(cfg config.RerankConfig) (Reranker, error) {
 	switch cfg.Provider {
 	case "openai":
 		return NewOpenAIReranker(cfg.BaseURL, cfg.Model, cfg.APIKey, cfg.TimeoutMs)
+	case "onnx":
+		modelID := cfg.Model
+		if modelID == "" {
+			modelID = models.DefaultRerankerID()
+		}
+		return NewOnnxReranker(modelID, cfg.ModelPath, cfg.TimeoutMs)
 	default:
-		return nil, fmt.Errorf("unknown rerank provider %q: supported providers are \"openai\"", cfg.Provider)
+		return nil, fmt.Errorf("unknown rerank provider %q: supported providers are \"openai\" and \"onnx\"", cfg.Provider)
 	}
 }

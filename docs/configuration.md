@@ -94,7 +94,50 @@ See [Embedding](embedding.md) for provider-specific detail.
 
 ### `rerank`
 
-Optional cross-encoder reranking applied after signal-weighted re-ranking. When `provider` is empty (the default), the rerank step is skipped and `SearchChunks` behaves identically to prior versions. Set `provider: openai` to point at Infinity's `/rerank` endpoint (same process that serves `/embeddings` — start with `make infinity-start`).
+Optional cross-encoder reranking applied after signal-weighted re-ranking. When `provider` is empty (the default), the rerank step is skipped and `SearchChunks` behaves identically to prior versions. Two backends are supported:
+
+- **`onnx`** — in-process ONNX Runtime, **no external server**. Best when you want reranking "inbuilt" with one setup step.
+- **`openai`** — any OpenAI-compatible `/rerank` endpoint (Infinity, LM Studio, …).
+
+| Field | Default | Description |
+|---|---|---|
+| `provider` | `""` (disabled) | `""`, `"onnx"`, or `"openai"` |
+| `model` | — | **onnx:** a registry id (e.g. `gte-reranker-modernbert-base`); defaults to the registry default when empty. **openai:** the endpoint's model id (e.g. `Alibaba-NLP/gte-reranker-modernbert-base`) — required |
+| `model_path` | — | **onnx only:** override the resolved model-cache directory; empty = the shared models cache |
+| `base_url` | `http://localhost:7997` | **openai only:** endpoint base URL — **no `/v1` suffix** for Infinity |
+| `api_key` | — | **openai only:** usually empty for Infinity; sent as `Authorization: Bearer` when set |
+| `top_k` | `20` | Candidates passed from signal-rerank to the cross-encoder. Higher = more room to reorder; lower = less latency |
+| `timeout_ms` | `3000` | Per-call deadline (ms). Queries fall back to signal-reranked results when it fires — never fails the caller |
+
+> Rerank config is set in `.librarian/config.yaml` (these nested keys are not read from `LIBRARIAN_*` environment variables).
+
+#### ONNX (in-process)
+
+Runs the cross-encoder directly in the `librarian` process — no Python, no server. The ONNX Runtime shared library and the model weights are downloaded into a **shared, cross-workspace cache** (default `$XDG_DATA_HOME/librarian/models`, or `~/.local/share/librarian/models`; override with the `LIBRARIAN_MODELS_DIR` env var). Pull them first:
+
+```sh
+librarian models pull              # default reranker (gte-reranker-modernbert-base)
+librarian models list              # show known models + pulled state
+# or fetch during workspace setup:
+librarian init --with-reranker
+```
+
+Then enable it:
+
+```yaml
+rerank:
+  provider: onnx
+  model: gte-reranker-modernbert-base   # registry id; optional (this is the default)
+  # model_path: /abs/override           # optional; default = shared models cache
+  # top_k: 20
+  # timeout_ms: 3000
+```
+
+If the weights aren't present, the next search fails loudly with a `run 'librarian models pull …'` message rather than silently skipping reranking. Platform note: the shipped ONNX Runtime build covers macOS arm64, Linux x64/arm64, and Windows x64. On unsupported platforms (e.g. Intel macOS) the onnx provider errors with guidance to use the `openai`/Infinity provider instead.
+
+The default model is `gte-reranker-modernbert-base` shipped as an **fp16** ONNX export (~300 MB; the ONNX Runtime library adds ~30 MB). See the [reranker research spike](research-spikes/2026-05-31-local-rerankers/) for why this model is the default.
+
+#### OpenAI / Infinity
 
 ```yaml
 rerank:
@@ -102,18 +145,9 @@ rerank:
   model: Alibaba-NLP/gte-reranker-modernbert-base
   base_url: http://127.0.0.1:7997   # NO /v1 prefix — Infinity serves /rerank directly
   # api_key: ""                     # usually empty for Infinity
-  # top_k: 20                       # signal-reranked candidates fed to cross-encoder
-  # timeout_ms: 3000                # per-call deadline; query falls back on timeout
+  # top_k: 20
+  # timeout_ms: 3000
 ```
-
-| Field | Default | Description |
-|---|---|---|
-| `provider` | `""` (disabled) | `""` or `"openai"` (any OpenAI-compatible `/rerank` endpoint) |
-| `model` | — | Required when `provider` is set; e.g. `Alibaba-NLP/gte-reranker-modernbert-base` |
-| `base_url` | `http://localhost:7997` | Endpoint base URL — **no `/v1` suffix** for Infinity |
-| `api_key` | — | Usually empty for Infinity; passed as `Authorization: Bearer` header when set |
-| `top_k` | `20` | Candidates passed from signal-rerank to cross-encoder. Higher values give the reranker more room to reorder; lower values reduce latency |
-| `timeout_ms` | `3000` | Per-call deadline in milliseconds. Queries fall back to signal-reranked results when the deadline fires — never fails the caller |
 
 See [Local embedding + rerank via Infinity](#local-embedding--rerank-via-infinity) for setup instructions.
 

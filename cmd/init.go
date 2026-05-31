@@ -6,9 +6,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"librarian/internal/models"
 	"librarian/internal/store"
 	"librarian/internal/workspace"
 )
+
+var initWithReranker bool
 
 var initCmd = &cobra.Command{
 	Use:   "init",
@@ -24,6 +27,8 @@ into the workspace — see 'librarian <platform> install' commands.`,
 }
 
 func init() {
+	initCmd.Flags().BoolVar(&initWithReranker, "with-reranker", false,
+		"Also download the default in-process ONNX reranker (~300MB model + ONNX runtime)")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -61,6 +66,21 @@ func runInit(cmd *cobra.Command, args []string) error {
 	s.Close()
 
 	fmt.Printf("Initialized Librarian workspace at %s\n\n", ws.Dir())
+
+	// Optional reranker download. The workspace is already initialized, so a
+	// pull failure is a warning, not fatal — the user can re-run the pull.
+	if initWithReranker {
+		id := models.DefaultRerankerID()
+		fmt.Printf("Downloading reranker %q (this may take a while)...\n", id)
+		if _, err := models.Pull(cmd.Context(), id, models.PullOptions{Progress: os.Stderr}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: reranker download failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  the workspace is ready; re-run 'librarian models pull %s' to retry.\n", id)
+		} else {
+			fmt.Printf("Reranker ready. Enable it by setting rerank.provider: onnx in config.yaml.\n")
+		}
+		fmt.Println()
+	}
+
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Edit .librarian/config.yaml (docs_dir, embedding provider, model).")
 	fmt.Println("  2. Set LIBRARIAN_EMBEDDING_API_KEY in your environment.")
@@ -111,6 +131,27 @@ pdf:
   # Large books produce proportional chunks, which can dominate
   # the index if left unbounded.
   max_pages: 0
+
+# Optional cross-encoder reranking, applied after the signal-weighted re-rank.
+# Disabled by default (provider empty). Two backends:
+#   onnx   — in-process ONNX Runtime, no server. Download weights first:
+#            'librarian models pull gte-reranker-modernbert-base'
+#            (or 'librarian init --with-reranker'). Weights live in a shared
+#            cache outside the repo ($XDG_DATA_HOME/librarian/models).
+#   openai — any OpenAI-compatible /rerank endpoint (e.g. Infinity).
+# NOTE: the 'model' value differs per backend — a registry short-id for onnx,
+# a full HuggingFace id for openai.
+# rerank:
+#   provider: onnx
+#   model: gte-reranker-modernbert-base
+#   # model_path: /abs/override   # onnx only; default = shared models cache
+#   top_k: 20            # signal-reranked candidates fed to the cross-encoder
+#   timeout_ms: 3000     # per-call deadline; falls back to signal ranking on timeout
+#
+#   # --- openai / Infinity alternative ---
+#   # provider: openai
+#   # model: Alibaba-NLP/gte-reranker-modernbert-base
+#   # base_url: http://127.0.0.1:7997   # NO /v1 prefix for Infinity
 
 # Code-graph pass. Walks the workspace root (not docs_dir) so 'librarian
 # neighbors / path / explain / report' see every source file in the project.

@@ -102,13 +102,17 @@ type SummarizationConfig struct {
 
 // RerankConfig controls optional cross-encoder reranking at query time.
 // When Provider is empty (default), reranking is disabled and SearchChunks
-// behaves identically to today. Infinity's /rerank endpoint (no /v1/ prefix)
-// is the supported v1 target — start it with `make infinity-start`.
+// behaves identically to today. Two backends are supported:
+//   - "onnx": in-process ONNX Runtime, no external server. Pull weights first
+//     with `librarian models pull` (or `librarian init --with-reranker`).
+//   - "openai": any OpenAI-compatible /rerank endpoint (Infinity, no /v1/
+//     prefix) — start it with `make infinity-start`.
 type RerankConfig struct {
-	Provider  string `mapstructure:"provider"`   // "" (disabled) | "openai"
-	Model     string `mapstructure:"model"`      // e.g. "Alibaba-NLP/gte-reranker-modernbert-base"
-	BaseURL   string `mapstructure:"base_url"`   // e.g. "http://127.0.0.1:7997"
-	APIKey    string `mapstructure:"api_key"`    // usually empty for Infinity
+	Provider  string `mapstructure:"provider"`   // "" (disabled) | "openai" | "onnx"
+	Model     string `mapstructure:"model"`      // openai: API model id; onnx: registry id (e.g. "gte-reranker-modernbert-base")
+	ModelPath string `mapstructure:"model_path"` // onnx only: override the resolved model-cache dir; empty = shared models cache
+	BaseURL   string `mapstructure:"base_url"`   // openai only: e.g. "http://127.0.0.1:7997"
+	APIKey    string `mapstructure:"api_key"`    // openai only: usually empty for Infinity
 	TopK      int    `mapstructure:"top_k"`      // signal-reranked candidates fed to cross-encoder; default 20
 	TimeoutMs int    `mapstructure:"timeout_ms"` // per-call deadline in ms; default 3000
 }
