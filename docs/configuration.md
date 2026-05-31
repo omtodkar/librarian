@@ -147,6 +147,7 @@ Controls the code-graph pass — the second of two passes `librarian index` runs
 
 | Field | Default | Description |
 |---|---|---|
+| `enabled` | `true` | Run the graph pass. Set `false` for a **docs-only workspace** — `search_docs` / `get_context` still work, but `neighbors` / `path` / `explain` / `report` have no data to return. Equivalent to passing `--skip-graph` on every `librarian index`, without having to remember the flag; either the config key or the per-run flag suppresses the pass |
 | `honor_gitignore` | `true` | Skip files matched by any `.gitignore` in the project (root + nested, git's layered semantics). Each sub-project's own `.gitignore` covers its build outputs for free — turn off only if you want to index files git would ignore |
 | `detect_generated` | `true` | Skip files whose first ~1 KiB contains a canonical generated-file banner (see below). Content-based detection, so hand-written files are never flagged by extension alone |
 | `exclude_patterns` | `[]` | Filepath-match globs stacked on top of the built-in defaults (see below). Patterns matching a directory prune the whole subtree |
@@ -177,6 +178,7 @@ A detected file is skipped entirely — no chunks, no symbols, no `code_file` ro
 
 ```yaml
 graph:
+  enabled: true
   honor_gitignore: true
   detect_generated: true
   exclude_patterns:

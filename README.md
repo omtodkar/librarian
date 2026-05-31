@@ -113,7 +113,7 @@ That's it. Your AI assistant now has `/librarian` available as a slash-skill and
 Queries get a final score of `0.90 × vector_similarity + 0.10 × metadata_boost`, where the boost promotes chunks tagged with `**Warning:**`, `**Decision:**`, `@Deprecated`, and other actionable signals extracted at index time. A query for "auth" surfaces the ADR with the decision, not the neutral description.
 
 ### Typed code graph
-Every indexed entity — document, code file, code symbol, config key — projects into a `graph_node` with a namespaced id (`doc:…`, `file:…`, `sym:…`, `key:…`). Typed edges (`mentions`, `shared_code_ref`, `imports`) connect them. CLI commands `neighbors`, `path`, `explain` walk the graph; `report` writes a topology snapshot (god nodes, communities, surprising connections) as `GRAPH_REPORT.md` + an interactive `graph.html`.
+Every indexed entity — document, code file, code symbol, config key — projects into a `graph_node` with a namespaced id (`doc:…`, `file:…`, `sym:…`, `key:…`). Typed edges (`mentions`, `shared_code_ref`, `imports`) connect them. CLI commands `neighbors`, `path`, `explain` walk the graph; `report` writes a topology snapshot (god nodes, communities, surprising connections) as `GRAPH_REPORT.md` + an interactive `graph.html`. Want semantic search only? Set `graph.enabled: false` in `.librarian/config.yaml` (or pass `--skip-graph`) for a docs-only workspace.
 
 ### Multi-format ingestion through one abstraction
 A single `FileHandler` interface powers every format. Each handler converts source to markdown and delegates chunking — same signal extraction, same chunk shape, regardless of whether the input was a DOCX, a Python file, or a YAML config. Adding a new format is a 100-line subpackage.
