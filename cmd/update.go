@@ -30,7 +30,7 @@ var updateCmd = &cobra.Command{
 Content comes from --content or stdin. --reindex=file (default) re-indexes only the
 updated file; --reindex=full re-indexes the entire docs directory.
 
-Rejects paths that fall outside cfg.DocsDir to prevent accidental writes elsewhere.`,
+Rejects paths that fall outside the configured doc_dirs to prevent accidental writes elsewhere.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runUpdate,
 }
@@ -58,16 +58,29 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		content = string(b)
 	}
 
-	absDocsDir, err := filepath.Abs(cfg.DocsDir)
-	if err != nil {
-		return fmt.Errorf("resolving docs directory: %w", err)
-	}
 	absFilePath, err := filepath.Abs(filePath)
 	if err != nil {
 		return fmt.Errorf("resolving file path: %w", err)
 	}
-	if !strings.HasPrefix(absFilePath, absDocsDir+string(filepath.Separator)) && absFilePath != absDocsDir {
-		return fmt.Errorf("file path must be within the configured docs directory (%s)", cfg.DocsDir)
+	// Accept the file if it falls under ANY configured doc dir.
+	// Anchor relative dirs at ProjectRoot (not CWD) so the containment check
+	// is correct regardless of where the command is invoked from.
+	dirs := cfg.ResolvedDocDirs()
+	withinAny := false
+	sep := string(filepath.Separator)
+	for _, dir := range dirs {
+		docDirAbs := dir
+		if !filepath.IsAbs(dir) && cfg.ProjectRoot != "" {
+			docDirAbs = filepath.Join(cfg.ProjectRoot, dir)
+		}
+		docDirAbs = filepath.Clean(docDirAbs)
+		if strings.HasPrefix(absFilePath, docDirAbs+sep) || absFilePath == docDirAbs {
+			withinAny = true
+			break
+		}
+	}
+	if !withinAny {
+		return fmt.Errorf("file path must be within one of the configured docs directories (%s)", strings.Join(dirs, ", "))
 	}
 
 	if err := os.MkdirAll(filepath.Dir(absFilePath), 0o755); err != nil {
@@ -95,7 +108,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	idx.SetSummarizer(sum)
 	var result *indexer.IndexResult
 	if updateReindex == "full" {
-		result, err = idx.IndexDirectory(cfg.DocsDir, true)
+		result, err = idx.IndexDocs(cfg.ResolvedDocDirs(), true)
 	} else {
 		result, err = idx.IndexSingleFile(filePath, absFilePath, true)
 	}

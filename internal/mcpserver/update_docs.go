@@ -46,19 +46,30 @@ func registerUpdateDocs(s *server.MCPServer, st *store.Store, cfg *config.Config
 		}
 		reindexScope := req.GetString("reindex", "file")
 
-		// Safety: ensure path is within docs directory
-		absDocsDir, err := filepath.Abs(cfg.DocsDir)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to resolve docs directory: %v", err)), nil
-		}
-
 		absFilePath, err := filepath.Abs(filePath)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid file path: %v", err)), nil
 		}
 
-		if !strings.HasPrefix(absFilePath, absDocsDir+string(filepath.Separator)) && absFilePath != absDocsDir {
-			return mcp.NewToolResultError("file path must be within the configured docs directory (" + cfg.DocsDir + ")"), nil
+		// Safety: ensure path is within one of the configured doc dirs.
+		// Anchor relative dirs at ProjectRoot (not CWD) so the containment check
+		// is correct regardless of where the command is invoked from.
+		dirs := cfg.ResolvedDocDirs()
+		withinAny := false
+		sep := string(filepath.Separator)
+		for _, dir := range dirs {
+			docDirAbs := dir
+			if !filepath.IsAbs(dir) && cfg.ProjectRoot != "" {
+				docDirAbs = filepath.Join(cfg.ProjectRoot, dir)
+			}
+			docDirAbs = filepath.Clean(docDirAbs)
+			if strings.HasPrefix(absFilePath, docDirAbs+sep) || absFilePath == docDirAbs {
+				withinAny = true
+				break
+			}
+		}
+		if !withinAny {
+			return mcp.NewToolResultError(fmt.Sprintf("file path must be within one of the configured docs directories (%s)", strings.Join(dirs, ", "))), nil
 		}
 
 		// Create parent directories if needed
@@ -76,7 +87,7 @@ func registerUpdateDocs(s *server.MCPServer, st *store.Store, cfg *config.Config
 		var result *indexer.IndexResult
 
 		if reindexScope == "full" {
-			result, err = idx.IndexDirectory(cfg.DocsDir, true)
+			result, err = idx.IndexDocs(cfg.ResolvedDocDirs(), true)
 		} else {
 			result, err = idx.IndexSingleFile(filePath, absFilePath, true)
 		}

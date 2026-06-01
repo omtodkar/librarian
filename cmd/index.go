@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -72,27 +73,32 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		cfg.Graph.MaxWorkers = indexWorkers
 	}
 
-	docsDir := cfg.DocsDir
+	// positional arg: index a single explicit dir (legacy behaviour, preserved).
+	singleDir := ""
 	if len(args) > 0 {
-		docsDir = args[0]
+		singleDir = args[0]
 	}
 
-	// Guard against a blank docs_dir — filepath.Abs("") resolves to CWD,
-	// which would silently feed every file in the working directory
-	// (source code, binaries, everything) through the doc handlers. The
-	// graph pass stays useful via cfg.ProjectRoot even if docs is unset,
-	// so we only require docsDir when the docs pass is actually running.
-	if !indexSkipDocs && docsDir == "" {
-		return fmt.Errorf("docs_dir is not configured — set it in .librarian/config.yaml or pass `librarian index <docs-dir>` (use --skip-docs if you only want the graph pass)")
+	// Validate multi-dir config before doing any real work. Skip when a
+	// single dir was supplied on the command line — that path bypasses the
+	// doc_dirs config entirely and goes straight to IndexDirectory.
+	if !indexSkipDocs && singleDir == "" {
+		if err := cfg.ValidateDocDirs(cfg.ProjectRoot); err != nil {
+			return fmt.Errorf("doc_dirs validation: %w", err)
+		}
 	}
 
-	absDir, err := filepath.Abs(docsDir)
-	if err != nil {
-		return fmt.Errorf("resolving docs directory: %w", err)
-	}
-
+	// For dry-run, pick the right dir(s) to preview.
 	if indexDryRun {
-		return runDryIndex(docsDir, absDir)
+		if singleDir != "" {
+			absDir, err := filepath.Abs(singleDir)
+			if err != nil {
+				return fmt.Errorf("resolving docs directory: %w", err)
+			}
+			return runDryIndex(singleDir, absDir)
+		}
+		dirs := cfg.ResolvedDocDirs()
+		return runDryIndexMulti(dirs)
 	}
 
 	embedder, err := embedding.NewEmbedder(cfg.Embedding)
@@ -138,12 +144,36 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	)
 
 	if !indexSkipDocs {
-		if !indexJSON {
-			fmt.Printf("Indexing documents from %s...\n", absDir)
-		}
-		docsRes, err = idx.IndexDirectory(docsDir, indexForce)
-		if err != nil {
-			return fmt.Errorf("docs pass: %w", err)
+		if singleDir != "" {
+			// Positional arg supplied: index that one directory via the single-dir path.
+			absDir, err := filepath.Abs(singleDir)
+			if err != nil {
+				return fmt.Errorf("resolving docs directory: %w", err)
+			}
+			if !indexJSON {
+				fmt.Printf("Indexing documents from %s...\n", absDir)
+			}
+			docsRes, err = idx.IndexDirectory(singleDir, indexForce)
+			if err != nil {
+				return fmt.Errorf("docs pass: %w", err)
+			}
+		} else {
+			// Multi-dir path: index all resolved doc dirs.
+			dirs := cfg.ResolvedDocDirs()
+			if !indexJSON {
+				fmt.Printf("Indexing documents from %s...\n", strings.Join(dirs, ", "))
+			}
+			docsRes, err = idx.IndexDocs(dirs, indexForce)
+			// IndexDocs returns (result, nil) even when every dir errored; surface
+			// per-dir errors. A hard error (e.g. embedder model mismatch) comes back
+			// as err != nil and is handled first.
+			if err != nil {
+				return fmt.Errorf("docs pass: %w", err)
+			}
+			if docsRes != nil && len(docsRes.Errors) > 0 && docsRes.DocumentsIndexed == 0 && docsRes.ChunksCreated == 0 {
+				// Every dir failed — don't silently exit 0.
+				return fmt.Errorf("docs pass: all directories failed to index; errors:\n%s", strings.Join(docsRes.Errors, "\n"))
+			}
 		}
 	}
 
@@ -288,5 +318,45 @@ func runDryIndex(docsDir, absDir string) error {
 		}
 	}
 
+	return nil
+}
+
+// runDryIndexMulti is the multi-dir variant of runDryIndex, used when no
+// positional [docs-dir] argument is given.  It walks each resolved dir
+// independently and prints a combined (or per-dir JSON) result.
+func runDryIndexMulti(dirs []string) error {
+	type dirResult struct {
+		DocsDir    string               `json:"docs_dir"`
+		FilesFound int                  `json:"files_found"`
+		Files      []indexer.WalkResult `json:"files"`
+	}
+
+	var results []dirResult
+	for _, dir := range dirs {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			return fmt.Errorf("resolving docs directory %s: %w", dir, err)
+		}
+		files, err := indexer.WalkDocs(dir, cfg.ExcludePatterns, indexer.DefaultRegistry(), cfg.ProjectRoot)
+		if err != nil {
+			// Warn and continue so the user sees what other dirs would produce.
+			fmt.Fprintf(os.Stderr, "warning: walking %s: %v\n", dir, err)
+			results = append(results, dirResult{DocsDir: absDir, FilesFound: 0})
+			continue
+		}
+		results = append(results, dirResult{DocsDir: absDir, FilesFound: len(files), Files: files})
+	}
+
+	if indexJSON {
+		out, _ := json.MarshalIndent(results, "", "  ")
+		fmt.Println(string(out))
+	} else {
+		for _, r := range results {
+			fmt.Printf("Dry run - would index %d files from %s:\n", r.FilesFound, r.DocsDir)
+			for _, f := range r.Files {
+				fmt.Printf("  %s\n", f.FilePath)
+			}
+		}
+	}
 	return nil
 }

@@ -3,7 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -56,13 +56,12 @@ func runReindex(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("specify --rebuild-vectors to confirm a full vector rebuild (this will re-embed every chunk)")
 	}
 
-	if cfg.DocsDir == "" {
-		return fmt.Errorf("docs_dir is not configured — set it in .librarian/config.yaml before running reindex")
-	}
-
-	absDir, err := filepath.Abs(cfg.DocsDir)
-	if err != nil {
-		return fmt.Errorf("resolving docs directory: %w", err)
+	// Validate resolved doc dirs — ResolvedDocDirs() always returns at least
+	// ["docs"], so this only fails when config entries overlap or escape the
+	// workspace root.
+	dirs := cfg.ResolvedDocDirs()
+	if err := cfg.ValidateDocDirs(cfg.ProjectRoot); err != nil {
+		return fmt.Errorf("doc_dirs validation: %w", err)
 	}
 
 	embedder, err := embedding.NewEmbedder(cfg.Embedding)
@@ -97,11 +96,16 @@ func runReindex(cmd *cobra.Command, args []string) error {
 	}
 
 	if !reindexJSON {
-		fmt.Printf("Re-embedding documents from %s with %s...\n", absDir, embedder.Model())
+		fmt.Printf("Re-embedding documents from %s with %s...\n", strings.Join(dirs, ", "), embedder.Model())
 	}
-	docsRes, err := idx.IndexDirectory(cfg.DocsDir, true)
+	docsRes, err := idx.IndexDocs(dirs, true)
 	if err != nil {
 		return fmt.Errorf("docs pass: %w", err)
+	}
+	// IndexDocs returns (result, nil) even when every dir errored; surface a
+	// hard error so the caller knows the reindex produced nothing.
+	if docsRes != nil && len(docsRes.Errors) > 0 && docsRes.DocumentsIndexed == 0 && docsRes.ChunksCreated == 0 {
+		return fmt.Errorf("docs pass: all directories failed to reindex; errors:\n%s", strings.Join(docsRes.Errors, "\n"))
 	}
 
 	if reindexJSON {
