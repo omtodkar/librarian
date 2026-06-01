@@ -56,7 +56,7 @@ func Run(rc RunConfig) (*Result, error) {
 		rc.Threshold = 0.85
 	}
 	if rc.FAQDir == "" {
-		rc.FAQDir = filepath.Join(rc.Cfg.DocsDir, "faqs")
+		rc.FAQDir = filepath.Join(rc.Cfg.ResolvedDocDirs()[0], "faqs")
 	}
 	if rc.ScanGit == nil {
 		rc.ScanGit = ScanGitLog

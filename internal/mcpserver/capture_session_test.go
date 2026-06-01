@@ -325,6 +325,152 @@ func TestCaptureSession_SpecialCharsInFrontmatter(t *testing.T) {
 	}
 }
 
+// setupMultiDirEnv creates a temp workspace with two docs directories and an
+// open store. The config uses DocDirs (multi-dir) to exercise ResolvedDocDirs.
+func setupMultiDirEnv(t *testing.T) (*store.Store, *config.Config, string, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	dir1 := filepath.Join(tmp, "primary-docs")
+	dir2 := filepath.Join(tmp, "secondary-docs")
+	for _, d := range []string{dir1, dir2} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{
+		DocDirs: []string{dir1, dir2},
+		Chunking: config.ChunkingConfig{
+			MaxTokens:    512,
+			MinTokens:    10,
+			OverlapLines: 0,
+		},
+	}
+	return st, cfg, dir1, dir2
+}
+
+// TestCaptureSession_DefaultsToFirstDocDir verifies that when docs_dir is
+// omitted the file is written under ResolvedDocDirs()[0] (the primary dir).
+func TestCaptureSession_DefaultsToFirstDocDir(t *testing.T) {
+	st, cfg, primaryDir, _ := setupMultiDirEnv(t)
+
+	result := callCaptureTool(t, st, cfg, map[string]any{
+		"title": "Primary Dir Default",
+		"body":  "Content verifying the primary docs dir is used when docs_dir is omitted.",
+	})
+
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", toolResultText(t, result))
+	}
+
+	today := time.Now().Format("2006-01-02")
+	expectedPath := filepath.Join(primaryDir, "sessions", today+"-primary-dir-default.md")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Errorf("file not found at primary dir path %s: %v", expectedPath, err)
+	}
+}
+
+// TestCaptureSession_DocsDirOverride verifies that supplying docs_dir routes
+// the write to the specified configured directory.
+func TestCaptureSession_DocsDirOverride(t *testing.T) {
+	st, cfg, primaryDir, secondaryDir := setupMultiDirEnv(t)
+
+	result := callCaptureTool(t, st, cfg, map[string]any{
+		"title":    "Secondary Dir Override",
+		"body":     "Content verifying that an explicit docs_dir routes to the secondary directory.",
+		"docs_dir": secondaryDir,
+	})
+
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", toolResultText(t, result))
+	}
+
+	today := time.Now().Format("2006-01-02")
+	inSecondary := filepath.Join(secondaryDir, "sessions", today+"-secondary-dir-override.md")
+	if _, err := os.Stat(inSecondary); err != nil {
+		t.Errorf("file not found in secondary dir at %s: %v", inSecondary, err)
+	}
+
+	// The file must NOT appear in the primary dir.
+	inPrimary := filepath.Join(primaryDir, "sessions", today+"-secondary-dir-override.md")
+	if _, err := os.Stat(inPrimary); err == nil {
+		t.Errorf("file must not be written to primary dir %s", inPrimary)
+	}
+}
+
+// TestCaptureSession_InvalidDocsDirReturnsError verifies that an unrecognised
+// docs_dir value is rejected with a clear error listing the valid choices.
+func TestCaptureSession_InvalidDocsDirReturnsError(t *testing.T) {
+	st, cfg, _, _ := setupMultiDirEnv(t)
+
+	result := callCaptureTool(t, st, cfg, map[string]any{
+		"title":    "Invalid Dir Test",
+		"body":     "This capture targets an unconfigured directory and should fail.",
+		"docs_dir": "/tmp/not-a-configured-dir",
+	})
+
+	if !result.IsError {
+		t.Fatal("expected tool error for invalid docs_dir, got success")
+	}
+	text := toolResultText(t, result)
+	if !strings.Contains(text, "not a configured docs directory") {
+		t.Errorf("error message should mention 'not a configured docs directory'; got: %s", text)
+	}
+}
+
+// TestCaptureSession_RelativeDocDirsWithProjectRoot verifies that when
+// DocDirs entries are relative (the normal production case) and ProjectRoot is
+// set, passing the corresponding absolute path as docs_dir validates correctly,
+// and the captured file lands under ProjectRoot/relDir/subDir/filename.
+func TestCaptureSession_RelativeDocDirsWithProjectRoot(t *testing.T) {
+	tmp := t.TempDir()
+	// Relative dir entry — as it would appear in a real workspace config.
+	relDocDir := "proto/docs"
+	absDocDir := filepath.Join(tmp, "proto", "docs")
+	if err := os.MkdirAll(absDocDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(tmp, "test.db"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	cfg := &config.Config{
+		// Relative entry — the production invariant.
+		DocDirs:     []string{relDocDir},
+		ProjectRoot: tmp,
+		Chunking: config.ChunkingConfig{
+			MaxTokens:    512,
+			MinTokens:    10,
+			OverlapLines: 0,
+		},
+	}
+
+	// Pass the ABSOLUTE form of the docs_dir arg — this is the mismatch the
+	// bug caused: relative config entry vs absolute caller arg.
+	result := callCaptureTool(t, st, cfg, map[string]any{
+		"title":    "Relative Dir Test",
+		"body":     "Verifying that a relative doc_dir config entry matches an absolute docs_dir arg.",
+		"docs_dir": absDocDir,
+	})
+
+	if result.IsError {
+		t.Fatalf("expected success but got error: %s", toolResultText(t, result))
+	}
+
+	today := time.Now().Format("2006-01-02")
+	// File must land under ProjectRoot/relDocDir/sessions/<date>-<slug>.md.
+	expectedPath := filepath.Join(tmp, relDocDir, "sessions", today+"-relative-dir-test.md")
+	if _, statErr := os.Stat(expectedPath); statErr != nil {
+		t.Errorf("file not written at expected path %s: %v", expectedPath, statErr)
+	}
+}
+
 // TestSlugify covers the slug generation helper.
 func TestSlugify(t *testing.T) {
 	cases := []struct{ in, want string }{
