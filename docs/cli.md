@@ -53,11 +53,16 @@ Creates `.librarian/` in the current directory with default templates: `config.y
 ```sh
 librarian init
 librarian init --with-reranker   # also download the in-process ONNX reranker
+librarian init --doc-dir docs --doc-dir proto/docs   # specify docs directories instead of auto-detect
 ```
+
+**Auto-detection** (`doc_dirs`): By default, `init` scans the workspace root and immediate child directories one level deep for `docs/` subdirectories (including a root-level `docs/`). If found, it confirms the list with you (on a TTY), or proceeds silently in non-interactive mode (CI, piped input). The discovered directories are written to `doc_dirs:` in the generated `config.yaml`. When exactly one or zero directories are detected, it falls back to `docs_dir: docs` (single string) for simplicity.
+
+**Override auto-detection**: use the repeatable `--doc-dir` flag to specify exact directories instead of auto-detection. Multiple `--doc-dir` entries form the `doc_dirs` array.
 
 `--with-reranker` downloads the default ONNX reranker (~300 MB model + ONNX runtime) into the shared models cache after the workspace is created. A download failure is a warning, not fatal — the workspace is still initialized and you can retry with `librarian models pull`.
 
-After init, edit `.librarian/config.yaml`, set `LIBRARIAN_EMBEDDING_API_KEY` in your environment, then run `librarian index`.
+After init, edit `.librarian/config.yaml` if needed (add/remove `doc_dirs` entries), set `LIBRARIAN_EMBEDDING_API_KEY` in your environment, then run `librarian index`.
 
 ### `librarian install [--all|--platforms=...]`
 
@@ -115,17 +120,19 @@ Caveat — **Aider**: uninstall prints a reminder to remove `read: [CONVENTIONS.
 
 ### `librarian index [docs-dir]`
 
-Runs two passes: the **docs pass** over `docs_dir` (produces documents + chunks + vectors) and the **graph pass** over the workspace root (produces code-symbol nodes + `contains` / `import` edges). Together they populate documents, chunks, code_files, graph_nodes, and graph_edges. See [Indexing Pipeline](indexing.md) for detail.
+Runs two passes: the **docs pass** over configured `doc_dirs` (produces documents + chunks + vectors) and the **graph pass** over the workspace root (produces code-symbol nodes + `contains` / `import` edges). Together they populate documents, chunks, code_files, graph_nodes, and graph_edges. See [Indexing Pipeline](indexing.md) for detail.
 
 ```sh
-librarian index                   # default: run both passes
-librarian index docs/             # docs pass uses this directory
+librarian index                   # default: run both passes over all configured doc_dirs
+librarian index docs/             # docs pass over this single directory only (ignores doc_dirs config)
 librarian index --force           # ignore content hashes, re-index everything
 librarian index --skip-graph      # run only the docs pass
 librarian index --skip-docs       # run only the graph pass
 librarian index --dry-run         # show files that would be indexed (docs pass)
 librarian index --json            # machine-readable summary
 ```
+
+**Multi-directory indexing**: When no positional `[docs-dir]` is provided, the docs pass walks all configured `doc_dirs` entries in order, indexing the union of all directories. When a single `[docs-dir]` positional argument is given, only that directory is indexed in the docs pass (and the configured `doc_dirs` are ignored for this run).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -152,16 +159,18 @@ Writes content to a file (under `docs_dir`) and re-indexes it. Convenient for pr
 
 ### `librarian reindex --rebuild-vectors`
 
-Drops `doc_chunk_vectors`, `doc_chunks`, and `embedding_meta`, then re-runs the docs indexing pass with `--force`. The supported recovery path when `librarian index` refuses to run with an `embedding model/dimension mismatch` after you change the embedding model or provider in `.librarian/config.yaml`.
+Drops `doc_chunk_vectors`, `doc_chunks`, and `embedding_meta`, then re-runs the docs indexing pass with `--force` over all configured `doc_dirs`. The supported recovery path when `librarian index` refuses to run with an `embedding model/dimension mismatch` after you change the embedding model or provider in `.librarian/config.yaml`.
 
 | Flag | Default | Description |
 |---|---|---|
 | `--rebuild-vectors` | `false` | Required today. Future reindex modes (e.g. selective-file) will add their own flags. |
 | `--json` | `false` | Emit the reindex summary as JSON |
 
-**Cost note**: every chunk gets re-embedded. On paid providers this is billable for every chunk in `docs_dir`. A local LM Studio / Ollama endpoint is free.
+**Cost note**: every chunk gets re-embedded. On paid providers this is billable for every chunk in all `doc_dirs`. A local LM Studio / Ollama endpoint is free.
 
 **Scope note**: the code-graph pass is not re-run — the graph doesn't use embeddings and is unaffected by model changes. Run `librarian index --skip-docs` separately if the graph also needs refreshing.
+
+**Migration note**: when switching from `docs_dir` (single string) to `doc_dirs` (array), or when changing the set of `doc_dirs` entries, the stored document paths change. Run `librarian reindex` to rebuild the index under the new paths, then run `librarian index --prune-missing` to clean up old document rows from previous paths.
 
 ## Retrieval commands
 

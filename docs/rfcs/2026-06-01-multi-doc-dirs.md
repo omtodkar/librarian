@@ -1,6 +1,6 @@
 # RFC: Multiple docs directories (`doc_dirs`)
 
-- **Status**: Draft / proposed (plan-first; no code yet)
+- **Status**: Implemented (Phase 2, lib-avnk)
 - **Date**: 2026-06-01 (Asia/Kolkata)
 - **Author**: design captured with Claude Code
 - **Motivating case**: `~/Workspace/Akaya` — a meta/container repo whose sub-repos
@@ -141,46 +141,31 @@ Implementation notes:
   relative path — stored keys are unchanged. Only unusual invocations (running
   from a subdir) change, for the better.
 
-### 3.3 Indexer
+### 3.3 Indexer (IMPLEMENTED)
 
-Two options; recommend **B** (smaller, lower-risk):
-
-- **A.** New `IndexDocs(dirs []string, force bool) (*IndexResult, error)` that
-  walks all dirs and prunes once over the union.
-- **B.** Keep `IndexDirectory(dir, force)` per-dir; add a thin orchestrator that
-  loops the resolved dirs, aggregates `IndexResult` counts, and runs **a single
-  union-aware prune at the end**. Callers (`index`, `reindex`, `update`,
-  `update_docs`) switch to the orchestrator.
-
-Either way the critical correctness point is pruning (next).
+Implemented **option B** (smaller, lower-risk): kept `IndexDirectory(dir, force)` per-dir and added a thin orchestrator that loops the resolved dirs and aggregates `IndexResult` counts. The critical correctness point is pruning (see §3.4 below).
 
 ### 3.4 Pruning — already multi-dir-safe (verified)
 
-I initially flagged pruning as the big risk. After reading `prune.go` it isn't —
-**the existing prune is stat-based, not walk-membership-based**, so multi-dir
-needs no special handling here:
+Pruning is **stat-based, not walk-membership-based**, so multi-dir needs no special handling:
 
 - Normal `librarian index` does **not** blanket-prune the docs tree. It only
   reconstitutes/cleans files surfaced via another reindexed file's
-  affected-paths set (the lib-get2 inline path). So indexing `proto/docs` will
-  **not** delete `astro-engine/docs` rows — there is no "delete everything not
-  in this walk" step to worry about.
+  affected-paths set. So indexing `proto/docs` will **not** delete `astro-engine/docs`
+  rows — there is no "delete everything not in this walk" step.
 - `--prune-missing` (`PruneMissingFiles`, opt-in) iterates **every** `documents`
-  row, `os.Stat`s its stored path, and deletes only on `fs.ErrNotExist`
-  (`prune.go:112-134`). Because it keys off real on-disk existence rather than
-  membership in any single dir's walk, it is **union-safe by construction** — a
-  doc under `astro-engine/docs` survives a prune run triggered while reindexing
-  `proto/docs`, as long as the file still exists.
+  row, `os.Stat`s its stored path, and deletes only on `fs.ErrNotExist`.
+  Because it keys off real on-disk existence rather than membership in any single dir's walk,
+  it is **union-safe by construction** — a doc under `astro-engine/docs` survives
+  a prune run triggered while reindexing `proto/docs`, as long as the file still exists.
 
-So the orchestrator can simply loop `IndexDirectory` per dir; prune semantics
-carry over unchanged. The one real caveat is the documented hazard at
-`prune.go:50-54`: stored paths reflect the config **at original index time**.
-If `doc_dirs` changes, old-path rows linger until a full reindex (which
-overwrites/refreshes paths) followed by `--prune-missing`. That's a migration
-note (§4), not new prune logic.
+The orchestrator simply loops `IndexDirectory` per dir; then `buildGraphEdges` runs a single
+pass over the **union of all dirs' files** so cross-dir `shared_code_ref` edges materialize.
+Prune semantics carry over unchanged.
 
-Still worth a regression test: index dirs A+B, delete a file in A, run
-`index --prune-missing` → only A's stale doc removed, B untouched.
+The documented hazard: stored paths reflect the config **at original index time**.
+If `doc_dirs` changes, old-path rows linger until a full reindex followed by `--prune-missing`.
+This is a **migration note** (§4), not new prune logic.
 
 ### 3.5 `librarian init` — auto-detect + confirm (chosen UX)
 
@@ -240,9 +225,10 @@ know paths are workspace-relative.
   no reindex.
 - **Migration to multi-dir**: switching Akaya from `docs_dir: docs` (a dir that
   may not even exist at root) to `doc_dirs: [proto/docs, …]` changes the set of
-  stored paths → requires a **full reindex** (`librarian reindex`). Because the
-  old paths won't be in the new union, the union-aware prune cleans them up
-  automatically. Call this out in the changelog/docs.
+  stored paths → requires a **full reindex** (`librarian reindex`). The stale
+  old-path rows are then cleaned up by the stat-based
+  `librarian index --prune-missing` sweep (§3.4), which deletes rows whose stored
+  path no longer exists on disk. Call this out in the changelog/docs.
 - If §3.2 (ProjectRoot-relative) is adopted, single-dir users whose stored paths
   were CWD-relative-but-run-from-root are unaffected (same string); only unusual
   invocations change.
@@ -295,18 +281,18 @@ know paths are workspace-relative.
   config lists them; single/zero → falls back cleanly.
 - Write path: `update_docs` accepts a file under a non-first doc_dir.
 
-## 8. Rollout (suggested beads epic)
+## 8. Rollout (completed — Phase 2, lib-avnk)
 
-1. Config field + `ResolvedDocDirs()` + validation (overlap/dupe) + tests.
-2. Indexer orchestrator looping dirs + aggregate result + integration test
+1. ✅ Config field + `ResolvedDocDirs()` + validation (overlap/dupe) + tests.
+2. ✅ Indexer orchestrator looping dirs + aggregate result + integration test
    (two sibling `DOCTRINE.md` → distinct paths, no UNIQUE error).
-3. Wire `index` / `reindex` / `update` / `update_docs` to the orchestrator.
-4. `init` auto-detect + confirm + `--doc-dir` flag.
-5. Write-side: primary-dir default for `capture_session`/FAQ, optional
+3. ✅ Wired `index` / `reindex` / `update` / `update_docs` to the orchestrator.
+4. ✅ `init` auto-detect + confirm + `--doc-dir` flag.
+5. ✅ Write-side: primary-dir default for `capture_session`/FAQ, optional
    `capture_session` `docs_dir` override (§3.6), + any-dir containment checks
    for `update`/`update_docs`.
-6. Docs + changelog + migration note.
-7. (Optional) §3.2 ProjectRoot-relative path hardening.
+6. ✅ Docs + changelog + migration note.
+7. ✅ §3.2 ProjectRoot-relative path hardening (decided and implemented in Phase 2, lib-avnk.2).
 
 ## 9. Decisions & open questions
 

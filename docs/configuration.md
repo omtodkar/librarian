@@ -27,7 +27,14 @@ Most commands walk up from the current directory looking for a `.librarian/` fol
 # librarian workspace config — team-wide, safe to commit.
 # API keys belong in environment variables (LIBRARIAN_EMBEDDING_API_KEY), not here.
 
+# Single docs directory:
 docs_dir: docs
+
+# Multiple docs directories (polyrepo / multi-repo):
+# doc_dirs:
+#   - docs
+#   - proto/docs
+#   - astro-engine/docs
 
 embedding:
   provider: gemini         # gemini | openai (or any OpenAI-compatible endpoint)
@@ -75,7 +82,8 @@ exclude_patterns:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `docs_dir` | string | `docs` | Directory with documentation to index (relative to workspace root) |
+| `doc_dirs` | []string | `["docs"]` | List of directories with documentation to index (relative to workspace root). For polyrepo / multi-repo workspaces. Each entry is deduplicated and validated: no overlaps (one must not be an ancestor of another) and all must be within the workspace root. Stored document paths are workspace-root-relative, disambiguating files with the same name in different sub-repos (e.g. `proto/docs/DOCTRINE.md` vs `astro-engine/docs/DOCTRINE.md`). When non-empty, `doc_dirs` takes precedence; see `docs_dir` below. |
+| `docs_dir` | string | `docs` | **DEPRECATED.** Single directory with documentation to index (relative to workspace root). Retained for backward compatibility as a deprecated alias. When `doc_dirs` is empty, `docs_dir` is wrapped into a single-element list and used; when `doc_dirs` is non-empty, `docs_dir` is ignored (a warning is issued if both are set). Existing single-dir configs keep working unchanged. |
 | `db_path` | string | `.librarian/librarian.db` | SQLite database path |
 | `code_file_patterns` | []string | see above | Glob patterns for file extensions recognised as code references in markdown |
 | `exclude_patterns` | []string | see above | Glob patterns skipped during the walk; stack on top of the hard-coded exclusions (`.git/`, `node_modules/`, `vendor/`, `.librarian/`) and `.librarian/ignore` |
@@ -353,7 +361,8 @@ All config fields bind to environment variables with the `LIBRARIAN_` prefix. Ne
 
 | Variable | Config field |
 |---|---|
-| `LIBRARIAN_DOCS_DIR` | `docs_dir` |
+| `LIBRARIAN_DOC_DIRS` | `doc_dirs` (array — not supported via env var; use config file) |
+| `LIBRARIAN_DOCS_DIR` | `docs_dir` (deprecated alias) |
 | `LIBRARIAN_DB_PATH` | `db_path` |
 | `LIBRARIAN_EMBEDDING_PROVIDER` | `embedding.provider` |
 | `LIBRARIAN_EMBEDDING_MODEL` | `embedding.model` |

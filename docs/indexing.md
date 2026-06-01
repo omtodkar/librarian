@@ -8,7 +8,7 @@ description: How the indexing pipeline walks the filesystem, dispatches files to
 
 `librarian index` turns a project's documentation + source into a searchable SQLite index. It runs **two passes** inside one invocation, each scoped to a different root:
 
-- **Docs pass** over `docs_dir` — produces chunks + vectors for the knowledge base (`search_docs`, `get_context`). Unchanged from earlier versions.
+- **Docs pass** over configured `doc_dirs` (one or more directories) — produces chunks + vectors for the knowledge base (`search_docs`, `get_context`). See §1 below.
 - **Graph pass** over the project root — parses every source file the walker hasn't excluded, projects code symbols into `graph_nodes`, and emits `contains` / `import` / `call` / `inherits` / `requires` / `part` edges. The `inherits` edge covers every class-family parent relationship — Java `extends`/`implements`, Python class bases, JS/TS class and interface heritage, Go interface embedding, Kotlin delegation_specifier heuristic, Swift per-flavor heuristic (class: first=extends + rest=conforms; struct/enum/extension: all=conforms; protocol: all=extends), Dart class heritage (extends + implements + with, all three relations in a single class declaration) — with the flavor carried in `Edge.Metadata.relation` (`extends`, `implements`, `mixes`, `conforms`, `embeds`). `requires` is Dart-specific for `mixin M on Base` constraints, kept distinct from `inherits` because the `on` clause is a use-site type bound, not a parent. `part` is Dart-specific for `part 'foo.dart'` / `part of 'bar.dart'` file-join directives (code_file → code_file). No chunks or vectors — structural only.
 
 The pipeline is format-agnostic: the walker doesn't know what a `.pdf` or `.py` file is — it dispatches to a handler registered for each extension (see [Handlers](handlers.md)).
@@ -19,7 +19,7 @@ The pipeline is format-agnostic: the walker doesn't know what a `.pdf` or `.py` 
    filesystem
        │
        ▼
- 1. Walk ────── find files under docs_dir, apply exclude_patterns
+ 1. Walk ────── find files under all configured doc_dirs, apply exclude_patterns
        │
        ▼
  2. Dispatch ── registry.HandlerFor(ext)  → FileHandler implementation
@@ -37,7 +37,10 @@ The pipeline is format-agnostic: the walker doesn't know what a `.pdf` or `.py` 
  6. Store ──── documents + doc_chunks + doc_chunk_vectors + code_files + refs
        │        + graph_nodes + graph_edges (mentions)
        ▼
- 7. Link ───── buildRelatedDocEdges — second pass, docs sharing code refs get edges
+ 7. Link ───── buildRelatedDocEdges — single pass over union of all dirs' files,
+       │        docs sharing code refs get edges
+       ▼
+ 8. Complete  (all configured doc_dirs indexed as one knowledge base)
 ```
 
 Key files:
@@ -51,13 +54,17 @@ Key files:
 
 ## Stage 1: Walk
 
-`WalkDocs(dir, excludePatterns, registry)` recursively traverses the workspace using `filepath.Walk`. A file is indexed if:
+`WalkDocs` recursively traverses each directory in the resolved `doc_dirs` list using `filepath.Walk`. For each directory, a file is indexed if:
 
 1. Its extension is registered with a `FileHandler` (i.e. the registry knows what to do with it)
 2. Its path doesn't match any `exclude_patterns` glob (config) or `.librarian/ignore` entry
 3. It doesn't fall under the hard-coded ignore list: `.git/`, `node_modules/`, `vendor/`, `.librarian/`
 
-Each matched file yields a `WalkResult` with the relative path (stored) + absolute path (for reading).
+Each matched file yields a `WalkResult` with the **workspace-root-relative path** (stored) + absolute path (for reading). The stored path is unique per file — because each `doc_dir` is prefixed and the dirs are deduplicated/non-overlapping, files with the same name in different `doc_dirs` get distinct stored paths. Example:
+- `proto/docs/DOCTRINE.md` indexed from `proto/docs` dir → stored as `proto/docs/DOCTRINE.md`
+- `astro-engine/docs/DOCTRINE.md` indexed from `astro-engine/docs` dir → stored as `astro-engine/docs/DOCTRINE.md`
+
+This design avoids file collisions across sub-repos in a polyrepo workspace.
 
 ## Stage 2: Dispatch
 
@@ -168,14 +175,14 @@ See [Storage Layer](storage.md) for CRUD detail.
 
 ## Stage 7: Link related docs
 
-After every file in the run has been indexed, `buildRelatedDocEdges` computes doc-to-doc edges:
+After every file in all configured `doc_dirs` has been indexed, `buildRelatedDocEdges` computes doc-to-doc edges over the union of all indexed files:
 
-1. Build reverse map `code_file_path → [doc_paths]` from `refs`.
-2. For each code file referenced by 2+ documents, add a `graph_edge{kind: "shared_code_ref"}` between every pair of those documents.
+1. Build reverse map `code_file_path → [doc_paths]` from all `refs` across all dirs.
+2. For each code file referenced by 2+ documents (from any `doc_dir`), add a `graph_edge{kind: "shared_code_ref"}` between every pair of those documents.
 
 Duplicates are avoided by tracking pairs in a set keyed by the two doc paths.
 
-The `get_context` MCP tool and the `librarian context` CLI command walk this layer to surface "here's what else in the docs references the same code".
+The `get_context` MCP tool and the `librarian context` CLI command walk this layer to surface "here's what else in the docs references the same code" — including cross-dir relationships in multi-repo workspaces.
 
 ## Graph pass — walking the project root
 

@@ -253,6 +253,43 @@ Callers that need to write source code or files outside `docs_dir` should use a 
 
 ---
 
+### `capture_session`
+
+Writes a session transcript or notes to a documentation file, re-indexes it, and returns the chunk IDs so the captured content is immediately searchable. The file path is workspace-root-relative (e.g. `docs/sessions/2026-01-01-my-session.md`).
+
+**Inputs:**
+
+| Parameter | Type | Required | Default | Stability | Description |
+|---|---|---|---|---|---|
+| `title` | string | yes | — | **STABLE** | Document title, used as the markdown heading |
+| `body` | string | yes | — | **STABLE** | Full markdown body of the session notes |
+| `category` | string | no | `"sessions"` | **STABLE** | Subdirectory within the primary docs dir: `"sessions"` (default), `"decisions"`, or `"faqs"` |
+| `session_id` | string | no | — | **STABLE** | Optional session identifier written to frontmatter for correlation |
+| `author` | string | no | — | **STABLE** | Optional author name written to frontmatter |
+| `docs_dir` | string | no | `<primary>` | **EXPERIMENTAL** | Optional target docs directory (one of the configured `doc_dirs`). When omitted, writes to the primary dir (first entry in `doc_dirs`). When provided, must match one of the configured dirs exactly; rejected otherwise with a clear error listing the valid options. Use this to file a session note into a specific sub-repo's docs tree (e.g. `astro-engine/docs`). The category subdir (`sessions/`, `decisions/`, `faqs/`) and filename logic are unchanged — only the base docs dir is selectable. |
+
+**Output:** Plain text. First line: `Captured to <file_path>`. Then a `Re-indexed:` block with `Documents:`, `Chunks:`, `Code refs:` counts, and an `Errors:` count + list if any indexing errors occurred.
+
+**Stability notes:**
+- `Captured to <path>` first-line format is **STABLE**.
+- The `Documents:` / `Chunks:` / `Code refs:` label names are **STABLE**.
+- `Errors:` section only appears when errors > 0; its presence is **STABLE**, individual error message text is **INTERNAL**.
+- The `docs_dir` parameter is **EXPERIMENTAL** — it may change with deprecation notice in a future minor release. Today it is a string naming one of the configured `doc_dirs`; future versions may accept numeric indices or other selection mechanisms.
+
+Safety: validates that the target `docs_dir` is one of the configured `doc_dirs` (when provided), and that the resolved absolute path is inside the selected docs dir. Writes outside that directory are rejected. Not read-only.
+
+Flow:
+
+1. Validate `docs_dir` (if provided) against the configured list; default to primary (`ResolvedDocDirs()[0]`).
+2. Resolve the target directory and construct the file path: `<target_docs_dir>/<category>/<slug>.md`.
+3. Create parent directories as needed.
+4. Write the frontmatter + body to the file.
+5. Re-index the file and return chunk IDs.
+
+For multi-repo workspaces, use the `docs_dir` parameter to file session notes into the appropriate sub-repo's docs tree (e.g. capture notes on an `astro-engine` feature into `astro-engine/docs/sessions/…`).
+
+---
+
 ### `trace_rpc`
 
 End-to-end trace of a gRPC RPC in one call: proto declaration, every language's generated-code implementation (via `implements_rpc` graph edges), input/output message fields (recursively resolved to depth 3), sibling RPCs on the same service, and a BFS caller walk up to depth 3.
