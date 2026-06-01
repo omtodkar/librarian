@@ -236,13 +236,17 @@ func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, er
 	// `--verbose` affect both loops consistently. The helper auto-selects
 	// verbose below 500 files (today's default behaviour) unless overridden.
 	progress := newIndexProgress(len(files), idx.progressMode())
+
+	// Use an accumulator so chunks from all files in this directory pack into
+	// full batchSize-sized EmbedBatch calls instead of one call per document.
+	acc := newEmbedAccumulator(idx.embedder, idx.cfg.Embedding.BatchSize, idx, result, progress)
 	for _, file := range files {
-		err := idx.indexFile(file, result, force)
-		if err != nil {
+		if err := acc.addFile(file, force); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %s", file.FilePath, err))
+			progress.tick(file.FilePath, true)
 		}
-		progress.tick(file.FilePath, err != nil)
 	}
+	acc.finalize()
 	progress.finish()
 
 	// Populate graph: document and code-file nodes + mentions and shared_code_ref edges.
@@ -252,56 +256,78 @@ func (idx *Indexer) IndexDirectory(docsDir string, force bool) (*IndexResult, er
 }
 
 // IndexDocs indexes each directory in docsDirs in turn and returns a single
-// aggregated IndexResult. It is a thin orchestrator over IndexDirectory — each
-// directory is walked independently so their stored file_paths are namespaced
-// by the directory prefix (e.g. "proto/docs/DOCTRINE.md" vs
+// aggregated IndexResult. It is a thin orchestrator that uses a single
+// cross-directory embedAccumulator so chunks from different doc_dirs are packed
+// into the same EmbedBatch calls — maximising utilisation of each batch_size
+// wave instead of emitting one call per document or one call per directory.
+//
+// Directory namespacing: each directory is walked independently so stored
+// file_paths are relative to cfg.ProjectRoot (e.g. "proto/docs/DOCTRINE.md" vs
 // "astro-engine/docs/DOCTRINE.md") and there are no UNIQUE-constraint
 // collisions.
 //
 // Errors from individual directories are collected rather than aborting: all
-// directories are attempted even if one fails. A per-directory walk error is
-// surfaced via the Errors slice. Callers (CLI / MCP) should switch to this
-// method in Phase 3; IndexDirectory remains available for single-dir use.
+// directories are walked even if one fails. A per-directory walk error is
+// surfaced via the Errors slice.
 //
-// Cross-dir shared_code_ref edges: IndexDirectory emits buildGraphEdges for
-// its own dir's files, but that pass only sees files within that dir, so two
-// docs in *different* doc_dirs that reference the same code file never get a
-// shared_code_ref edge from the per-dir call alone. After all per-dir passes
-// complete, IndexDocs runs a single union buildGraphEdges over the combined
-// WalkResult set so cross-dir edges materialize. The linked dedup map inside
-// buildGraphEdges makes this re-run idempotent — per-dir edges already built
-// are not double-inserted.
+// Cross-dir shared_code_ref edges: after all docs are finalized, a single union
+// buildGraphEdges pass over all dirs' files materializes shared_code_ref edges
+// between docs in different dirs that reference the same code file. The dedup
+// map inside buildGraphEdges makes this idempotent.
 func (idx *Indexer) IndexDocs(docsDirs []string, force bool) (*IndexResult, error) {
 	aggregate := &IndexResult{}
-	var unionFiles []WalkResult
 
-	for _, dir := range docsDirs {
-		res, err := idx.IndexDirectory(dir, force)
-		if err != nil {
-			aggregate.Errors = append(aggregate.Errors, fmt.Sprintf("%s: %s", dir, err))
-			continue
-		}
-		aggregate.DocumentsIndexed += res.DocumentsIndexed
-		aggregate.ChunksCreated += res.ChunksCreated
-		aggregate.CodeFilesFound += res.CodeFilesFound
-		aggregate.Skipped += res.Skipped
-		aggregate.Errors = append(aggregate.Errors, res.Errors...)
-
-		// Collect this dir's walk results for the cross-dir shared_code_ref pass.
-		walked, walkErr := WalkDocs(dir, idx.cfg.ExcludePatterns, idx.registry, idx.cfg.ProjectRoot)
-		if walkErr == nil {
-			unionFiles = append(unionFiles, walked...)
-		}
-		// Walk errors here are non-fatal (IndexDirectory already succeeded);
-		// the union pass simply misses this dir's files, which is acceptable —
-		// per-dir edges were already built by IndexDirectory.
+	// Fail fast on a model swap once, before touching any directory.
+	if err := idx.store.VerifyActiveEmbedder(idx.embedder.Model()); err != nil {
+		return nil, err
 	}
 
-	// Single cross-dir pass: emits shared_code_ref edges between docs in
-	// different dirs that reference the same code file. Per-dir edges emitted
-	// by IndexDirectory are skipped via the linked dedup map inside
-	// buildGraphEdges, so this call is safe to repeat.
-	if len(unionFiles) > 1 {
+	// Phase 1: walk all dirs and collect their WalkResult lists.
+	type dirFiles struct {
+		dir   string
+		files []WalkResult
+	}
+	var allDirs []dirFiles
+	var totalFiles int
+	for _, dir := range docsDirs {
+		files, err := WalkDocs(dir, idx.cfg.ExcludePatterns, idx.registry, idx.cfg.ProjectRoot)
+		if err != nil {
+			aggregate.Errors = append(aggregate.Errors, fmt.Sprintf("%s: walking: %s", dir, err))
+			continue
+		}
+		allDirs = append(allDirs, dirFiles{dir: dir, files: files})
+		totalFiles += len(files)
+	}
+
+	if totalFiles == 0 {
+		return aggregate, nil
+	}
+
+	// Phase 2: feed all files from all dirs into a single accumulator so
+	// chunks pack across directory boundaries.
+	progress := newIndexProgress(totalFiles, idx.progressMode())
+	acc := newEmbedAccumulator(idx.embedder, idx.cfg.Embedding.BatchSize, idx, aggregate, progress)
+
+	for _, df := range allDirs {
+		for _, file := range df.files {
+			if err := acc.addFile(file, force); err != nil {
+				aggregate.Errors = append(aggregate.Errors, fmt.Sprintf("%s: %s", file.FilePath, err))
+				progress.tick(file.FilePath, true)
+			}
+		}
+	}
+	acc.finalize()
+	progress.finish()
+
+	// Phase 3: single union buildGraphEdges pass over all dirs' files.
+	// Emits shared_code_ref edges between docs in different dirs that
+	// reference the same code file. The dedup map inside buildGraphEdges
+	// makes this safe to run even if a dir had walk errors.
+	var unionFiles []WalkResult
+	for _, df := range allDirs {
+		unionFiles = append(unionFiles, df.files...)
+	}
+	if len(unionFiles) > 0 {
 		idx.buildGraphEdges(unionFiles)
 	}
 
@@ -1044,6 +1070,38 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		return nil
 	}
 
+	meta := &parsedDocMeta{
+		title:       parsed.Title,
+		docType:     parsed.DocType,
+		summary:     parsed.Summary,
+		headings:    parsed.Headings,
+		frontmatter: parsed.Frontmatter,
+		contentHash: contentHash,
+		rawContent:  parsed.RawContent,
+		refs:        parsed.Refs,
+	}
+	if err := idx.storeIndexedDoc(file, meta, chunks, vectors, result, nil); err != nil {
+		return fmt.Errorf("creating document: %w", err)
+	}
+	return nil
+}
+
+// storeIndexedDoc is the shared store-write tail used by both indexFile and
+// embedAccumulator.finalizeDoc. It handles the successCount==0 guard,
+// AddDocument, per-chunk insertion (skipping nil vectors), code-file
+// references, and handler-emitted structured refs. progress.tick is called
+// on both error and success paths (nil-safe, so indexFile passes nil).
+//
+// Returns an error only if AddDocument itself fails; all other per-item
+// errors are appended to result.Errors so the run continues.
+func (idx *Indexer) storeIndexedDoc(
+	file WalkResult,
+	meta *parsedDocMeta,
+	chunks []Chunk,
+	vectors [][]float64,
+	result *IndexResult,
+	progress *indexProgress,
+) error {
 	// Count how many embeddings succeeded so ChunkCount is accurate and we
 	// skip the document insert entirely when none land (e.g. all per-item
 	// fallbacks failed).
@@ -1055,21 +1113,27 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	}
 	if successCount == 0 {
 		result.Errors = append(result.Errors, fmt.Sprintf("batch embed (%d chunks): all embeddings failed", len(chunks)))
+		if progress != nil {
+			progress.tick(file.FilePath, true)
+		}
 		return nil
 	}
 
-	doc, err := idx.store.AddDocument(store.AddDocumentInput{
+	storeDoc, err := idx.store.AddDocument(store.AddDocumentInput{
 		FilePath:    file.FilePath,
-		Title:       parsed.Title,
-		DocType:     parsed.DocType,
-		Summary:     parsed.Summary,
-		Headings:    HeadingsToJSON(parsed.Headings),
-		Frontmatter: FrontmatterToJSON(parsed.Frontmatter),
-		ContentHash: contentHash,
+		Title:       meta.title,
+		DocType:     meta.docType,
+		Summary:     meta.summary,
+		Headings:    HeadingsToJSON(meta.headings),
+		Frontmatter: FrontmatterToJSON(meta.frontmatter),
+		ContentHash: meta.contentHash,
 		ChunkCount:  uint32(successCount),
 	})
 	if err != nil {
-		return fmt.Errorf("creating document: %w", err)
+		if progress != nil {
+			progress.tick(file.FilePath, true)
+		}
+		return err // caller wraps (indexFile) or records (finalizeDoc) as appropriate
 	}
 
 	// Resolve per-chunk summaries via summary_cache (keyed on SHA-256 of
@@ -1093,7 +1157,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 			SectionHierarchy: HierarchyToJSON(chunk.SectionHierarchy),
 			ChunkIndex:       chunk.ChunkIndex,
 			TokenCount:       chunk.TokenCount,
-			DocID:            doc.ID,
+			DocID:            storeDoc.ID,
 			SignalMeta:       chunk.SignalMeta,
 			Model:            model,
 		})
@@ -1104,7 +1168,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 		result.ChunksCreated++
 	}
 
-	codeRefs := ExtractCodeReferences(parsed.RawContent, idx.cfg.CodeFilePatterns)
+	codeRefs := ExtractCodeReferences(meta.rawContent, idx.cfg.CodeFilePatterns)
 	for _, ref := range codeRefs {
 		// GetCodeFileByPath returns (nil, nil) when not found (post round
 		// 2 semantic). The docs pass inserts on first reference.
@@ -1121,7 +1185,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 			}
 		}
 
-		err = idx.store.AddReference(doc.ID, cf.ID, ref.Context)
+		err = idx.store.AddReference(storeDoc.ID, cf.ID, ref.Context)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("reference %s: %s", ref.FilePath, err))
 			continue
@@ -1133,7 +1197,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	// references, etc.) flow straight into graph_edges. These bypass the
 	// refs/code_files tables because their targets (symbols, config keys) don't
 	// fit that file-centric schema. For a markdown file where the handler only
-	// populates codeRefs via the regex pass above, parsed.Refs is empty and
+	// populates codeRefs via the regex pass above, meta.refs is empty and
 	// this loop is a no-op.
 	//
 	// Symbol-scoped refs (ref.Source populated) would anchor at sym:<Source>
@@ -1143,7 +1207,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	//
 	// Target nodes use UpsertPlaceholderNode (see graph pass comment for the
 	// same call — doesn't clobber resolved symbols' metadata on ordering).
-	for _, ref := range parsed.Refs {
+	for _, ref := range meta.refs {
 		targetID := graphTargetID(ref)
 		if targetID == "" {
 			continue
@@ -1156,7 +1220,7 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 			Metadata:   targetNodeMetadataJSON(ref),
 		})
 		idx.store.UpsertEdge(store.Edge{
-			From:     refEdgeSource(ref, store.DocNodeID(doc.ID)),
+			From:     refEdgeSource(ref, store.DocNodeID(storeDoc.ID)),
 			To:       targetID,
 			Kind:     ref.Kind,
 			Metadata: refMetadataJSON(ref),
@@ -1164,6 +1228,9 @@ func (idx *Indexer) indexFile(file WalkResult, result *IndexResult, force bool) 
 	}
 
 	result.DocumentsIndexed++
+	if progress != nil {
+		progress.tick(file.FilePath, false)
+	}
 	return nil
 }
 
